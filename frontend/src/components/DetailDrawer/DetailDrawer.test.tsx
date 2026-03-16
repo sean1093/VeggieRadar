@@ -15,28 +15,33 @@ const mockProduceItem = {
   unit: '公斤',
 };
 
+const mockAllProduceItems = [
+  mockProduceItem,
+  { code: "A1", name: "番茄-黑柿", avg_price: 45.0, change_percent: 5.0, trend: [42, 43, 44, 46, 45], category: "果菜類", description: "香甜多汁的黑柿番茄", origin: "雲林", unit: "公斤" },
+];
+
 describe('DetailDrawer', () => {
   it('does not render when isOpen is false', () => {
-    render(<DetailDrawer isOpen={false} onClose={() => {}} item={mockProduceItem} />);
+    render(<DetailDrawer isOpen={false} onClose={() => {}} item={mockProduceItem} allProduceItems={mockAllProduceItems} />);
     expect(screen.queryByTestId('detail-drawer')).not.toBeInTheDocument();
   });
 
   it('renders when isOpen is true', () => {
-    render(<DetailDrawer isOpen={true} onClose={() => {}} item={mockProduceItem} />);
+    render(<DetailDrawer isOpen={true} onClose={() => {}} item={mockProduceItem} allProduceItems={mockAllProduceItems} />);
     expect(screen.getByTestId('detail-drawer')).toBeInTheDocument();
   });
 
   it('displays the detailed information of the produce item', () => {
-    render(<DetailDrawer isOpen={true} onClose={() => {}} item={mockProduceItem} />);
+    render(<DetailDrawer isOpen={true} onClose={() => {}} item={mockProduceItem} allProduceItems={mockAllProduceItems} />);
     expect(screen.getByText(mockProduceItem.name)).toBeInTheDocument();
-    expect(screen.getByText(`均價: $${mockProduceItem.avg_price}`)).toBeInTheDocument();
-    expect(screen.getByText(`分類: ${mockProduceItem.category}`)).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(`均價: \\$${mockProduceItem.avg_price.toFixed(1)}`))).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(`分類: ${mockProduceItem.category}`))).toBeInTheDocument();
     expect(screen.getByText(mockProduceItem.description)).toBeInTheDocument();
   });
 
   it('calls onClose when the close button is clicked', () => {
     const handleClose = vi.fn();
-    render(<DetailDrawer isOpen={true} onClose={handleClose} item={mockProduceItem} />);
+    render(<DetailDrawer isOpen={true} onClose={handleClose} item={mockProduceItem} allProduceItems={mockAllProduceItems} />);
     fireEvent.click(screen.getByRole('button', { name: /關閉|close/i })); // Assuming a close button
     expect(handleClose).toHaveBeenCalledTimes(1);
   });

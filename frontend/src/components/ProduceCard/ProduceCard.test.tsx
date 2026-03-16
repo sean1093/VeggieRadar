@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import ProduceCard from './ProduceCard';
 
 const mockProduceItem = {
@@ -9,6 +9,9 @@ const mockProduceItem = {
   change_percent: -12.5,
   trend: [28, 27, 29, 26, 25.4],
   category: '葉菜類',
+  description: '新鮮甘藍',
+  origin: '台灣高山',
+  unit: '公斤',
 };
 
 const mockProduceItemUp = {
@@ -18,11 +21,14 @@ const mockProduceItemUp = {
   change_percent: 5.0,
   trend: [42, 43, 44, 46, 45.0],
   category: '果菜類',
+  description: '香甜多汁的黑柿番茄',
+  origin: '雲林',
+  unit: '公斤',
 };
 
 describe('ProduceCard', () => {
   it('renders the ProduceCard component with correct data', () => {
-    render(<ProduceCard item={mockProduceItem} />);
+    render(<ProduceCard item={mockProduceItem} onClick={vi.fn()} />);
 
     expect(screen.getByText(mockProduceItem.name)).toBeInTheDocument();
     expect(screen.getByText(`均價: $${mockProduceItem.avg_price}`)).toBeInTheDocument();
@@ -30,14 +36,14 @@ describe('ProduceCard', () => {
   });
 
   it('applies green color for negative change_percent (price down)', () => {
-    render(<ProduceCard item={mockProduceItem} />);
-    const changePercentElement = screen.getByText(`漲跌幅: ${mockProduceItem.change_percent}%`);
+    render(<ProduceCard item={mockProduceItem} onClick={vi.fn()} />);
+    const changePercentElement = screen.getByText(new RegExp(`漲跌幅: ${mockProduceItem.change_percent.toFixed(1)}%`));
     expect(changePercentElement).toHaveClass('text-green-500'); // Assuming green for down
   });
 
   it('applies red color for positive change_percent (price up)', () => {
-    render(<ProduceCard item={mockProduceItemUp} />);
-    const changePercentElement = screen.getByText(`漲跌幅: ${mockProduceItemUp.change_percent}%`);
+    render(<ProduceCard item={mockProduceItemUp} onClick={vi.fn()} />);
+    const changePercentElement = screen.getByText(new RegExp(`漲跌幅: ${mockProduceItemUp.change_percent.toFixed(1)}%`));
     expect(changePercentElement).toHaveClass('text-red-500'); // Assuming red for up
   });
 });

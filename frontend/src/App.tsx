@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import Header from './components/Header/Header';
 import ProduceGrid from './components/ProduceGrid/ProduceGrid';
 import ProduceFilter from './components/ProduceFilter/ProduceFilter';
 import DetailDrawer from './components/DetailDrawer/DetailDrawer'; // Import DetailDrawer
 import './App.css';
 
-interface ProduceItem {
+export interface ProduceItem {
   code: string;
   name: string;
   avg_price: number;

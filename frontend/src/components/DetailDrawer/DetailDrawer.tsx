@@ -52,7 +52,7 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
           <div className="mt-4 border-t pt-4">
             <h4 className="font-semibold text-md mb-2">建議替代品項 (價格較低):</h4>
             <ul className="list-disc pl-5">
-              {suggestions.map(sugg => (
+              {suggestions.map((sugg: ProduceItemDetail) => (
                 <li key={sugg.code} className="text-sm text-gray-700">
                   {sugg.name} - 均價: ${sugg.avg_price.toFixed(1)} ({sugg.change_percent.toFixed(1)}%)
                 </li>
