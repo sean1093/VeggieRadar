@@ -1,4 +1,5 @@
 import React from 'react';
+import ProduceCard from '../ProduceCard/ProduceCard'; // Import ProduceCard
 
 interface ProduceItem {
   code: string;
@@ -26,13 +27,7 @@ const ProduceGrid: React.FC<ProduceGridProps> = ({ items, loading = true }) => {
   return (
     <div data-testid="produce-grid" className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-4">
       {items.map((item) => (
-        <div key={item.code} className="border p-4 rounded-lg shadow">
-          <h3 className="font-bold text-lg">{item.name}</h3>
-          <p>均價: ${item.avg_price}</p>
-          <p>漲跌幅: {item.change_percent}%</p>
-          {/* Trend chart placeholder */}
-          <div className="h-16 bg-gray-100 mt-2 rounded"></div>
-        </div>
+        <ProduceCard key={item.code} item={item} />
       ))}
     </div>
   );
