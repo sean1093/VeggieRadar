@@ -6,7 +6,7 @@
  */
 
 // --- Configuration ---
-const AGRICULTURE_API_URL = "https://data.moa.gov.tw/Service/OpenData/FromM/FarmTransData.aspx";
+const AGRICULTURE_API_URL = "https://data.moa.gov.tw/Service/OpenData/FromM/AgriProductsTransType/";
 const MOA_API_KEY = PropertiesService.getScriptProperties().getProperty('MOA_API_KEY');
 
 // --- Main Web App Entry Point ---
@@ -36,12 +36,9 @@ function doGet(e) {
     }
 
     // 1. Fetch real-time data from Agriculture API for today and yesterday
-    const { todayData, yesterdayData } = fetchRealTimeData();
+    const { todayData, yesterdayData } = fetchRealTimeData(query);
 
-    // 2. Search and filter items by query keyword
-    const matchedItems = searchByKeyword(todayData, query);
-
-    if (matchedItems.length === 0) {
+    if (todayData.length === 0) {
       return ContentService.createTextOutput(JSON.stringify({
         error: "查無此品項",
         query: query
@@ -50,10 +47,19 @@ function doGet(e) {
         .setHeaders(headers);
     }
 
-    // 3. Process matched items (calculate change_percent, filter low volume)
-    const processedItems = processSearchResults(matchedItems, yesterdayData);
+    // 2. Process matched items (calculate change_percent, filter low volume)
+    const processedItems = processSearchResults(todayData, yesterdayData);
 
-    // 4. Construct the final JSON response
+    if (processedItems.length === 0) {
+      return ContentService.createTextOutput(JSON.stringify({
+        error: "查無符合條件的品項（可能交易量過低）",
+        query: query
+      }))
+        .setMimeType(ContentService.MimeType.JSON)
+        .setHeaders(headers);
+    }
+
+    // 3. Construct the final JSON response
     const currentDate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
     const responseData = {
       query: query,
@@ -79,10 +85,11 @@ function doGet(e) {
 
 /**
  * Fetches real-time data from Agriculture API for today and yesterday
+ * @param {string} cropName - Crop name to search for
  * @returns {Object} Object containing todayData and yesterdayData arrays
  */
-function fetchRealTimeData() {
-  Logger.log("Fetching real-time agriculture data...");
+function fetchRealTimeData(cropName) {
+  Logger.log(`Fetching real-time agriculture data for: ${cropName}`);
 
   // Calculate date range (today and yesterday for price comparison)
   const today = new Date();
@@ -92,32 +99,45 @@ function fetchRealTimeData() {
   const todayStr = formatDateForAPI(today);
   const yesterdayStr = formatDateForAPI(yesterday);
 
-  // Fetch today's data
-  const todayData = fetchDataByDate(todayStr, todayStr);
+  // Fetch today's data with crop name filter
+  const todayData = fetchDataByCropName(cropName, todayStr, todayStr);
   Logger.log(`Fetched ${todayData.length} items for today (${todayStr})`);
 
   // Fetch yesterday's data for price comparison
-  const yesterdayData = fetchDataByDate(yesterdayStr, yesterdayStr);
+  const yesterdayData = fetchDataByCropName(cropName, yesterdayStr, yesterdayStr);
   Logger.log(`Fetched ${yesterdayData.length} items for yesterday (${yesterdayStr})`);
 
   return { todayData, yesterdayData };
 }
 
 /**
- * Fetches data from Agriculture API for a specific date range
- * @param {string} startDate - Start date in format "111.01.01" (ROC calendar)
- * @param {string} endDate - End date in format "111.01.01" (ROC calendar)
+ * Fetches data from Agriculture API for a specific crop name and date range
+ * @param {string} cropName - Crop name to search for
+ * @param {string} startTime - Start date in format "111.01.01" (ROC calendar)
+ * @param {string} endTime - End date in format "111.01.01" (ROC calendar)
  * @returns {Array} Array of agricultural product data
  */
-function fetchDataByDate(startDate, endDate) {
+function fetchDataByCropName(cropName, startTime, endTime) {
   const allData = [];
-  const pageSize = 1000;
-  let skip = 0;
+  let page = null;
   let hasMoreData = true;
 
   // Fetch data with pagination
   while (hasMoreData) {
-    const url = `${AGRICULTURE_API_URL}?StartDate=${startDate}&EndDate=${endDate}&$top=${pageSize}&$skip=${skip}`;
+    // Build query parameters
+    const params = {
+      CropName: cropName,
+      Start_time: startTime,
+      End_time: endTime
+    };
+
+    // Add page parameter if exists
+    if (page) {
+      params.Page = page;
+    }
+
+    // Build URL with query parameters
+    const url = buildURLWithParams(AGRICULTURE_API_URL, params);
 
     try {
       const response = UrlFetchApp.fetch(url, {
@@ -125,30 +145,45 @@ function fetchDataByDate(startDate, endDate) {
         headers: MOA_API_KEY ? { 'Authorization': `Bearer ${MOA_API_KEY}` } : {}
       });
 
-      const data = JSON.parse(response.getContentText());
+      const result = JSON.parse(response.getContentText());
 
-      if (data && data.length > 0) {
-        allData.push(...data);
-        skip += pageSize;
+      // Check if data exists
+      if (result.Data && result.Data.length > 0) {
+        allData.push(...result.Data);
 
-        // If we got less than pageSize, we've reached the end
-        if (data.length < pageSize) {
+        // Check if there's more data
+        if (result.Next === true && result.Page) {
+          page = result.Page;
+          Utilities.sleep(100); // Rate limiting
+        } else {
           hasMoreData = false;
         }
       } else {
         hasMoreData = false;
       }
 
-      // Avoid hitting rate limits
-      Utilities.sleep(100);
-
     } catch (error) {
-      Logger.log(`Error fetching data for ${startDate}: ${error.toString()}`);
+      Logger.log(`Error fetching data for ${cropName}: ${error.toString()}`);
       hasMoreData = false;
     }
   }
 
   return allData;
+}
+
+/**
+ * Builds a URL with query parameters
+ * @param {string} baseUrl - Base URL
+ * @param {Object} params - Object with query parameters
+ * @returns {string} Complete URL with query string
+ */
+function buildURLWithParams(baseUrl, params) {
+  const queryString = Object.keys(params)
+    .filter(key => params[key] !== null && params[key] !== undefined)
+    .map(key => `${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`)
+    .join('&');
+
+  return queryString ? `${baseUrl}?${queryString}` : baseUrl;
 }
 
 /**
@@ -161,29 +196,6 @@ function formatDateForAPI(date) {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}.${month}.${day}`;
-}
-
-/**
- * Searches for items matching the query keyword
- * @param {Array} data - Array of agricultural product data
- * @param {string} query - Search keyword
- * @returns {Array} Filtered array of matching items
- */
-function searchByKeyword(data, query) {
-  Logger.log(`Searching for keyword: ${query}`);
-
-  // Normalize query (remove spaces, convert to lowercase)
-  const normalizedQuery = query.toLowerCase().trim();
-
-  const matchedItems = data.filter(item => {
-    const itemName = (item.作物名稱 || '').toLowerCase();
-
-    // Check if item name contains the query keyword
-    return itemName.includes(normalizedQuery);
-  });
-
-  Logger.log(`Found ${matchedItems.length} items matching "${query}"`);
-  return matchedItems;
 }
 
 /**
@@ -200,28 +212,28 @@ function processSearchResults(todayItems, yesterdayData) {
   // Create a map of yesterday's prices by crop code and market
   const yesterdayPriceMap = {};
   yesterdayData.forEach(item => {
-    const key = `${item.作物代號}_${item.市場名稱}`;
-    yesterdayPriceMap[key] = parseFloat(item.平均價 || 0);
+    const key = `${item.CropCode}_${item.MarketName}`;
+    yesterdayPriceMap[key] = parseFloat(item.Avg_Price || 0);
   });
 
   todayItems.forEach(item => {
     // Parse trade volume
-    const tradeVolume = parseFloat(item.交易量 || 0);
+    const tradeVolume = parseFloat(item.Trans_Quantity || 0);
 
     // Filter out items with low trade volume
     if (tradeVolume < MIN_TRADE_VOLUME) {
-      Logger.log(`Skipping ${item.作物名稱} due to low trade volume (${tradeVolume})`);
+      Logger.log(`Skipping ${item.CropName} due to low trade volume (${tradeVolume})`);
       return;
     }
 
     // Parse today's average price
-    const avgPrice = parseFloat(item.平均價 || 0);
+    const avgPrice = parseFloat(item.Avg_Price || 0);
     if (avgPrice === 0) {
       return; // Skip items with no price data
     }
 
     // Calculate price change percentage
-    const key = `${item.作物代號}_${item.市場名稱}`;
+    const key = `${item.CropCode}_${item.MarketName}`;
     const yesterdayPrice = yesterdayPriceMap[key] || avgPrice;
     let changePercent = 0;
 
@@ -229,35 +241,27 @@ function processSearchResults(todayItems, yesterdayData) {
       changePercent = ((avgPrice - yesterdayPrice) / yesterdayPrice) * 100;
     }
 
-    // Extract origin information (if available in 上價 or 中價 fields)
-    const origin = item.產地 || extractOriginFromFields(item) || '';
+    // Determine unit (公斤 is default)
+    const unit = '公斤'; // API uses 元/公斤 for pricing
 
     processed.push({
-      code: item.作物代號 || '',
-      name: item.作物名稱 || '',
+      code: item.CropCode || '',
+      name: item.CropName || '',
       avg_price: parseFloat(avgPrice.toFixed(1)),
       change_percent: parseFloat(changePercent.toFixed(1)),
       trade_volume: tradeVolume,
-      category: item.種類名稱 || '',
-      origin: origin,
-      unit: item.交易單位 || '公斤',
-      market: item.市場名稱 || ''
+      category: item.TcType || '',
+      origin: '', // Not provided in this API response
+      unit: unit,
+      market: item.MarketName || '',
+      upper_price: parseFloat(item.Upper_Price || 0),
+      middle_price: parseFloat(item.Middle_Price || 0),
+      lower_price: parseFloat(item.Lower_Price || 0)
     });
   });
 
   Logger.log(`Processed ${processed.length} items after filtering`);
   return processed;
-}
-
-/**
- * Attempts to extract origin information from price fields
- * @param {Object} item - API data item
- * @returns {string} Origin or empty string
- */
-function extractOriginFromFields(item) {
-  // Some API responses may include origin info in specific fields
-  // This is a placeholder - adjust based on actual API response structure
-  return '';
 }
 
 /**
