@@ -8,14 +8,18 @@ interface ProduceItem {
   change_percent: number;
   trend: number[];
   category: string;
+  description: string; // New field
+  origin: string;      // New field
+  unit: string;        // New field
 }
 
 interface ProduceGridProps {
   items?: ProduceItem[];
   loading?: boolean;
+  onCardClick: (item: ProduceItem) => void; // New prop
 }
 
-const ProduceGrid: React.FC<ProduceGridProps> = ({ items, loading = true }) => {
+const ProduceGrid: React.FC<ProduceGridProps> = ({ items, loading = true, onCardClick }) => {
   if (loading) {
     return <div data-testid="produce-grid">載入中...</div>;
   }
@@ -27,7 +31,7 @@ const ProduceGrid: React.FC<ProduceGridProps> = ({ items, loading = true }) => {
   return (
     <div data-testid="produce-grid" className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-4">
       {items.map((item) => (
-        <ProduceCard key={item.code} item={item} />
+        <ProduceCard key={item.code} item={item} onClick={() => onCardClick(item)} />
       ))}
     </div>
   );
