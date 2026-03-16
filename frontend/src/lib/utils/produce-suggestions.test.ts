@@ -1,25 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { getAlternativeSuggestions } from './produce-suggestions'; // This will be created
-
-interface ProduceItem {
-  code: string;
-  name: string;
-  avg_price: number;
-  change_percent: number;
-  trend: number[];
-  category: string;
-  description: string;
-  origin: string;
-  unit: string;
-}
+import { getAlternativeSuggestions } from './produce-suggestions';
+import type { ProduceItem } from '../../types/produce';
 
 const mockAllProduceItems: ProduceItem[] = [
-  { code: "LA1", name: "高麗菜", avg_price: 50.0, change_percent: 20.0, trend: [], category: "葉菜類", description: "", origin: "", unit: "" },
-  { code: "LA2", name: "小白菜", avg_price: 20.0, change_percent: -5.0, trend: [], category: "葉菜類", description: "", origin: "", unit: "" },
-  { code: "LA3", name: "菠菜", avg_price: 25.0, change_percent: -10.0, trend: [], category: "葉菜類", description: "", origin: "", unit: "" },
-  { code: "RA1", name: "馬鈴薯", avg_price: 30.0, change_percent: 5.0, trend: [], category: "根莖類", description: "", origin: "", unit: "" },
-  { code: "RA2", name: "地瓜", avg_price: 28.0, change_percent: -2.0, trend: [], category: "根莖類", description: "", origin: "", unit: "" },
-  { code: "F1", name: "蘋果", avg_price: 100.0, change_percent: 1.0, trend: [], category: "水果", description: "", origin: "", unit: "" },
+  { code: "LA1", name: "高麗菜", avg_price: 50.0, change_percent: 20.0, category: "葉菜類", origin: "", unit: "公斤", trade_volume: 1000, market: "台北一市", upper_price: 55.0, middle_price: 50.0, lower_price: 45.0 },
+  { code: "LA2", name: "小白菜", avg_price: 20.0, change_percent: -5.0, category: "葉菜類", origin: "", unit: "公斤", trade_volume: 1000, market: "台北一市", upper_price: 22.0, middle_price: 20.0, lower_price: 18.0 },
+  { code: "LA3", name: "菠菜", avg_price: 25.0, change_percent: -10.0, category: "葉菜類", origin: "", unit: "公斤", trade_volume: 1000, market: "台北一市", upper_price: 28.0, middle_price: 25.0, lower_price: 22.0 },
+  { code: "RA1", name: "馬鈴薯", avg_price: 30.0, change_percent: 5.0, category: "根莖類", origin: "", unit: "公斤", trade_volume: 1000, market: "台北一市", upper_price: 33.0, middle_price: 30.0, lower_price: 27.0 },
+  { code: "RA2", name: "地瓜", avg_price: 28.0, change_percent: -2.0, category: "根莖類", origin: "", unit: "公斤", trade_volume: 1000, market: "台北一市", upper_price: 30.0, middle_price: 28.0, lower_price: 26.0 },
+  { code: "F1", name: "蘋果", avg_price: 100.0, change_percent: 1.0, category: "水果", origin: "", unit: "公斤", trade_volume: 1000, market: "台北一市", upper_price: 110.0, middle_price: 100.0, lower_price: 90.0 },
 ];
 
 describe('getAlternativeSuggestions', () => {
@@ -45,17 +34,18 @@ describe('getAlternativeSuggestions', () => {
   });
 
   it('returns no suggestions if no cheaper alternatives exist in the same category', () => {
-    const itemWithHighIncrease = { ...mockAllProduceItems[0], avg_price: 10.0, change_percent: 15.0 }; // Simulate a cheap high-increase item
+    const itemWithHighIncrease: ProduceItem = { ...mockAllProduceItems[0], avg_price: 10.0, change_percent: 15.0 };
+    const moreExpensiveItem: ProduceItem = { code: "LA4", name: "大白菜", avg_price: 12.0, change_percent: 5.0, category: "葉菜類", origin: "", unit: "公斤", trade_volume: 1000, market: "台北一市", upper_price: 14.0, middle_price: 12.0, lower_price: 10.0 };
     const suggestions = getAlternativeSuggestions(itemWithHighIncrease, [
-        { ...itemWithHighIncrease },
-        { code: "LA4", name: "大白菜", avg_price: 12.0, change_percent: 5.0, trend: [], category: "葉菜類", description: "", origin: "", unit: "" } // More expensive than target
+        itemWithHighIncrease,
+        moreExpensiveItem
     ], 10);
 
     expect(suggestions).toHaveLength(0);
   });
 
   it('returns no suggestions if no other items in the same category', () => {
-    const itemWithHighIncrease = { ...mockAllProduceItems[0], code: "LAX", category: "稀有菜", change_percent: 20.0 };
+    const itemWithHighIncrease: ProduceItem = { ...mockAllProduceItems[0], code: "LAX", category: "稀有菜", change_percent: 20.0 };
     const suggestions = getAlternativeSuggestions(itemWithHighIncrease, mockAllProduceItems, 10);
 
     expect(suggestions).toHaveLength(0);

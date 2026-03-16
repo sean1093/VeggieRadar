@@ -1,29 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import Header from './components/Header/Header';
 import ProduceGrid from './components/ProduceGrid/ProduceGrid';
 import ProduceFilter from './components/ProduceFilter/ProduceFilter';
-import DetailDrawer from './components/DetailDrawer/DetailDrawer'; // Import DetailDrawer
+import DetailDrawer from './components/DetailDrawer/DetailDrawer';
+import EmptyState from './components/EmptyState/EmptyState';
+import ErrorMessage from './components/ErrorMessage/ErrorMessage';
+import QuickSearchButtons from './components/QuickSearchButtons/QuickSearchButtons';
+import { searchProduce } from './services/api';
+import { isApiError, type ProduceItem } from './types/produce';
 import './App.css';
-
-export interface ProduceItem {
-  code: string;
-  name: string;
-  avg_price: number;
-  change_percent: number;
-  trend: number[];
-  category: string;
-  description: string;
-  origin: string;
-  unit: string;
-}
-
-const allProduceItems: ProduceItem[] = [
-  { code: "LA1", name: "甘藍-改良種", avg_price: 25.4, change_percent: -12.5, trend: [28, 27, 29, 26, 25.4, 24, 25], category: "葉菜類", description: "新鮮甘藍，富含維生素C，是家常料理的好選擇。", origin: "台灣高山", unit: "公斤" },
-  { code: "A1", name: "番茄-黑柿", avg_price: 45.0, change_percent: 5.0, trend: [42, 43, 44, 46, 45, 47, 48], category: "果菜類", description: "香甜多汁的黑柿番茄，適合生食或烹煮。", origin: "雲林", unit: "公斤" },
-  { code: "P1", name: "蘋果-富士", avg_price: 80.0, change_percent: -2.0, trend: [82, 81, 80, 80, 80, 79, 78], category: "水果", description: "清脆香甜的富士蘋果，老少咸宜。", origin: "青森", unit: "公斤" },
-  { code: "LA2", name: "小白菜", avg_price: 15.0, change_percent: 3.0, trend: [14, 13, 15, 16, 15, 14, 15], category: "葉菜類", description: "鮮嫩小白菜，快速烹煮即可上桌。", origin: "彰化", unit: "把" },
-  { code: "RA1", name: "馬鈴薯", avg_price: 20.0, change_percent: 0.5, trend: [19, 20, 20, 21, 20, 20, 21], category: "根莖類", description: "鬆軟綿密的馬鈴薯，料理用途廣泛。", origin: "嘉義", unit: "公斤" },
-];
 
 const filterOptions = [
   { label: '全部', value: 'all' },
@@ -33,20 +18,46 @@ const filterOptions = [
   { label: '果菜類', value: '果菜類' },
 ];
 
-
 function App() {
   const [produceItems, setProduceItems] = useState<ProduceItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [activeFilter, setActiveFilter] = useState('all');
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [selectedProduceItem, setSelectedProduceItem] = useState<ProduceItem | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [lastQuery, setLastQuery] = useState<string>('');
+  const [hasSearched, setHasSearched] = useState(false);
 
-  useEffect(() => {
-    setTimeout(() => {
-      setProduceItems(allProduceItems);
+  const handleSearch = async (query: string) => {
+    setLoading(true);
+    setError(null);
+    setLastQuery(query);
+    setHasSearched(true);
+    setActiveFilter('all'); // Reset filter when new search
+
+    try {
+      const response = await searchProduce(query);
+
+      if (isApiError(response)) {
+        setError(response.error);
+        setProduceItems([]);
+      } else {
+        setProduceItems(response.items);
+        setError(null);
+      }
+    } catch (err) {
+      setError('發生未預期的錯誤，請稍後再試');
+      setProduceItems([]);
+    } finally {
       setLoading(false);
-    }, 1000);
-  }, []);
+    }
+  };
+
+  const handleRetry = () => {
+    setError(null);
+    setHasSearched(false);
+    setProduceItems([]);
+  };
 
   const filteredItems = produceItems.filter(item => {
     if (activeFilter === 'all') {
@@ -67,14 +78,42 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <Header />
-      <main className="container mx-auto p-4">
-        <ProduceFilter
-          options={filterOptions}
-          activeFilter={activeFilter}
-          onFilterChange={setActiveFilter}
-        />
-        <ProduceGrid items={filteredItems} loading={loading} onCardClick={handleCardClick} />
+      <Header onSearch={handleSearch} loading={loading} />
+
+      <main className="container mx-auto px-4 py-6">
+        {!hasSearched && (
+          <>
+            <QuickSearchButtons onSearch={handleSearch} />
+            <EmptyState />
+          </>
+        )}
+
+        {hasSearched && !error && !loading && produceItems.length > 0 && (
+          <>
+            <div className="mb-4">
+              <p className="text-sm text-gray-600">
+                搜尋「<span className="font-semibold">{lastQuery}</span>」共找到 {produceItems.length} 個品項
+              </p>
+            </div>
+            <ProduceFilter
+              options={filterOptions}
+              activeFilter={activeFilter}
+              onFilterChange={setActiveFilter}
+            />
+            <ProduceGrid items={filteredItems} loading={loading} onCardClick={handleCardClick} />
+          </>
+        )}
+
+        {loading && <ProduceGrid items={[]} loading={true} onCardClick={handleCardClick} />}
+
+        {hasSearched && !loading && !error && produceItems.length === 0 && (
+          <EmptyState
+            message="查無此品項"
+            suggestion={`找不到「${lastQuery}」相關的蔬果，請試試其他關鍵字`}
+          />
+        )}
+
+        {error && <ErrorMessage error={error} query={lastQuery} onRetry={handleRetry} />}
       </main>
 
       {selectedProduceItem && (
@@ -82,7 +121,7 @@ function App() {
           isOpen={isDrawerOpen}
           onClose={handleCloseDrawer}
           item={selectedProduceItem}
-          allProduceItems={allProduceItems} // Pass allProduceItems for suggestions
+          allProduceItems={produceItems}
         />
       )}
     </div>

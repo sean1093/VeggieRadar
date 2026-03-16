@@ -1,4 +1,4 @@
-import type { ProduceItem } from '../../App'; // Assuming ProduceItem interface is defined in App.tsx
+import type { ProduceItem } from '../../types/produce';
 
 export function getAlternativeSuggestions(
   currentItem: ProduceItem,

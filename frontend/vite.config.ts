@@ -5,7 +5,7 @@ import path from 'path'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
-  base: '/tw-produce-gemini-sentinel/', // Base path for GitHub Pages
+  base: '/VeggieRadar/', // Base path for GitHub Pages deployment
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
