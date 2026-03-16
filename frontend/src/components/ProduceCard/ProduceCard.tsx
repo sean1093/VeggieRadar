@@ -1,4 +1,5 @@
 import React from 'react';
+import ProduceTrendChart from '../ProduceTrendChart/ProduceTrendChart'; // Import ProduceTrendChart
 
 interface ProduceItem {
   code: string;
@@ -25,9 +26,8 @@ const ProduceCard: React.FC<ProduceCardProps> = ({ item }) => {
       <p className={`text-lg ${changeColorClass}`}>
         漲跌幅: <span className="font-semibold">{item.change_percent.toFixed(1)}%</span>
       </p>
-      {/* Placeholder for trend chart - will be implemented later */}
-      <div className="h-16 bg-gray-100 mt-3 rounded">
-        {/* Trend chart would go here */}
+      <div className="h-16 mt-3"> {/* Removed bg-gray-100 as chart will fill */}
+        <ProduceTrendChart trend={item.trend} />
       </div>
     </div>
   );
