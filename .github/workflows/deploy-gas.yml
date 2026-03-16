@@ -1,0 +1,59 @@
+name: Deploy Google Apps Script
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'gas/**' # Trigger when files in the gas/ directory change
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # Use a compatible Node.js version
+
+      - name: Install clasp
+        run: npm install -g @google/clasp
+
+      - name: Authenticate clasp (Service Account)
+        # RECOMMENDED: Use a service account key for CI/CD
+        # This step uses a base64 encoded service account key stored as a GitHub Secret.
+        # Create a secret named GCP_SA_KEY in your repository settings.
+        # More info: https://developers.google.com/apps-script/api/how-tos/execute#using_service_accounts
+        if: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          echo "${{ secrets.GCP_SA_KEY }}" | base64 --decode > ./gcp-sa-key.json
+          clasp login --creds ./gcp-sa-key.json --project ${{ secrets.GAS_PROJECT_ID }}
+        env:
+          GAS_PROJECT_ID: ${{ secrets.GAS_PROJECT_ID }} # Store your GAS Script ID here
+
+      - name: Authenticate clasp (Refresh Token)
+        # ALTERNATIVE: Use a refresh token (less secure for CI/CD, but simpler for personal projects)
+        # Create a secret named CLASP_TOKEN in your repository settings.
+        # To get CLASP_TOKEN: After 'clasp login' locally, find your ~/.clasprc.json file.
+        # Copy the 'refresh_token' value from there.
+        if: ${{ !secrets.GCP_SA_KEY && secrets.CLASP_TOKEN }}
+        run: |
+          echo '{ "access_token": "dummy", "refresh_token": "${{ secrets.CLASP_TOKEN }}", "scope": "https://www.googleapis.com/auth/script.deployments https://www.googleapis.com/auth/script.projects https://www.googleapis.com/auth/drive.metadata.readonly https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/service.management https://www.googleapis.com/auth/logging.read https://www.googleapis.com/auth/cloudplatformprojects", "token_type": "Bearer", "expiry_date": 1 }' > ~/.clasprc.json
+          clasp run # This refreshes the access token and ensures authentication
+        env:
+          GAS_PROJECT_ID: ${{ secrets.GAS_PROJECT_ID }} # Store your GAS Script ID here
+
+      - name: Push to Apps Script Project
+        run: clasp push
+        working-directory: ./gas # Ensure clasp pushes from the gas directory
+
+      - name: Deploy Apps Script Project (Optional)
+        # This step will deploy a new version of the script.
+        # You might need to configure versions manually in the GAS project
+        # or adjust this command for head deployments based on your needs.
+        # Example: clasp deploy --description "Deployed via GitHub Actions" --version 1
+        # For a more robust setup, consider clasp deploy -i <deploymentId>
+        # run: clasp deploy --description "Deployed from GitHub Actions"
