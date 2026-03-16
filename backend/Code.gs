@@ -11,17 +11,6 @@ const MOA_API_KEY = PropertiesService.getScriptProperties().getProperty('MOA_API
 
 // --- Main Web App Entry Point ---
 function doGet(e) {
-  // Set CORS headers for web app
-  var headers = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-  };
-
-  if (e.parameter.method == 'OPTIONS') {
-    return ContentService.createTextOutput(JSON.stringify('')).setMimeType(ContentService.MimeType.JSON);
-  }
-
   try {
     // Get query parameter from request
     const query = e.parameter.query || '';
@@ -31,8 +20,7 @@ function doGet(e) {
         error: "請提供查詢關鍵字",
         message: "使用方式：?query=高麗菜"
       }))
-        .setMimeType(ContentService.MimeType.JSON)
-        .setHeaders(headers);
+        .setMimeType(ContentService.MimeType.JSON);
     }
 
     // 1. Fetch real-time data from Agriculture API for today and yesterday
@@ -43,8 +31,7 @@ function doGet(e) {
         error: "查無此品項",
         query: query
       }))
-        .setMimeType(ContentService.MimeType.JSON)
-        .setHeaders(headers);
+        .setMimeType(ContentService.MimeType.JSON);
     }
 
     // 2. Process matched items (calculate change_percent, filter low volume)
@@ -55,8 +42,7 @@ function doGet(e) {
         error: "查無符合條件的品項（可能交易量過低）",
         query: query
       }))
-        .setMimeType(ContentService.MimeType.JSON)
-        .setHeaders(headers);
+        .setMimeType(ContentService.MimeType.JSON);
     }
 
     // 3. Construct the final JSON response
@@ -69,8 +55,7 @@ function doGet(e) {
     };
 
     return ContentService.createTextOutput(JSON.stringify(responseData))
-      .setMimeType(ContentService.MimeType.JSON)
-      .setHeaders(headers);
+      .setMimeType(ContentService.MimeType.JSON);
 
   } catch (error) {
     Logger.log("Error in doGet: " + error.toString());
@@ -78,8 +63,7 @@ function doGet(e) {
       error: "系統錯誤",
       message: error.message
     }))
-      .setMimeType(ContentService.MimeType.JSON)
-      .setHeaders(headers);
+      .setMimeType(ContentService.MimeType.JSON);
   }
 }
 
