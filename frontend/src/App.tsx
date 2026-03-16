@@ -82,6 +82,7 @@ function App() {
           isOpen={isDrawerOpen}
           onClose={handleCloseDrawer}
           item={selectedProduceItem}
+          allProduceItems={allProduceItems} // Pass allProduceItems for suggestions
         />
       )}
     </div>

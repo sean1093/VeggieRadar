@@ -5,7 +5,8 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog'; // Assuming path from shadcn/ui
+} from '@/components/ui/dialog';
+import { getAlternativeSuggestions } from '@/lib/utils/produce-suggestions'; // Import the helper
 
 interface ProduceItemDetail {
   code: string;
@@ -23,9 +24,12 @@ interface DetailDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   item: ProduceItemDetail;
+  allProduceItems: ProduceItemDetail[]; // New prop: all produce items for suggestions
 }
 
-const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item }) => {
+const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allProduceItems }) => {
+  const suggestions = getAlternativeSuggestions(item, allProduceItems, 10); // Use a 10% threshold
+
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent data-testid="detail-drawer">
@@ -43,7 +47,19 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item }) =>
           <p><strong>產地:</strong> {item.origin}</p>
           {/* Future: Add more detailed trend chart or AI insights here */}
         </div>
-        {/* shadcn/ui DialogContent often handles its own close button if present */}
+
+        {suggestions.length > 0 && (
+          <div className="mt-4 border-t pt-4">
+            <h4 className="font-semibold text-md mb-2">建議替代品項 (價格較低):</h4>
+            <ul className="list-disc pl-5">
+              {suggestions.map(sugg => (
+                <li key={sugg.code} className="text-sm text-gray-700">
+                  {sugg.name} - 均價: ${sugg.avg_price.toFixed(1)} ({sugg.change_percent.toFixed(1)}%)
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );
