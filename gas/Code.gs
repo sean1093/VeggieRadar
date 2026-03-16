@@ -2,15 +2,16 @@
  * Google Apps Script (GAS) Code Template for VeggieRadar Project - Phase 1
  *
  * This script provides the backend for the VeggieRadar project,
- * focusing on fetching agricultural data, integrating AI for summaries,
- * and serving it as a JSON API via doGet().
+ * focusing on fetching agricultural data and serving it as a JSON API via doGet().
+ * AI functionality is temporarily disabled for Phase 1.
  */
 
 // --- Configuration ---
 const AGRICULTURE_API_URL = "YOUR_AGRICULTURE_OPEN_DATA_API_URL"; // 農業部農產品批發市場交易行情 API URL
-const GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"; // Gemini API Key
-const GEMINI_API_URL = "YOUR_GEMINI_API_URL"; // Gemini API URL (e.g., for Google Cloud Vertex AI or similar)
 const SHEET_ID = "YOUR_GOOGLE_SHEET_ID"; // Google Sheet ID for LivePrice and HistoryLog
+// AI functionality disabled for Phase 1
+// const GEMINI_API_KEY = "YOUR_GEMINI_API_KEY";
+// const GEMINI_API_URL = "YOUR_GEMINI_API_URL";
 
 // --- Main Web App Entry Point ---
 function doGet(e) {
@@ -29,24 +30,23 @@ function doGet(e) {
     // 1. Fetch data from Agriculture Open Data API
     const agricultureData = fetchAgricultureData();
 
-    // 2. Process agriculture data (Task 1.3: filter low volume, calculate change_percent)
+    // 2. Process agriculture data (filter low volume, calculate change_percent)
     const processedItems = processAgricultureData(agricultureData);
 
-    // 3. Integrate Gemini API for AI summary (Task 1.5)
-    const aiSummary = generateAiSummary(processedItems);
-
-    // 4. Construct the final JSON response
+    // 3. Construct the final JSON response (AI summary disabled for Phase 1)
     const currentDate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
     const responseData = {
       date: currentDate,
-      ai_summary: aiSummary,
       items: processedItems.map(item => ({
         code: item.code,
         name: item.name,
         avg_price: item.avg_price,
         change_percent: item.change_percent,
-        trend: item.trend, // Placeholder, would be fetched from HistoryLog or calculated
-        category: item.category // Placeholder, would be categorized
+        trend: item.trend,
+        category: item.category,
+        description: item.description || '',
+        origin: item.origin || '',
+        unit: item.unit || '公斤'
       }))
     };
 
@@ -91,10 +91,66 @@ function fetchAgricultureData() {
 
   // --- Mock data for development if API is not yet integrated ---
   const mockData = [
-    { code: "LA1", name: "甘藍-改良種", avg_price: 25.4, trade_volume: 50000, category: "葉菜類", date: "2026-03-16", last_day_avg_price: 28.0 },
-    { code: "A1", name: "番茄-黑柿", avg_price: 45.0, trade_volume: 15000, category: "果菜類", date: "2026-03-16", last_day_avg_price: 42.0 },
-    { code: "P1", name: "蘋果-富士", avg_price: 80.0, trade_volume: 500, category: "水果", date: "2026-03-16", last_day_avg_price: 78.0 },
-    { code: "LA2", name: "小白菜", avg_price: 15.0, trade_volume: 100, category: "葉菜類", date: "2026-03-16", last_day_avg_price: 15.5 } // Low volume example
+    {
+      code: "LA1",
+      name: "甘藍-改良種",
+      avg_price: 25.4,
+      trade_volume: 50000,
+      category: "葉菜類",
+      date: "2026-03-16",
+      last_day_avg_price: 28.0,
+      description: "新鮮甘藍，富含維生素C，是家常料理的好選擇。",
+      origin: "台灣高山",
+      unit: "公斤"
+    },
+    {
+      code: "A1",
+      name: "番茄-黑柿",
+      avg_price: 45.0,
+      trade_volume: 15000,
+      category: "果菜類",
+      date: "2026-03-16",
+      last_day_avg_price: 42.0,
+      description: "香甜多汁的黑柿番茄，適合生食或烹煮。",
+      origin: "雲林",
+      unit: "公斤"
+    },
+    {
+      code: "P1",
+      name: "蘋果-富士",
+      avg_price: 80.0,
+      trade_volume: 500,
+      category: "水果",
+      date: "2026-03-16",
+      last_day_avg_price: 78.0,
+      description: "清脆香甜的富士蘋果，老少咸宜。",
+      origin: "青森",
+      unit: "公斤"
+    },
+    {
+      code: "LA2",
+      name: "小白菜",
+      avg_price: 15.0,
+      trade_volume: 100,
+      category: "葉菜類",
+      date: "2026-03-16",
+      last_day_avg_price: 15.5,
+      description: "鮮嫩小白菜，快速烹煮即可上桌。",
+      origin: "彰化",
+      unit: "把"
+    },
+    {
+      code: "RA1",
+      name: "馬鈴薯",
+      avg_price: 20.0,
+      trade_volume: 5000,
+      category: "根莖類",
+      date: "2026-03-16",
+      last_day_avg_price: 19.5,
+      description: "鬆軟綿密的馬鈴薯，料理用途廣泛。",
+      origin: "嘉義",
+      unit: "公斤"
+    }
   ];
   return mockData;
 }
@@ -132,7 +188,10 @@ function processAgricultureData(rawData) {
       avg_price: item.avg_price,
       change_percent: parseFloat(change_percent.toFixed(2)),
       trend: trendData,
-      category: item.category
+      category: item.category,
+      description: item.description || '',
+      origin: item.origin || '',
+      unit: item.unit || '公斤'
     });
   });
 
@@ -142,16 +201,19 @@ function processAgricultureData(rawData) {
 
 /**
  * Generates an AI summary using the Gemini API.
- * (Task 1.5: 整合 Gemini API，設計 Prompt 讓其產出適合婆婆媽媽看的「白話採購指南」)
+ * (Temporarily disabled for Phase 1 - Focus on data fetching and display)
  * @param {Array} processedItems An array of processed agricultural product data.
  * @returns {string} A plain language summary for purchasing advice.
  */
 function generateAiSummary(processedItems) {
+  // AI functionality is disabled for Phase 1
+  // Will be implemented in future phases
+  Logger.log("AI summary generation is currently disabled.");
+  return "";
+
+  /* Future implementation:
   Logger.log("Generating AI summary with Gemini API...");
 
-  // --- Construct a prompt for Gemini ---
-  // You would typically analyze processedItems to identify top movers (up/down)
-  // and construct a natural language prompt.
   const topGainers = processedItems.filter(item => item.change_percent > 0)
                                    .sort((a, b) => b.change_percent - a.change_percent)
                                    .slice(0, 3);
@@ -168,37 +230,31 @@ function generateAiSummary(processedItems) {
   }
   prompt += "語氣要親切。";
 
+  const payload = {
+    contents: [{
+      parts: [{ text: prompt }]
+    }]
+  };
 
-  // --- Placeholder for actual Gemini API call ---
-  // Example using UrlFetchApp for a generic POST request to Gemini API
-  // const payload = {
-  //   contents: [{
-  //     parts: [{ text: prompt }]
-  //   }]
-  // };
-  //
-  // const options = {
-  //   method: "post",
-  //   contentType: "application/json",
-  //   payload: JSON.stringify(payload),
-  //   headers: {
-  //     "x-goog-api-key": GEMINI_API_KEY
-  //   },
-  //   muteHttpExceptions: true // To get error details
-  // };
-  //
-  // try {
-  //   const response = UrlFetchApp.fetch(GEMINI_API_URL, options);
-  //   const responseJson = JSON.parse(response.getContentText());
-  //   // Assuming the response structure has the AI's generated text
-  //   return responseJson.candidates[0].content.parts[0].text;
-  // } catch (e) {
-  //   Logger.log("Error calling Gemini API: " + e.toString());
-  //   return "目前無法提供AI採購建議，請稍後再試。";
-  // }
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify(payload),
+    headers: {
+      "x-goog-api-key": GEMINI_API_KEY
+    },
+    muteHttpExceptions: true
+  };
 
-  // --- Mock AI Summary for development ---
-  return "今天葉菜類普遍降價，尤其是高麗菜非常划算！番茄價格微漲，可以考慮晚點再買。";
+  try {
+    const response = UrlFetchApp.fetch(GEMINI_API_URL, options);
+    const responseJson = JSON.parse(response.getContentText());
+    return responseJson.candidates[0].content.parts[0].text;
+  } catch (e) {
+    Logger.log("Error calling Gemini API: " + e.toString());
+    return "目前無法提供AI採購建議，請稍後再試。";
+  }
+  */
 }
 
 /**
@@ -232,10 +288,10 @@ function updateGoogleSheet(sheetName, data) {
 
 /**
  * Example function to be triggered daily (e.g., as a time-driven trigger in GAS)
- * (Part of Task 1.2 and 1.5 for daily updates and AI analysis)
+ * (Part of Task 1.2 for daily updates - AI disabled for Phase 1)
  */
-function dailyCrawlerAndAIUpdate() {
-  Logger.log("Running daily crawler and AI update...");
+function dailyCrawlerUpdate() {
+  Logger.log("Running daily crawler...");
   try {
     const rawData = fetchAgricultureData();
     const processedData = processAgricultureData(rawData);
@@ -243,11 +299,10 @@ function dailyCrawlerAndAIUpdate() {
     // Save processedData to LivePrice sheet
     // updateGoogleSheet("LivePrice", processedData);
 
-    // Generate AI summary and potentially save it or use it for other purposes
-    const aiSummary = generateAiSummary(processedData);
-    Logger.log("Daily AI Summary: " + aiSummary);
+    // Update HistoryLog for trend calculation
+    // updateGoogleSheet("HistoryLog", processedData);
 
-    // You might also want to update HistoryLog here
+    Logger.log(`Daily update completed. Processed ${processedData.length} items.`);
 
   } catch (error) {
     Logger.log("Error during daily update: " + error.toString());
