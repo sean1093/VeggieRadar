@@ -60,7 +60,9 @@ The Taiwan Produce Gemini Sentinel (TPGS) is an intuitive, aesthetically pleasin
 *   **Task 3.1:** Implement `DetailDrawer` component to display hidden detailed information.
     *   _Current Status:_ `DetailDrawer` component implemented using `shadcn/ui` Dialog. Interface `ProduceItem` updated across `App.tsx`, `ProduceGrid.tsx`, and `ProduceCard.tsx` to include detailed fields. `App.tsx` updated to manage drawer state and pass `onCardClick` handler.
 *   **Task 3.2:** Implement "Alternative Suggestions" feature: If a vegetable's price increase is too high, automatically recommend "currently cheaper similar items."
+    *   _Current Status:_ `getAlternativeSuggestions` utility function and its tests implemented. Integrated into `DetailDrawer` with data passed from `App.tsx`.
 *   **Task 3.3:** Configure PWA (Vite PWA Plugin) for mobile home screen installation.
+    *   _Current Status:_ **Blocked.** `vite-plugin-pwa` is currently incompatible with `Vite 8`. This task cannot be completed until a compatible version of the plugin is released.
 
 ### Phase 4: Future Expansion (Line Bot Support)
 *   **Task 4.1:** Establish `LineBotHandler` module in GAS for Webhook verification.
