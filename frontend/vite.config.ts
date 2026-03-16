@@ -5,5 +5,11 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   base: '/tw-produce-gemini-sentinel/', // Base path for GitHub Pages
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: './setupTests.ts',
+    css: true,
+  },
 })
 
