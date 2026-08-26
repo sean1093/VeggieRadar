@@ -6,6 +6,8 @@ interface ProduceListProps {
   items?: ProduceItem[];
   loading?: boolean;
   onCardClick: (item: ProduceItem) => void;
+  isWatched?: (officialName: string) => boolean;
+  onToggleWatch?: (item: ProduceItem) => void;
 }
 
 const panelClass = 'mx-auto max-w-2xl bg-surface rounded-2xl border border-line overflow-hidden divide-y divide-line';
@@ -24,7 +26,7 @@ const LoadingSkeleton: React.FC = () => (
   </div>
 );
 
-const ProduceList: React.FC<ProduceListProps> = ({ items, loading = false, onCardClick }) => {
+const ProduceList: React.FC<ProduceListProps> = ({ items, loading = false, onCardClick, isWatched, onToggleWatch }) => {
   if (loading) {
     return <LoadingSkeleton />;
   }
@@ -34,7 +36,13 @@ const ProduceList: React.FC<ProduceListProps> = ({ items, loading = false, onCar
   return (
     <div data-testid="produce-list" className={panelClass}>
       {items.map((item) => (
-        <ProduceCard key={`${item.code}-${item.name}`} item={item} onClick={onCardClick} />
+        <ProduceCard
+          key={`${item.code}-${item.name}`}
+          item={item}
+          onClick={onCardClick}
+          watched={isWatched?.(item.official_name) ?? false}
+          onToggleWatch={onToggleWatch}
+        />
       ))}
     </div>
   );

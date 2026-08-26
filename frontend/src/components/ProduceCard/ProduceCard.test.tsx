@@ -38,7 +38,21 @@ describe('ProduceCard', () => {
   it('calls onClick with the item when tapped', () => {
     const onClick = vi.fn();
     render(<ProduceCard item={down} onClick={onClick} />);
-    fireEvent.click(screen.getByRole('button'));
+    fireEvent.click(screen.getByRole('button', { name: /每台斤/ }));
     expect(onClick).toHaveBeenCalledWith(down);
+  });
+
+  it('toggles watch without opening detail (stopPropagation)', () => {
+    const onClick = vi.fn();
+    const onToggleWatch = vi.fn();
+    render(<ProduceCard item={down} onClick={onClick} onToggleWatch={onToggleWatch} watched={false} />);
+    fireEvent.click(screen.getByRole('button', { name: /關注 高麗菜/ }));
+    expect(onToggleWatch).toHaveBeenCalledWith(down);
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
+  it('shows a filled star when watched', () => {
+    render(<ProduceCard item={down} onClick={vi.fn()} onToggleWatch={vi.fn()} watched />);
+    expect(screen.getByRole('button', { name: /取消關注/ })).toHaveTextContent('★');
   });
 });

@@ -6,6 +6,7 @@ import DetailDrawer from './components/DetailDrawer/DetailDrawer';
 import EmptyState from './components/EmptyState/EmptyState';
 import ErrorMessage from './components/ErrorMessage/ErrorMessage';
 import { fetchBoard, searchProduce } from './services/api';
+import { useWatchlist } from './hooks/useWatchlist';
 import { isApiError, type ProduceItem } from './types/produce';
 import './App.css';
 
@@ -21,6 +22,8 @@ function App() {
 
   const [activeFilter, setActiveFilter] = useState('all');
   const [selectedItem, setSelectedItem] = useState<ProduceItem | null>(null);
+  const { count: watchCount, isWatched, toggle } = useWatchlist();
+  const toggleWatch = (item: ProduceItem) => toggle(item.official_name);
 
   const loadBoard = () => {
     setLoading(true);
@@ -77,13 +80,18 @@ function App() {
 
   const filterOptions = useMemo(() => {
     const cats = Array.from(new Set(baseItems.map((it) => it.category)));
-    return [{ label: '全部', value: 'all' }, ...cats.map((c) => ({ label: c, value: c }))];
-  }, [baseItems]);
+    return [
+      { label: watchCount > 0 ? `★ 關注 ${watchCount}` : '★ 關注', value: 'watch' },
+      { label: '全部', value: 'all' },
+      ...cats.map((c) => ({ label: c, value: c })),
+    ];
+  }, [baseItems, watchCount]);
 
-  const visibleItems = useMemo(
-    () => (activeFilter === 'all' ? baseItems : baseItems.filter((it) => it.category === activeFilter)),
-    [baseItems, activeFilter],
-  );
+  const visibleItems = useMemo(() => {
+    if (activeFilter === 'watch') return baseItems.filter((it) => isWatched(it.official_name));
+    if (activeFilter === 'all') return baseItems;
+    return baseItems.filter((it) => it.category === activeFilter);
+  }, [baseItems, activeFilter, isWatched]);
 
   const busy = loading || searching;
 
@@ -119,10 +127,19 @@ function App() {
             {busy && <ProduceList items={[]} loading onCardClick={setSelectedItem} />}
 
             {!busy && visibleItems.length > 0 && (
-              <ProduceList items={visibleItems} onCardClick={setSelectedItem} />
+              <ProduceList
+                items={visibleItems}
+                onCardClick={setSelectedItem}
+                isWatched={isWatched}
+                onToggleWatch={toggleWatch}
+              />
             )}
 
-            {!busy && visibleItems.length === 0 && (
+            {!busy && visibleItems.length === 0 && activeFilter === 'watch' && (
+              <EmptyState message="還沒有關注的品項" suggestion="點卡片左側的 ☆ 加入關注，方便每天追蹤。" />
+            )}
+
+            {!busy && visibleItems.length === 0 && activeFilter !== 'watch' && (
               <EmptyState
                 message="查無此品項"
                 suggestion={query ? `找不到「${query}」，試試：高麗菜、番茄、蔥。` : '目前沒有菜價資料。'}
@@ -135,13 +152,14 @@ function App() {
           </>
         )}
       </main>
-
       {selectedItem && (
         <DetailDrawer
           isOpen={!!selectedItem}
           onClose={() => setSelectedItem(null)}
           item={selectedItem}
           allProduceItems={board}
+          watched={isWatched(selectedItem.official_name)}
+          onToggleWatch={toggleWatch}
         />
       )}
     </div>

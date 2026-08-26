@@ -30,4 +30,15 @@ describe('App (board-first)', () => {
     expect(within(screen.getByTestId('produce-list')).getByText('番茄')).toBeInTheDocument();
     expect(screen.queryByText('高麗菜')).not.toBeInTheDocument();
   });
+
+  it('stars an item and filters to the watch tab', async () => {
+    localStorage.clear();
+    render(<App />);
+    await screen.findByText('高麗菜');
+    fireEvent.click(screen.getByRole('button', { name: '關注 高麗菜' }));
+    fireEvent.click(screen.getByRole('button', { name: /★ 關注/ }));
+    const list = screen.getByTestId('produce-list');
+    expect(within(list).getByText('高麗菜')).toBeInTheDocument();
+    expect(within(list).queryByText('香蕉')).not.toBeInTheDocument();
+  });
 });

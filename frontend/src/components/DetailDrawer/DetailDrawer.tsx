@@ -15,9 +15,11 @@ interface DetailDrawerProps {
   onClose: () => void;
   item: ProduceItem;
   allProduceItems: ProduceItem[];
+  watched?: boolean;
+  onToggleWatch?: (item: ProduceItem) => void;
 }
 
-const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allProduceItems }) => {
+const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allProduceItems, watched = false, onToggleWatch }) => {
   const [trendData, setTrendData] = useState<number[]>([]);
   const [trendLoading, setTrendLoading] = useState(false);
 
@@ -46,7 +48,20 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent data-testid="detail-drawer" className="max-h-[85vh] overflow-y-auto text-ink">
         <DialogHeader className="text-left">
-          <DialogTitle className="text-2xl font-semibold tracking-tight">{item.name}</DialogTitle>
+          <div className="flex items-start justify-between gap-3">
+            <DialogTitle className="text-2xl font-semibold tracking-tight">{item.name}</DialogTitle>
+            {onToggleWatch && (
+              <button
+                type="button"
+                onClick={() => onToggleWatch(item)}
+                aria-pressed={watched}
+                aria-label={watched ? `取消關注 ${item.name}` : `關注 ${item.name}`}
+                className={`-m-1 p-1 text-2xl leading-none transition-colors ${watched ? 'text-sage' : 'text-line hover:text-stone'}`}
+              >
+                {watched ? '★' : '☆'}
+              </button>
+            )}
+          </div>
           <DialogDescription className="text-sm text-stone">
             {item.category}
             {item.markets_count ? `・${item.markets_count} 個市場均價` : ''}
