@@ -26,13 +26,23 @@ async function callApi(params: Record<string, string>): Promise<ApiResponse> {
   return (await response.json()) as ApiResponse;
 }
 
-/** Loads the daily price board (default view). */
+/**
+ * Loads the daily price board (default view). GAS web apps can return a
+ * transient 404 on a cold start, so retry a couple of times before failing.
+ */
 export async function fetchBoard(): Promise<ApiResponse> {
-  try {
-    return await callApi({ action: 'board' });
-  } catch (error) {
-    return { error: '無法載入今日菜價，請稍後再試', message: String(error) };
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await callApi({ action: 'board' });
+    } catch (error) {
+      lastError = error;
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 900 * (attempt + 1));
+      await promise;
+    }
   }
+  return { error: '無法載入今日菜價，請稍後再試', message: String(lastError) };
 }
 
 /** Searches produce by (colloquial) name. */
