@@ -1,127 +1,135 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Header from './components/Header/Header';
-import ProduceGrid from './components/ProduceGrid/ProduceGrid';
+import ProduceList from './components/ProduceGrid/ProduceList';
 import ProduceFilter from './components/ProduceFilter/ProduceFilter';
 import DetailDrawer from './components/DetailDrawer/DetailDrawer';
 import EmptyState from './components/EmptyState/EmptyState';
 import ErrorMessage from './components/ErrorMessage/ErrorMessage';
-import QuickSearchButtons from './components/QuickSearchButtons/QuickSearchButtons';
-import { searchProduce } from './services/api';
+import { fetchBoard, searchProduce } from './services/api';
 import { isApiError, type ProduceItem } from './types/produce';
 import './App.css';
 
-const filterOptions = [
-  { label: '全部', value: 'all' },
-  { label: '葉菜類', value: '葉菜類' },
-  { label: '根莖類', value: '根莖類' },
-  { label: '水果', value: '水果' },
-  { label: '果菜類', value: '果菜類' },
-];
-
 function App() {
-  const [produceItems, setProduceItems] = useState<ProduceItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [activeFilter, setActiveFilter] = useState('all');
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-  const [selectedProduceItem, setSelectedProduceItem] = useState<ProduceItem | null>(null);
+  const [board, setBoard] = useState<ProduceItem[]>([]);
+  const [boardDate, setBoardDate] = useState<string>('');
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [lastQuery, setLastQuery] = useState<string>('');
-  const [hasSearched, setHasSearched] = useState(false);
 
-  const handleSearch = async (query: string) => {
+  const [query, setQuery] = useState('');
+  const [remoteResults, setRemoteResults] = useState<ProduceItem[] | null>(null);
+  const [searching, setSearching] = useState(false);
+
+  const [activeFilter, setActiveFilter] = useState('all');
+  const [selectedItem, setSelectedItem] = useState<ProduceItem | null>(null);
+
+  const loadBoard = () => {
     setLoading(true);
     setError(null);
-    setLastQuery(query);
-    setHasSearched(true);
-    setActiveFilter('all'); // Reset filter when new search
-
-    try {
-      const response = await searchProduce(query);
-
-      if (isApiError(response)) {
-        setError(response.error);
-        setProduceItems([]);
+    fetchBoard().then((res) => {
+      if (isApiError(res)) {
+        setError(res.error);
+        setBoard([]);
       } else {
-        setProduceItems(response.items);
-        setError(null);
+        setBoard(res.items);
+        if ('date' in res) setBoardDate(res.date);
       }
-    } catch (err) {
-      setError('發生未預期的錯誤，請稍後再試');
-      setProduceItems([]);
-    } finally {
       setLoading(false);
-    }
+    });
   };
 
-  const handleRetry = () => {
-    setError(null);
-    setHasSearched(false);
-    setProduceItems([]);
+  useEffect(loadBoard, []);
+
+  // Search: filter the board locally for instant feedback; if nothing matches,
+  // fall back to a live backend query.
+  const handleSearch = async (raw: string) => {
+    const q = raw.trim();
+    setQuery(q);
+    setRemoteResults(null);
+    setActiveFilter('all');
+    if (!q) return;
+
+    const localHit = board.some((it) => it.name.includes(q) || it.official_name.includes(q));
+    if (localHit) return;
+
+    setSearching(true);
+    const res = await searchProduce(q);
+    setRemoteResults(isApiError(res) ? [] : res.items);
+    setSearching(false);
   };
 
-  const filteredItems = produceItems.filter(item => {
-    if (activeFilter === 'all') {
-      return true;
-    }
-    return item.category === activeFilter;
-  });
-
-  const handleCardClick = (item: ProduceItem) => {
-    setSelectedProduceItem(item);
-    setIsDrawerOpen(true);
+  const clearSearch = () => {
+    setQuery('');
+    setRemoteResults(null);
   };
 
-  const handleCloseDrawer = () => {
-    setIsDrawerOpen(false);
-    setSelectedProduceItem(null);
-  };
+  const baseItems = useMemo<ProduceItem[]>(() => {
+    if (!query) return board;
+    const local = board.filter((it) => it.name.includes(query) || it.official_name.includes(query));
+    if (local.length) return local;
+    return remoteResults ?? [];
+  }, [query, board, remoteResults]);
+
+  const filterOptions = useMemo(() => {
+    const cats = Array.from(new Set(baseItems.map((it) => it.category)));
+    return [{ label: '全部', value: 'all' }, ...cats.map((c) => ({ label: c, value: c }))];
+  }, [baseItems]);
+
+  const visibleItems = useMemo(
+    () => (activeFilter === 'all' ? baseItems : baseItems.filter((it) => it.category === activeFilter)),
+    [baseItems, activeFilter],
+  );
+
+  const busy = loading || searching;
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <Header onSearch={handleSearch} loading={loading} />
+      <Header onSearch={handleSearch} onClear={clearSearch} loading={busy} />
 
       <main className="container mx-auto px-4 py-6">
-        {!hasSearched && (
+        {boardDate && !error && (
+          <div className="mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <p className="text-base text-gray-700">
+              {query ? (
+                <>搜尋「<span className="font-semibold">{query}</span>」</>
+              ) : (
+                <>今日常見菜價</>
+              )}
+              <span className="ml-2 text-sm text-gray-400">資料日期 {boardDate}（批發市場收盤均價）</span>
+            </p>
+            <span className="text-xs text-gray-400">價格以「元/台斤」顯示，綠色↓便宜、紅色↑變貴</span>
+          </div>
+        )}
+
+        {error && <ErrorMessage error={error} query={query} onRetry={loadBoard} />}
+
+        {!error && (
           <>
-            <QuickSearchButtons onSearch={handleSearch} />
-            <EmptyState />
+            {filterOptions.length > 1 && (
+              <ProduceFilter options={filterOptions} activeFilter={activeFilter} onFilterChange={setActiveFilter} />
+            )}
+
+            {busy && <ProduceList items={[]} loading onCardClick={setSelectedItem} />}
+
+            {!busy && visibleItems.length > 0 && (
+              <ProduceList items={visibleItems} onCardClick={setSelectedItem} />
+            )}
+
+            {!busy && visibleItems.length === 0 && (
+              <EmptyState
+                message="查無此品項"
+                suggestion={query ? `找不到「${query}」，試試：高麗菜、番茄、蔥` : '目前沒有菜價資料'}
+              />
+            )}
           </>
         )}
-
-        {hasSearched && !error && !loading && produceItems.length > 0 && (
-          <>
-            <div className="mb-4">
-              <p className="text-sm text-gray-600">
-                搜尋「<span className="font-semibold">{lastQuery}</span>」共找到 {produceItems.length} 個品項
-              </p>
-            </div>
-            <ProduceFilter
-              options={filterOptions}
-              activeFilter={activeFilter}
-              onFilterChange={setActiveFilter}
-            />
-            <ProduceGrid items={filteredItems} loading={loading} onCardClick={handleCardClick} />
-          </>
-        )}
-
-        {loading && <ProduceGrid items={[]} loading={true} onCardClick={handleCardClick} />}
-
-        {hasSearched && !loading && !error && produceItems.length === 0 && (
-          <EmptyState
-            message="查無此品項"
-            suggestion={`找不到「${lastQuery}」相關的蔬果，請試試其他關鍵字`}
-          />
-        )}
-
-        {error && <ErrorMessage error={error} query={lastQuery} onRetry={handleRetry} />}
       </main>
 
-      {selectedProduceItem && (
+      {selectedItem && (
         <DetailDrawer
-          isOpen={isDrawerOpen}
-          onClose={handleCloseDrawer}
-          item={selectedProduceItem}
-          allProduceItems={produceItems}
+          isOpen={!!selectedItem}
+          onClose={() => setSelectedItem(null)}
+          item={selectedItem}
+          allProduceItems={board}
         />
       )}
     </div>

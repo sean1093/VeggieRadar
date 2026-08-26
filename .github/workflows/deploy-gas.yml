@@ -4,8 +4,9 @@ on:
   push:
     branches:
       - main
+      - master
     paths:
-      - 'gas/**' # Trigger when files in the gas/ directory change
+      - 'backend/**' # Trigger when the Apps Script source changes
 
 jobs:
   deploy:
@@ -47,8 +48,8 @@ jobs:
           GAS_PROJECT_ID: ${{ secrets.GAS_PROJECT_ID }} # Store your GAS Script ID here
 
       - name: Push to Apps Script Project
-        run: clasp push
-        working-directory: ./gas # Ensure clasp pushes from the gas directory
+        run: clasp push --force
+        # .clasp.json lives at the repo root and points rootDir to backend/
 
       - name: Deploy Apps Script Project (Optional)
         # This step will deploy a new version of the script.

@@ -7,27 +7,42 @@ interface ProduceCardProps {
 }
 
 const ProduceCard: React.FC<ProduceCardProps> = ({ item, onClick }) => {
-  const changeColorClass = item.change_percent < 0 ? 'text-green-500' : 'text-red-500';
-  const changeIcon = item.change_percent < 0 ? '↓' : '↑';
+  const down = item.change_percent < 0;
+  const flat = item.change_percent === 0;
+  const changeColor = flat ? 'text-gray-500' : down ? 'text-green-600' : 'text-red-600';
+  const changeBg = flat ? 'bg-gray-100' : down ? 'bg-green-100' : 'bg-red-100';
+  const changeIcon = flat ? '→' : down ? '↓' : '↑';
+  const changeLabel = flat ? '持平' : down ? '便宜了' : '變貴了';
 
   return (
-    <div
-      className="border p-4 rounded-lg shadow-md bg-white hover:shadow-lg transition-shadow duration-200 cursor-pointer"
+    <button
+      type="button"
       onClick={() => onClick(item)}
+      aria-label={`${item.name} 每台斤 ${item.catty_price.toFixed(1)} 元，${changeLabel}`}
+      className="w-full text-left bg-white rounded-2xl shadow-sm hover:shadow-md active:scale-[0.99] transition-all p-5 flex flex-col gap-3 border border-gray-100"
     >
-      <h3 className="font-bold text-2xl mb-2 text-gray-800">{item.name}</h3>
-      <p className="text-gray-600 text-xl mb-1">
-        今日均價: <span className="font-semibold text-2xl">${item.avg_price.toFixed(1)}</span>
-        <span className="text-sm ml-1">/{item.unit}</span>
-      </p>
-      <p className={`text-lg font-semibold ${changeColorClass} mb-2`}>
-        {changeIcon} {Math.abs(item.change_percent).toFixed(1)}%
-      </p>
-      <div className="text-sm text-gray-500 space-y-1">
-        <p>產地: {item.origin || '未提供'}</p>
-        <p>市場: {item.market}</p>
+      <div className="flex items-start justify-between gap-2">
+        <h3 className="font-bold text-2xl text-gray-900 leading-tight">{item.name}</h3>
+        <span className="shrink-0 text-xs text-gray-500 bg-gray-100 rounded-full px-2 py-1">{item.category}</span>
       </div>
-    </div>
+
+      <div className="flex items-end justify-between">
+        <div>
+          <div className="flex items-baseline gap-1">
+            <span className="text-4xl font-extrabold text-gray-900">{item.catty_price.toFixed(1)}</span>
+            <span className="text-base text-gray-500">元/台斤</span>
+          </div>
+          <p className="text-sm text-gray-400 mt-0.5">約 {item.avg_price.toFixed(1)} 元/公斤</p>
+        </div>
+
+        <div className={`flex flex-col items-center rounded-xl px-3 py-2 ${changeBg}`}>
+          <span className={`text-xl font-bold ${changeColor}`}>
+            {changeIcon} {Math.abs(item.change_percent).toFixed(1)}%
+          </span>
+          <span className={`text-xs font-medium ${changeColor}`}>{changeLabel}</span>
+        </div>
+      </div>
+    </button>
   );
 };
 

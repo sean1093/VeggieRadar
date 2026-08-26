@@ -4,35 +4,17 @@ import DetailDrawer from './DetailDrawer';
 import type { ProduceItem } from '../../types/produce';
 
 const mockProduceItem: ProduceItem = {
-  code: 'LA1',
-  name: '甘藍-改良種',
-  avg_price: 25.4,
-  change_percent: -12.5,
-  category: '葉菜類',
-  origin: '台灣高山',
-  unit: '公斤',
-  trade_volume: 5000,
-  market: '台北一市',
-  upper_price: 30.0,
-  middle_price: 25.4,
-  lower_price: 20.0,
+  code: 'LA', name: '高麗菜', official_name: '甘藍', category: '葉菜類',
+  avg_price: 25.4, catty_price: 15.2, change_percent: -12.5,
+  trade_volume: 5000, unit: '公斤', markets_count: 6,
 };
 
 const mockAllProduceItems: ProduceItem[] = [
   mockProduceItem,
   {
-    code: 'A1',
-    name: '番茄-黑柿',
-    avg_price: 45.0,
-    change_percent: 5.0,
-    category: '果菜類',
-    origin: '雲林',
-    unit: '公斤',
-    trade_volume: 3000,
-    market: '台北二市',
-    upper_price: 50.0,
-    middle_price: 45.0,
-    lower_price: 40.0,
+    code: 'FA', name: '番茄', official_name: '番茄', category: '果菜類',
+    avg_price: 45.0, catty_price: 27.0, change_percent: 5.0,
+    trade_volume: 3000, unit: '公斤', markets_count: 5,
   },
 ];
 
@@ -50,7 +32,7 @@ describe('DetailDrawer', () => {
   it('displays the detailed information of the produce item', () => {
     render(<DetailDrawer isOpen={true} onClose={() => {}} item={mockProduceItem} allProduceItems={mockAllProduceItems} />);
     expect(screen.getByText(mockProduceItem.name)).toBeInTheDocument();
-    expect(screen.getByText(new RegExp(mockProduceItem.category))).toBeInTheDocument();
+    expect(screen.getAllByText(new RegExp(mockProduceItem.category)).length).toBeGreaterThan(0);
   });
 
   it('calls onClose when the close button is clicked', () => {

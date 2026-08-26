@@ -1,141 +1,130 @@
-# Taiwan Produce Gemini Sentinel (TPGS)
+# VeggieRadar 🥬 今日菜價
 
-## 1. Project Overview
-The Taiwan Produce Gemini Sentinel (TPGS) is an intuitive, aesthetically pleasing, and AI-powered tool designed to provide real-time and analyzed information on Taiwan's fruit and vegetable market prices. Its primary objective is to bridge the information gap often found in traditional markets, making price trends and purchasing advice accessible to a wider audience.
+讓婆婆媽媽逛市場時，**一打開就看到今天常見菜的價格**，綠色↓便宜、紅色↑變貴，價格以熟悉的「元/台斤」顯示。
 
-*   **Objective:** To provide an intuitive, beautiful, and AI-powered Taiwanese fruit and vegetable market price inquiry tool, reducing information asymmetry in traditional markets.
-*   **Target Audience:** Mobile-savvy young people and elderly individuals (grandmothers) who frequent traditional markets.
-*   **Core Value:** Information transparency, simplified decision-making, and a modern interface.
-
-## 2. Features
-
-### Frontend (User Interface)
-*   **Card-First Design:** Each produce item is presented in a card format, initially displaying only "Product Name," "Today's Average Price," and "Price Change Label."
-*   **Progressive Disclosure:** Details are hidden by default. Clicking a card reveals a "Seven-Day Trend Chart," "Trading Volume," and "AI Advice" via a Drawer or Dialog.
-*   **Visual Color Cues:**
-    *   **Green (Down):** Indicates falling prices (good value, recommended to buy).
-    *   **Red (Up):** Indicates rising prices (more expensive, consider alternatives).
-*   **Minimalist Interface:** Reduces unnecessary borders and table lines, with ample whitespace for readability, especially for older users.
-*   **Multi-dimensional Filtering:** Filter produce items by categories like "Popular," "Leafy Greens," "Root Vegetables," and "Fruits."
-
-### Backend (API & Data)
-*   **Daily Data Fetching:** A Google Apps Script (GAS) crawler fetches data daily from the Council of Agriculture's open data API for wholesale market transactions.
-*   **Data Preprocessing:** Filters out items with low trading volume and calculates price changes from the previous day.
-*   **AI-Powered Summaries:** Integrates with the Gemini 1.5 Flash AI to generate plain-language "purchasing tips" based on price trends, tailored for general consumers.
-*   **JSON API Endpoint:** Provides frontend with structured JSON data for produce market prices.
-
-## 3. Tech Stack (0-Cost Architecture)
-*   **Frontend:** React (Vite) + TypeScript + Tailwind CSS + shadcn/ui. Deployed on GitHub Pages.
-*   **Backend:** Google Apps Script (GAS) - Supports Web App API and future Line Bot Webhook.
-*   **Database:** Google Sheets (for data storage, historical records, and simple caching).
-*   **Data Source:** 農業部農產品批發市場交易行情 (Council of Agriculture Agricultural Products Wholesale Market Transaction Data - Open Data API).
-*   **AI Engine:** Gemini 1.5 Flash (for market trend summaries and purchasing advice).
-
-## 4. System Architecture
-
-1.  **Crawler (GAS):** Triggered daily to fetch data from the Council of Agriculture API, calculate price changes, and update Google Sheets.
-2.  **AI Analyst (Gemini):** Daily identifies top 5 price gainers and losers to generate a concise, easy-to-understand "Purchasing Guide."
-3.  **API Gateway (GAS):**
-    *   `doGet`: Provides frontend with JSON formatted market data.
-    *   `doPost`: (Reserved) For future integration with Line Bot Webhook message replies.
-4.  **Web Client (Frontend):** Deployed on Vercel or GitHub Pages, it fetches data from the GAS API and renders the user interface.
-
-## 5. Development Plan & Task Breakdown (Completed & Next Steps)
-
-### Phase 1: Backend & Data Foundation (GAS & Sheets) - **Completed**
-*   Established Google Sheets data tables (`LivePrice` and `HistoryLog`).
-*   Developed GAS crawler to connect to the Council of Agriculture API with pagination.
-*   Implemented data preprocessing (filtering low-volume items, calculating price change percentage).
-*   Implemented `doGet` API to return JSON with `items` array and `ai_summary`.
-*   Integrated Gemini API for generating plain-language "purchasing tips."
-
-### Phase 2: Frontend Implementation (React + Vite) - **Completed**
-*   Initialized Vite + Tailwind CSS environment, configured `shadcn/ui` base theme.
-*   Implemented main page `Header` (with search) and `ProduceGrid` layout.
-*   Implemented `ProduceCard` component with large fonts and clear color labels.
-*   Used `Recharts` to draw a minimalist 7-day price trend chart.
-*   Implemented multi-dimensional filtering functionality.
-
-### Phase 3: UX Detail & Optimization - **In Progress**
-*   **Task 3.1:** Implement `DetailDrawer` component to display hidden detailed information.
-    *   _Current Status:_ `DetailDrawer` component implemented using `shadcn/ui` Dialog. Interface `ProduceItem` updated across `App.tsx`, `ProduceGrid.tsx`, and `ProduceCard.tsx` to include detailed fields. `App.tsx` updated to manage drawer state and pass `onCardClick` handler.
-*   **Task 3.2:** Implement "Alternative Suggestions" feature: If a vegetable's price increase is too high, automatically recommend "currently cheaper similar items."
-    *   _Current Status:_ `getAlternativeSuggestions` utility function and its tests implemented. Integrated into `DetailDrawer` with data passed from `App.tsx`.
-*   **Task 3.3:** Configure PWA (Vite PWA Plugin) for mobile home screen installation.
-    *   _Current Status:_ **Blocked.** `vite-plugin-pwa` is currently incompatible with `Vite 8`. This task cannot be completed until a compatible version of the plugin is released.
-
-### Phase 4: Future Expansion (Line Bot Support)
-*   **Task 4.1:** Establish `LineBotHandler` module in GAS for Webhook verification.
-*   **Task 4.2:** Design keyword query logic (e.g., input "高麗菜" to return latest price).
-
-## 6. Local Development Setup
-
-To get the project running locally, follow these steps:
-
-### Frontend
-1.  **Navigate to the frontend directory:**
-    ```bash
-    cd frontend
-    ```
-2.  **Install dependencies:**
-    ```bash
-    npm install
-    ```
-    _Note: Ensure your Node.js version is `20.19+` or `22.12+` to avoid potential `rolldown` and other dependency issues._
-3.  **Start the development server:**
-    ```bash
-    npm run dev
-    ```
-    This will typically open the application in your browser at `http://localhost:5173`.
-
-### Backend (Google Apps Script)
-1.  **Create a new Google Apps Script project:** Go to `script.google.com`.
-2.  **Copy `Code.gs` content:** Paste the content of `Code.gs` into your GAS project.
-3.  **Update Configuration:** Replace placeholder values in `Code.gs` (e.g., `AGRICULTURE_API_URL`, `GEMINI_API_KEY`, `SHEET_ID`) with your actual API URLs and keys.
-4.  **Set up Google Sheets:** Create Google Sheets for `LivePrice` and `HistoryLog` as per the project plan.
-5.  **Deploy as Web App:**
-    *   In GAS editor, click `Deploy` -> `New deployment`.
-    *   Select `Web app` as the type.
-    *   Configure execution access (e.g., `Me`) and who has access (e.g., `Anyone`).
-    *   Note the Web App URL. This will be your backend API endpoint.
-
-## 7. Deployment to GitHub Pages (Frontend)
-
-To deploy the frontend to GitHub Pages:
-
-1.  **Push to your GitHub repository:**
-    ```bash
-    git branch -M main
-    git remote add origin https://github.com/YOUR_USERNAME/tw-produce-gemini-sentinel.git # Replace YOUR_USERNAME
-    git push -u origin main
-    ```
-2.  **Run the deploy script:**
-    ```bash
-    cd frontend
-    npm run deploy
-    ```
-    This will build your application and push it to the `gh-pages` branch.
-3.  **Configure GitHub Pages:**
-    *   Go to your GitHub repository settings -> "Pages" section.
-    *   Under "Build and deployment", select "Deploy from a branch".
-    *   Choose the `gh-pages` branch and `/ (root)` folder.
-    *   Click "Save".
-
-Your site should then be accessible at `https://YOUR_USERNAME.github.io/tw-produce-gemini-sentinel/`.
-
-## 8. Contributing
-
-Contributions are welcome! Please follow these steps:
-1.  Fork the repository.
-2.  Create a new branch (`git checkout -b feature/your-feature-name`).
-3.  Make your changes.
-4.  Ensure all tests pass and add new tests for new features.
-5.  Commit your changes (`git commit -m 'feat: Add new feature'`).
-6.  Push to the branch (`git push origin feature/your-feature-name`).
-7.  Open a Pull Request.
+- **對象：** 到傳統市場買菜的長輩與家庭主婦（也適合手機族）。
+- **核心體驗：** 看板優先（board-first）——打開就是今日常見菜價牌，**不需打字**。搜尋只是輔助。
+- **零成本架構：** 前端 GitHub Pages + 後端 Google Apps Script，資料來自農業部開放資料，全部免費。
 
 ---
 
-## License
+## 1. 設計原則（給長輩用）
 
-[MIT License](LICENSE) (to be added)
+- **看板優先，免打字：** 首頁直接列出約 38 種最常買的菜（高麗菜、番茄、蔥…），大字卡片、一眼掃過。
+- **台斤為主：** 主要價格顯示「元/台斤」（市場習慣），下方附「元/公斤」。批發資料原始單位是元/公斤，前端換算 ×0.6。
+- **顏色即語意：** 綠色↓「便宜了」、紅色↑「變貴了」、灰色→「持平」，和昨日收盤比較。
+- **誠實標示時效：** 橫幅標「資料日期 YYYY-MM-DD（批發市場收盤均價）」。批發行情通常收盤後才更新，故顯示的是最近一個有資料的交易日。
+- **分類篩選：** 葉菜類／根莖類／瓜果類／果菜類／辛香類／水果／其他，依當日資料自動產生。
+- **點卡看細節：** 點任一張卡開啟詳情——7 日趨勢圖、交易量、同類更划算的替代建議。
+
+---
+
+## 2. 系統架構
+
+```
+農業部開放資料 API ──▶ GAS 每日快取（看板）──▶ 前端看板（GitHub Pages）
+   (即時查詢)              (CacheService)          Header 搜尋為輔
+```
+
+- **資料來源：** 農業部「農產品批發市場交易行情」開放資料，免金鑰。
+  `https://data.moa.gov.tw/api/v1/AgriProductsTransType/`（日期為民國格式，如 `115.08.26`；價格元/公斤）。
+- **後端（`backend/Code.gs`）：**
+  - `refreshBoardCache()`：由**每 6 小時的時間觸發器**呼叫，抓取常見菜、算好漲跌、寫入 `CacheService`，使用者永遠不必等爬取。
+  - `doGet`（預設）：**即時**回傳快取好的看板，毫秒級。
+  - `doGet?action=search&query=高麗菜`：先比對看板，找不到再即時查 API（含俗名別名表，如 高麗菜→甘藍）。
+  - `doGet?action=getTrend&cropName=甘藍&days=7`：回傳價格趨勢（詳情抽屜用）。
+  - 價格為**全市場成交量加權平均**；過濾交易量 < 200 公斤的零星品項；自動往前找最近一個有交易的日期。
+- **前端（`frontend/`）：** React + Vite + TypeScript + Tailwind + shadcn/ui。掛載即載入看板；`VITE_API_BASE_URL` 未設定時使用內建範例資料離線可跑。
+
+---
+
+## 3. API 規格
+
+### 看板（預設）
+```
+GET {WEB_APP_URL}/exec
+```
+```json
+{
+  "type": "board",
+  "date": "2026-08-26",
+  "roc_date": "115.08.26",
+  "prev_date": "115.08.25",
+  "count": 38,
+  "items": [
+    {
+      "code": "LA0",
+      "name": "高麗菜",
+      "official_name": "甘藍",
+      "category": "葉菜類",
+      "avg_price": 24.4,
+      "catty_price": 14.6,
+      "change_percent": -3.1,
+      "trade_volume": 416301,
+      "unit": "公斤",
+      "markets_count": 6
+    }
+  ],
+  "cached": true
+}
+```
+
+### 搜尋
+```
+GET {WEB_APP_URL}/exec?action=search&query=高麗菜
+```
+回傳同上 `items` 結構，`type` 為 `"search"`；查無結果回 `{ "error": "查無此品項" }`。
+
+### 趨勢
+```
+GET {WEB_APP_URL}/exec?action=getTrend&cropName=甘藍&days=7
+→ { "cropName": "甘藍", "days": 7, "trend": [23.1, 24.0, null, 24.4, ...] }
+```
+（`null` 代表當天無市場交易，例如假日。）
+
+---
+
+## 4. 本地開發
+
+### 前端
+```bash
+cd frontend
+npm install
+npm run dev      # http://localhost:5173/VeggieRadar/
+```
+未設定 `VITE_API_BASE_URL` 時，自動使用 `src/services/mockBoard.ts` 的範例資料，UI 完整可操作。
+連接真實後端：在 `frontend/.env` 設 `VITE_API_BASE_URL=<你的 GAS Web App /exec 網址>`。
+
+```bash
+npm run build    # tsc 型別檢查 + vite 打包
+npm test         # vitest（27 個測試）
+```
+
+### 後端（Google Apps Script）
+1. 程式碼在 `backend/Code.gs`，透過 `clasp` 部署（見 `clasp_instructions.md`，`.clasp.json` 的 `rootDir` 已設為 `backend/`）。
+2. 部署為 **Web App**（執行身分：我；存取權：任何人）。
+3. 在 GAS 編輯器執行一次 `installDailyTrigger()`：安裝每 6 小時的看板刷新觸發器並先暖一次快取。
+4. 將 Web App 的 `/exec` 網址填入前端 `VITE_API_BASE_URL`。
+
+> 本 API 不需金鑰。
+
+---
+
+## 5. 部署到 GitHub Pages（前端）
+```bash
+cd frontend
+npm run deploy   # 打包並推到 gh-pages 分支
+```
+Repo Settings → Pages → Deploy from branch → `gh-pages` / root。
+網址：`https://<USER>.github.io/VeggieRadar/`（`vite.config.ts` 的 `base` 已設為 `/VeggieRadar/`）。
+
+---
+
+## 6. 後續（未來）
+- 歷史價格趨勢（更長區間）與最佳購買時機提示。
+- PWA 加到主畫面（`vite-plugin-pwa` 需與 Vite 8 相容版本）。
+- 依市場/地區篩選。
+- Line Bot 查詢（`doPost` 已預留）。
+
+## License
+MIT（待補）。
