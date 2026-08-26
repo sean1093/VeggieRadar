@@ -11,7 +11,7 @@ import './App.css';
 
 function App() {
   const [board, setBoard] = useState<ProduceItem[]>([]);
-  const [boardDate, setBoardDate] = useState<string>('');
+  const [boardDate, setBoardDate] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,8 +39,8 @@ function App() {
 
   useEffect(loadBoard, []);
 
-  // Search: filter the board locally for instant feedback; if nothing matches,
-  // fall back to a live backend query.
+  // Search: filter the board locally for instant feedback; fall back to a live
+  // backend query only when nothing matches locally.
   const handleSearch = async (raw: string) => {
     const q = raw.trim();
     setQuery(q);
@@ -48,7 +48,10 @@ function App() {
     setActiveFilter('all');
     if (!q) return;
 
-    const localHit = board.some((it) => it.name.includes(q) || it.official_name.includes(q));
+    const ql = q.toLowerCase();
+    const localHit = board.some(
+      (it) => it.name.toLowerCase().includes(ql) || it.official_name.includes(q),
+    );
     if (localHit) return;
 
     setSearching(true);
@@ -64,7 +67,10 @@ function App() {
 
   const baseItems = useMemo<ProduceItem[]>(() => {
     if (!query) return board;
-    const local = board.filter((it) => it.name.includes(query) || it.official_name.includes(query));
+    const ql = query.toLowerCase();
+    const local = board.filter(
+      (it) => it.name.toLowerCase().includes(ql) || it.official_name.includes(query),
+    );
     if (local.length) return local;
     return remoteResults ?? [];
   }, [query, board, remoteResults]);
@@ -82,22 +88,22 @@ function App() {
   const busy = loading || searching;
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-[100dvh] bg-paper">
       <Header onSearch={handleSearch} onClear={clearSearch} loading={busy} />
 
-      <main className="container mx-auto px-4 py-6">
-        {boardDate && !error && (
-          <div className="mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <p className="text-base text-gray-700">
-              {query ? (
-                <>搜尋「<span className="font-semibold">{query}</span>」</>
-              ) : (
-                <>今日常見菜價</>
-              )}
-              <span className="ml-2 text-sm text-gray-400">資料日期 {boardDate}（批發市場收盤均價）</span>
+      <main className="mx-auto max-w-2xl px-4 pb-[env(safe-area-inset-bottom)]">
+        {!error && (
+          <section className="pt-6 pb-5">
+            <h2 className="text-2xl font-semibold tracking-tight text-ink">
+              {query ? `搜尋「${query}」` : '今日菜價'}
+            </h2>
+            {boardDate && (
+              <p className="mt-1 text-sm text-stone">資料日期 {boardDate}・批發市場收盤均價</p>
+            )}
+            <p className="mt-1 text-xs text-stone">
+              價格以每台斤（600&nbsp;克）計。<span className="text-sage">↓ 便宜</span>・<span className="text-clay">↑ 變貴</span>
             </p>
-            <span className="text-xs text-gray-400">價格以「元/台斤」顯示，綠色↓便宜、紅色↑變貴</span>
-          </div>
+          </section>
         )}
 
         {error && <ErrorMessage error={error} query={query} onRetry={loadBoard} />}
@@ -105,7 +111,9 @@ function App() {
         {!error && (
           <>
             {filterOptions.length > 1 && (
-              <ProduceFilter options={filterOptions} activeFilter={activeFilter} onFilterChange={setActiveFilter} />
+              <div className="pb-5">
+                <ProduceFilter options={filterOptions} activeFilter={activeFilter} onFilterChange={setActiveFilter} />
+              </div>
             )}
 
             {busy && <ProduceList items={[]} loading onCardClick={setSelectedItem} />}
@@ -117,9 +125,13 @@ function App() {
             {!busy && visibleItems.length === 0 && (
               <EmptyState
                 message="查無此品項"
-                suggestion={query ? `找不到「${query}」，試試：高麗菜、番茄、蔥` : '目前沒有菜價資料'}
+                suggestion={query ? `找不到「${query}」，試試：高麗菜、番茄、蔥。` : '目前沒有菜價資料。'}
               />
             )}
+
+            <p className="py-8 text-center text-xs text-stone">
+              資料來源：農業部批發市場交易行情開放資料
+            </p>
           </>
         )}
       </main>

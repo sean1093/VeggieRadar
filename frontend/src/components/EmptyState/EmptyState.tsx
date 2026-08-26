@@ -6,14 +6,13 @@ interface EmptyStateProps {
 }
 
 const EmptyState: React.FC<EmptyStateProps> = ({
-  message = '歡迎使用 VeggieRadar',
-  suggestion = '請在上方搜尋框輸入蔬果名稱，例如：番茄、高麗菜、蘋果',
+  message = '目前沒有資料',
+  suggestion = '試著搜尋蔬果名稱，例如：高麗菜、番茄、菠菜。',
 }) => {
   return (
-    <div className="flex flex-col items-center justify-center min-h-[400px] text-center px-4">
-      <div className="text-6xl mb-4">🥬</div>
-      <h2 className="text-2xl font-bold text-gray-800 mb-2">{message}</h2>
-      <p className="text-gray-600 max-w-md">{suggestion}</p>
+    <div className="mx-auto flex max-w-2xl flex-col items-center justify-center px-6 py-20 text-center">
+      <p className="text-lg font-medium text-ink">{message}</p>
+      <p className="mt-2 max-w-xs text-sm text-stone">{suggestion}</p>
     </div>
   );
 };

@@ -1,175 +1,72 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.js";
 
+/*
+ * MUJI-inspired light theme. shadcn/ui tokens are retuned to the paper/ink
+ * palette so Dialog/Button inherit the same calm surface.
+ */
 :root {
-  --background: 0 0% 100%;
-  --foreground: 222.2 84% 4.9%;
+  --background: 40 33% 96%;   /* paper  #FAF8F3 */
+  --foreground: 48 6% 19%;    /* ink    #33322E */
 
   --card: 0 0% 100%;
-  --card-foreground: 222.2 84% 4.9%;
+  --card-foreground: 48 6% 19%;
 
-  --popover: 0 0% 100%;
-  --popover-foreground: 222.2 84% 4.9%;
+  --popover: 40 33% 98%;
+  --popover-foreground: 48 6% 19%;
 
-  --primary: 222.2 47.4% 11.2%;
-  --primary-foreground: 210 40% 98%;
+  --primary: 48 6% 19%;
+  --primary-foreground: 40 33% 96%;
 
-  --secondary: 210 40% 96.1%;
-  --secondary-foreground: 222.2 47.4% 11.2%;
+  --secondary: 40 20% 92%;
+  --secondary-foreground: 48 6% 19%;
 
-  --muted: 210 40% 96.1%;
-  --muted-foreground: 215.4 16.3% 46.9%;
+  --muted: 40 18% 92%;
+  --muted-foreground: 40 5% 47%;
 
-  --accent: 210 40% 96.1%;
-  --accent-foreground: 222.2 47.4% 11.2%;
+  --accent: 82 16% 42%;       /* sage */
+  --accent-foreground: 40 33% 96%;
 
-  --destructive: 0 84.2% 60.2%;
-  --destructive-foreground: 210 40% 98%;
+  --destructive: 11 38% 48%;  /* clay */
+  --destructive-foreground: 40 33% 96%;
 
-  --border: 214.3 31.8% 91.4%;
-  --input: 214.3 31.8% 91.4%;
-  --ring: 222.2 84% 4.9%;
+  --border: 40 20% 88%;       /* line */
+  --input: 40 20% 88%;
+  --ring: 82 16% 42%;
 
-  --radius: 0.5rem;
+  --radius: 0.75rem;
 
-  /* Existing variables below */
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  /* --border: #e5e4e7;  -- This will be overridden by shadcn/ui variable */
-  --code-bg: #f4f3ec;
-  --accent-old: #aa3bff; /* Renamed to avoid conflict with shadcn/ui accent */
-  --accent-bg-old: rgba(170, 59, 255, 0.1);
-  --accent-border-old: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
-
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
-
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
+  color-scheme: light;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-
-    --primary: 217.2 91.2% 59.8%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-
-    --secondary: 217.2 32.4% 17.8%;
-    --secondary-foreground: 210 40% 98%;
-
-    --muted: 217.2 32.4% 17.8%;
-    --muted-foreground: 215 20.4% 65%;
-
-    --accent: 217.2 32.4% 17.8%;
-    --accent-foreground: 210 40% 98%;
-
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 217.2 32.4% 17.8%;
-    --input: 217.2 32.4% 17.8%;
-    --ring: 217.2 91.2% 59.8%;
-
-    /* Existing variables below */
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    /* --border: #2e303a; -- This will be overridden by shadcn/ui variable */
-    --code-bg: #1f2028;
-    --accent-old: #c084fc; /* Renamed to avoid conflict with shadcn/ui accent */
-    --accent-bg-old: rgba(192, 132, 252, 0.15);
-    --accent-border-old: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
+* {
+  border-color: hsl(var(--border));
 }
 
-#root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
+html {
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
   margin: 0;
+  min-height: 100dvh;
+  background: #faf8f3;
+  color: #33322e;
+  font-family:
+    "Noto Sans TC", system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  letter-spacing: 0.01em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-synthesis: none;
 }
 
-h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
+/* Quiet, thin scrollbars for the horizontal filter rail. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
-
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
-}
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
-p {
-  margin: 0;
-}
-
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
-}
-
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }

@@ -7,7 +7,7 @@ describe('App (board-first)', () => {
   it('loads the daily board on mount with a data date', async () => {
     render(<App />);
     expect(await screen.findByText('高麗菜')).toBeInTheDocument();
-    expect(screen.getByText(/今日常見菜價/)).toBeInTheDocument();
+    expect(screen.getAllByText(/今日菜價/).length).toBeGreaterThan(0);
     expect(screen.getByText(/資料日期 2026-08-26/)).toBeInTheDocument();
     // Prices shown in 元/台斤 for grandmas.
     expect(screen.getAllByText(/元\/台斤/).length).toBeGreaterThan(0);
@@ -24,7 +24,7 @@ describe('App (board-first)', () => {
   it('searches within the board locally', async () => {
     render(<App />);
     await screen.findByText('高麗菜');
-    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果名稱/), { target: { value: '番茄' } });
+    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '番茄' } });
     fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
     await waitFor(() => expect(screen.getByText(/搜尋「/)).toBeInTheDocument());
     expect(within(screen.getByTestId('produce-list')).getByText('番茄')).toBeInTheDocument();

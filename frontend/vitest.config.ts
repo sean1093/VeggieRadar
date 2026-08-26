@@ -9,6 +9,8 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: './setupTests.ts',
     css: true,
+    // Force the offline mock board; never hit the network in tests.
+    env: { VITE_API_BASE_URL: '' },
   },
   resolve: {
     alias: {

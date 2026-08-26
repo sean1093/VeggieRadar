@@ -12,6 +12,6 @@ describe('Header', () => {
 
   it('contains a search input field', () => {
     render(<Header onSearch={mockOnSearch} />);
-    expect(screen.getByPlaceholderText(/搜尋蔬果名稱/)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/搜尋蔬果/)).toBeInTheDocument();
   });
 });

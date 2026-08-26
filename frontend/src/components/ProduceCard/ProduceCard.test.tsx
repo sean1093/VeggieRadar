@@ -16,22 +16,22 @@ const up: ProduceItem = {
 };
 
 describe('ProduceCard', () => {
-  it('shows the display name and 台斤 price', () => {
+  it('shows the name and 台斤 price', () => {
     render(<ProduceCard item={down} onClick={vi.fn()} />);
     expect(screen.getByText('高麗菜')).toBeInTheDocument();
     expect(screen.getByText('14.6')).toBeInTheDocument();
-    expect(screen.getByText(/元\/台斤/)).toBeInTheDocument();
+    expect(screen.getByText('元/台斤')).toBeInTheDocument();
   });
 
-  it('uses green + 便宜了 when price falls', () => {
+  it('uses sage + 便宜了 when price falls', () => {
     render(<ProduceCard item={down} onClick={vi.fn()} />);
-    expect(screen.getByText(/3\.1%/)).toHaveClass('text-green-600');
+    expect(screen.getByText(/3\.1%/).parentElement).toHaveClass('text-sage');
     expect(screen.getByText('便宜了')).toBeInTheDocument();
   });
 
-  it('uses red + 變貴了 when price rises', () => {
+  it('uses clay + 變貴了 when price rises', () => {
     render(<ProduceCard item={up} onClick={vi.fn()} />);
-    expect(screen.getByText(/25\.7%/)).toHaveClass('text-red-600');
+    expect(screen.getByText(/25\.7%/).parentElement).toHaveClass('text-clay');
     expect(screen.getByText('變貴了')).toBeInTheDocument();
   });
 

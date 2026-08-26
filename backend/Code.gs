@@ -1,34 +1,35 @@
 /**
  * Google Apps Script (GAS) backend for VeggieRadar — Board-First Architecture
  *
- * Goal: 讓婆婆媽媽逛市場時，一打開就看到「今日常見菜價看板」，快速掃過、綠跌紅漲。
+ * Goal: shoppers open the app and instantly see today's common produce prices
+ *       at a glance — green when cheaper, clay when pricier.
  *
  * How it works:
  *   - A daily time-trigger (`refreshBoardCache`) pre-warms a cached board so users
  *     never pay the crawl latency.
  *   - `doGet` (default) returns the cached board instantly.
- *   - `doGet?action=search&query=高麗菜` filters the board / falls back to a live query.
- *   - `doGet?action=getTrend&cropName=甘藍&days=7` returns a price trend.
+ *   - `doGet?action=search&query=<name>` filters the board / falls back to a live query.
+ *   - `doGet?action=getTrend&cropName=<name>&days=7` returns a price trend.
  *
- * Data source: 農業部農產品批發市場交易行情 (open data, no key required).
+ * Data source: Taiwan MOA wholesale market transactions (open data, no key required).
  *   Endpoint : https://data.moa.gov.tw/api/v1/AgriProductsTransType/
  *   Dates    : ROC calendar, e.g. 115.08.26
- *   Prices   : 元 / 公斤
+ *   Prices   : NT$ / kg
  */
 
 // --- Configuration ---
 var AGRICULTURE_API_URL = 'https://data.moa.gov.tw/api/v1/AgriProductsTransType/';
-var MIN_TRADE_VOLUME = 200;      // 公斤，過濾零星交易
-var CATTY_PER_KG = 0.6;          // 1 台斤 = 0.6 公斤
+var MIN_TRADE_VOLUME = 200;      // kg; filters out sparse trades
+var CATTY_PER_KG = 0.6;          // 1 catty = 0.6 kg
 var BOARD_CACHE_KEY = 'veggie_board_v1';
-var BOARD_CACHE_TTL = 6 * 60 * 60; // 6 小時
-var MAX_LOOKBACK_DAYS = 8;       // 往前找最近一個有資料的交易日
+var BOARD_CACHE_TTL = 6 * 60 * 60; // 6 hours
+var MAX_LOOKBACK_DAYS = 8;       // walk back to the latest day that has data
 
 /**
- * 看板品項：婆婆媽媽最常買的菜。
- * name     = 顯示用俗名
- * official = 農業部 API 的 CropName 前綴（會涵蓋所有品種與市場）
- * category = 前端分類篩選用
+ * Board items: the produce people buy most often.
+ * name     = display name (Chinese; shown in the UI)
+ * official = MOA API CropName prefix (Chinese; covers all varieties/markets)
+ * category = category shown in the front-end filter (Chinese)
  */
 var BOARD_ITEMS = [
   { name: '高麗菜', official: '甘藍',     category: '葉菜類' },
@@ -72,15 +73,28 @@ var BOARD_ITEMS = [
 ];
 
 /**
- * 俗名 → 農業部官方 CropName 別名表（給搜尋用）。
- * MOA 的 CropName 參數是「前綴比對」，多數輸入可直接命中；
- * 這裡只補常見的用詞落差。
+ * Search aliases → MOA official CropName (Chinese; the API only accepts
+ * Chinese). Covers common English and colloquial terms. MOA matches CropName
+ * as a prefix, so exact Chinese input already works without an entry here.
  */
 var SEARCH_ALIASES = {
+  // English → official Chinese
+  'cabbage': '甘藍', 'bok choy': '小白菜', 'baby bok choy': '青江白菜',
+  'water spinach': '蕹菜', 'spinach': '菠菜', 'lettuce': '萵苣',
+  'chinese kale': '芥藍', 'kale': '芥藍', 'chives': '韭菜', 'celery': '芹菜',
+  'cauliflower': '花椰菜', 'daikon': '蘿蔔', 'radish': '蘿蔔', 'carrot': '胡蘿蔔',
+  'onion': '洋蔥', 'potato': '馬鈴薯', 'tomato': '番茄', 'eggplant': '茄子',
+  'green pepper': '青椒', 'bell pepper': '甜椒', 'pepper': '甜椒', 'corn': '玉米',
+  'green bean': '敏豆', 'bitter gourd': '苦瓜', 'luffa': '絲瓜', 'cucumber': '胡瓜',
+  'winter melon': '冬瓜', 'pumpkin': '南瓜', 'scallion': '蔥', 'green onion': '蔥',
+  'ginger': '薑', 'garlic': '大蒜', 'chili': '辣椒', 'chili pepper': '辣椒',
+  'thai basil': '九層塔', 'basil': '九層塔', 'bean sprouts': '豆芽',
+  'shiitake': '香菇', 'mushroom': '香菇', 'enoki': '金針菇', 'banana': '香蕉',
+  'apple': '蘋果', 'papaya': '木瓜', 'pineapple': '鳳梨', 'watermelon': '西瓜',
+  // colloquial Chinese → official Chinese
   '高麗菜': '甘藍', '空心菜': '蕹菜', '青江菜': '青江白菜',
   '紅蘿蔔': '胡蘿蔔', '白蘿蔔': '蘿蔔', '地瓜葉': '甘藷葉',
-  '四季豆': '敏豆', '大黃瓜': '胡瓜', '小黃瓜': '花胡瓜',
-  'A菜': '萵苣', '大陸妹': '萵苣'
+  '四季豆': '敏豆', '大黃瓜': '胡瓜', '小黃瓜': '花胡瓜'
 };
 
 // --- Web App entry point ---
@@ -201,30 +215,31 @@ function handleSearch(params) {
   if (!query) {
     return { type: 'search', error: '請輸入查詢關鍵字' };
   }
+  var q = query.toLowerCase();
 
   // 1. Try the served board first — instant for common items (no crawl).
   var board = readBoard();
   if (board.items && board.items.length) {
     var hits = board.items.filter(function (it) {
-      return it.name.indexOf(query) !== -1 || it.official_name.indexOf(query) !== -1;
+      return it.name.toLowerCase().indexOf(q) !== -1 || it.official_name.indexOf(query) !== -1;
     });
     if (hits.length) {
       return { type: 'search', query: query, date: board.date, count: hits.length, items: hits };
     }
   }
 
-  // 2. Fall back to a live query against the MOA API.
-  var term = SEARCH_ALIASES[query] || query;
+  // 2. Fall back to a live query against the MOA API (needs Chinese CropName).
+  var term = SEARCH_ALIASES[q] || SEARCH_ALIASES[query] || query;
   var dates = resolveTradeDates();
   if (!dates.latest) return { type: 'search', query: query, error: '近期查無交易資料', items: [] };
 
   var todayRows = fetchCrop(term, dates.latest);
   if (!todayRows.length) {
-    return { type: 'search', query: query, error: '查無此品項', suggestion: '試試：高麗菜、番茄、青江菜' };
+    return { type: 'search', query: query, error: '查無此品項', suggestion: '試試：高麗菜、番茄、菠菜' };
   }
   var prevRows = fetchCrop(term, dates.prev);
 
-  // Group live results per official variant name (e.g. 番茄-黑柿, 番茄-牛番茄).
+  // Group live results per official variant name.
   var groups = {};
   for (var i = 0; i < todayRows.length; i++) {
     var nm = todayRows[i].CropName;
@@ -306,37 +321,42 @@ function parseRows(resp) {
 }
 
 /**
- * Concurrently fetches rows for many crop-name prefixes on one ROC date.
- * Uses UrlFetchApp.fetchAll so the board crawl finishes within trigger limits.
+ * Fetches rows for many crop-name prefixes on one ROC date, in small
+ * concurrent batches. A single 70+ request burst trips MOA's per-IP limit and
+ * comes back empty, so we cap concurrency and pause briefly between batches.
  * @returns {Object} map of cropName → rows[]
  */
 function fetchAllRows(cropNames, rocDate) {
-  var requests = cropNames.map(function (name) {
-    return {
-      url: AGRICULTURE_API_URL + '?' + [
-        'CropName=' + encodeURIComponent(name),
-        'Start_time=' + encodeURIComponent(rocDate),
-        'End_time=' + encodeURIComponent(rocDate)
-      ].join('&'),
-      muteHttpExceptions: true
-    };
-  });
-
+  var BATCH = 13;
   var out = {};
-  try {
-    var responses = UrlFetchApp.fetchAll(requests);
-    for (var i = 0; i < responses.length; i++) {
-      out[cropNames[i]] = parseRows(responses[i]);
+  for (var start = 0; start < cropNames.length; start += BATCH) {
+    var slice = cropNames.slice(start, start + BATCH);
+    var requests = slice.map(function (name) {
+      return {
+        url: AGRICULTURE_API_URL + '?' + [
+          'CropName=' + encodeURIComponent(name),
+          'Start_time=' + encodeURIComponent(rocDate),
+          'End_time=' + encodeURIComponent(rocDate)
+        ].join('&'),
+        muteHttpExceptions: true
+      };
+    });
+    try {
+      var responses = UrlFetchApp.fetchAll(requests);
+      for (var i = 0; i < responses.length; i++) {
+        out[slice[i]] = parseRows(responses[i]);
+      }
+    } catch (err) {
+      Logger.log('fetchAllRows batch error (' + rocDate + '): ' + err);
     }
-  } catch (err) {
-    Logger.log('fetchAllRows error (' + rocDate + '): ' + err);
+    if (start + BATCH < cropNames.length) Utilities.sleep(120);
   }
   return out;
 }
 
 /** Finds the latest ROC date with data and the previous available date. */
 function resolveTradeDates() {
-  var probe = '甘藍'; // 全年、全市場、高交易量，最可靠的探針
+  var probe = '甘藍'; // cabbage: year-round, all markets, high volume — the most reliable probe
   var today = new Date();
   var latest = null;
   var prev = null;

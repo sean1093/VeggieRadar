@@ -21,8 +21,8 @@ describe('ProduceFilter', () => {
   it('highlights the active filter option', () => {
     render(<ProduceFilter options={mockFilterOptions} activeFilter="葉菜類" onFilterChange={() => {}} />);
 
-    expect(screen.getByRole('button', { name: '葉菜類' })).toHaveClass('bg-blue-500 text-white'); // Assuming these classes for active state
-    expect(screen.getByRole('button', { name: '全部' })).not.toHaveClass('bg-blue-500 text-white');
+    expect(screen.getByRole('button', { name: '葉菜類' })).toHaveClass('text-ink');
+    expect(screen.getByRole('button', { name: '全部' })).not.toHaveClass('text-ink');
   });
 
   it('calls onFilterChange with the correct value when an option is clicked', () => {

@@ -8,15 +8,17 @@ interface ProduceListProps {
   onCardClick: (item: ProduceItem) => void;
 }
 
-const gridClass = 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4';
+const panelClass = 'mx-auto max-w-2xl bg-surface rounded-2xl border border-line overflow-hidden divide-y divide-line';
 
 const LoadingSkeleton: React.FC = () => (
-  <div className={gridClass}>
-    {Array.from({ length: 9 }).map((_, i) => (
-      <div key={i} className="bg-white rounded-2xl shadow-sm p-5 border border-gray-100 animate-pulse">
-        <div className="h-7 bg-gray-200 rounded w-2/3 mb-4" />
-        <div className="h-10 bg-gray-200 rounded w-1/2 mb-2" />
-        <div className="h-4 bg-gray-200 rounded w-1/3" />
+  <div className={panelClass}>
+    {Array.from({ length: 8 }).map((_, i) => (
+      <div key={i} className="px-5 py-4 flex items-center justify-between animate-pulse">
+        <div className="space-y-2">
+          <div className="h-4 w-24 rounded bg-line" />
+          <div className="h-3 w-16 rounded bg-line" />
+        </div>
+        <div className="h-6 w-20 rounded bg-line" />
       </div>
     ))}
   </div>
@@ -30,7 +32,7 @@ const ProduceList: React.FC<ProduceListProps> = ({ items, loading = false, onCar
     return null; // EmptyState handled by parent
   }
   return (
-    <div data-testid="produce-list" className={gridClass}>
+    <div data-testid="produce-list" className={panelClass}>
       {items.map((item) => (
         <ProduceCard key={`${item.code}-${item.name}`} item={item} onClick={onCardClick} />
       ))}
