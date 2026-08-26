@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://sean1093.github.io/VeggieRadar/sitemap.xml

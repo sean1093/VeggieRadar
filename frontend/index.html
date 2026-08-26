@@ -2,23 +2,82 @@
 <html lang="zh-Hant">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+
+    <title>今日菜價 | 台灣蔬果批發市場即時價格查詢</title>
+    <meta
+      name="description"
+      content="今日菜價：一眼看懂台灣蔬果批發市場今日價格。高麗菜、番茄、青菜等常見菜色以「元/台斤」顯示，綠跌紅漲、每日更新，適合上市場前手機快速查詢。"
+    />
+    <meta
+      name="keywords"
+      content="今日菜價,菜價,蔬菜價格,水果價格,蔬果批發價,批發市場行情,台灣菜價,農產品價格,高麗菜價格,番茄價格,買菜"
+    />
+    <meta name="author" content="VeggieRadar" />
+    <meta name="robots" content="index, follow" />
     <meta name="theme-color" content="#faf8f3" />
-    <meta name="description" content="今日菜價 — 台灣蔬果批發市場今日價格，一眼看懂，行動裝置優先。" />
-    <meta property="og:title" content="今日菜價 VeggieRadar" />
-    <meta property="og:description" content="台灣蔬果批發市場今日價格，一眼看懂。" />
+    <link rel="canonical" href="https://sean1093.github.io/VeggieRadar/" />
+
+    <!-- Icons -->
+    <link rel="icon" type="image/svg+xml" href="/VeggieRadar/favicon.svg" />
+    <link rel="apple-touch-icon" href="/VeggieRadar/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="今日菜價" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+
+    <!-- Open Graph (LINE / Facebook) -->
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="今日菜價 VeggieRadar" />
+    <meta property="og:title" content="今日菜價｜台灣蔬果批發市場即時價格" />
+    <meta
+      property="og:description"
+      content="上市場前，手機一眼看懂今天菜貴不貴。常見蔬果以元/台斤顯示，綠跌紅漲、每日更新。"
+    />
+    <meta property="og:url" content="https://sean1093.github.io/VeggieRadar/" />
+    <meta property="og:image" content="https://sean1093.github.io/VeggieRadar/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="今日菜價 — 台灣蔬果批發市場今日價格" />
+    <meta property="og:locale" content="zh_TW" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="今日菜價｜台灣蔬果批發市場即時價格" />
+    <meta
+      name="twitter:description"
+      content="上市場前，手機一眼看懂今天菜貴不貴。常見蔬果以元/台斤顯示，綠跌紅漲、每日更新。"
+    />
+    <meta name="twitter:image" content="https://sean1093.github.io/VeggieRadar/og-image.png" />
+
+    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
-    <title>今日菜價 VeggieRadar</title>
+
+    <!-- Structured data -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "今日菜價 VeggieRadar",
+        "url": "https://sean1093.github.io/VeggieRadar/",
+        "description": "台灣蔬果批發市場今日價格查詢，常見蔬果以元/台斤顯示，綠跌紅漲、每日更新。",
+        "applicationCategory": "LifestyleApplication",
+        "operatingSystem": "Web",
+        "inLanguage": "zh-Hant",
+        "isAccessibleForFree": true,
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "TWD" }
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
+    <noscript>
+      今日菜價 VeggieRadar 是台灣蔬果批發市場今日價格的快速查詢工具。常見蔬果（高麗菜、番茄、青菜、蘿蔔等）以每台斤價格顯示，綠色代表下跌、紅色代表上漲，每日更新，資料來自農業部批發市場交易行情開放資料。請開啟 JavaScript 以檢視今日菜價看板。
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
