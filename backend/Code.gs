@@ -94,8 +94,10 @@ function doGet(e) {
       payload = handleTrend(params);
     } else if (action === 'search') {
       payload = handleSearch(params);
+    } else if (action === 'warm') {
+      payload = refreshBoardCache();
     } else {
-      payload = getBoard(false);
+      payload = readBoard();
     }
     return jsonOut(payload);
   } catch (err) {
@@ -113,56 +115,83 @@ function jsonOut(obj) {
 // --- Board ---
 
 /**
- * Returns the daily board, served from cache when possible.
- * @param {boolean} forceRebuild - bypass cache and recrawl.
+ * Serves the board for user requests. NEVER crawls synchronously — a cold
+ * crawl exceeds the Web App response window and returns an error page.
+ * Order: in-memory cache → durable ScriptProperties → "warming" placeholder.
  */
-function getBoard(forceRebuild) {
+function readBoard() {
   var cache = CacheService.getScriptCache();
-  if (!forceRebuild) {
-    var cached = cache.get(BOARD_CACHE_KEY);
-    if (cached) {
-      var parsed = JSON.parse(cached);
-      parsed.cached = true;
-      return parsed;
-    }
+  var cached = cache.get(BOARD_CACHE_KEY);
+  if (cached) {
+    var p = JSON.parse(cached);
+    p.cached = true;
+    return p;
   }
+  var durable = PropertiesService.getScriptProperties().getProperty(BOARD_CACHE_KEY);
+  if (durable) {
+    cache.put(BOARD_CACHE_KEY, durable, BOARD_CACHE_TTL);
+    var d = JSON.parse(durable);
+    d.cached = true;
+    return d;
+  }
+  // No data yet — trigger not run. Fast, non-crawling response.
+  return { type: 'board', warming: true, count: 0, items: [] };
+}
 
+/**
+ * Crawls the MOA API and assembles the board. Slow (many requests) — only ever
+ * called from the time-driven trigger / manual setup, never from doGet.
+ */
+function buildBoard() {
   var dates = resolveTradeDates();
   if (!dates.latest) {
     return { type: 'board', error: '近期查無交易資料', items: [] };
   }
 
+  var names = BOARD_ITEMS.map(function (d) { return d.official; });
+  var today = fetchAllRows(names, dates.latest);
+  var prev = dates.prev ? fetchAllRows(names, dates.prev) : {};
+
   var items = [];
   for (var i = 0; i < BOARD_ITEMS.length; i++) {
     var def = BOARD_ITEMS[i];
-    var todayRows = fetchCrop(def.official, dates.latest);
+    var todayRows = today[def.official] || [];
     if (!todayRows.length) continue;
-    var prevRows = fetchCrop(def.official, dates.prev);
-    var card = aggregateGroup(def.name, def.official, def.category, todayRows, prevRows);
+    var card = aggregateGroup(def.name, def.official, def.category, todayRows, prev[def.official] || []);
     if (card) items.push(card);
   }
 
-  var payload = {
+  return {
     type: 'board',
     date: rocToISO(dates.latest),
     roc_date: dates.latest,
     prev_date: dates.prev,
     count: items.length,
-    items: items,
-    cached: false
+    items: items
   };
-
-  // Cache only a healthy board.
-  if (items.length > 0) {
-    cache.put(BOARD_CACHE_KEY, JSON.stringify(payload), BOARD_CACHE_TTL);
-  }
-  return payload;
 }
 
-/** Daily time-driven trigger target — pre-warms the cache. */
+/** Persists a healthy board to both the fast cache and durable properties. */
+function storeBoard(payload) {
+  var json = JSON.stringify(payload);
+  CacheService.getScriptCache().put(BOARD_CACHE_KEY, json, BOARD_CACHE_TTL);
+  try {
+    if (json.length <= 9000) { // ScriptProperties per-value limit is 9KB
+      PropertiesService.getScriptProperties().setProperty(BOARD_CACHE_KEY, json);
+    }
+  } catch (err) {
+    Logger.log('storeBoard property error: ' + err);
+  }
+}
+
+/** Time-driven trigger target — rebuilds and stores the board. */
 function refreshBoardCache() {
-  var board = getBoard(true);
-  Logger.log('Board refreshed: ' + board.count + ' items for ' + board.roc_date);
+  var board = buildBoard();
+  if (board.items && board.items.length) {
+    storeBoard(board);
+  }
+  Logger.log('Board refreshed: ' + (board.count || 0) + ' items');
+  return board;
 }
 
 // --- Search ---
@@ -173,8 +202,8 @@ function handleSearch(params) {
     return { type: 'search', error: '請輸入查詢關鍵字' };
   }
 
-  // 1. Try the cached board first — instant for common items.
-  var board = getBoard(false);
+  // 1. Try the served board first — instant for common items (no crawl).
+  var board = readBoard();
   if (board.items && board.items.length) {
     var hits = board.items.filter(function (it) {
       return it.name.indexOf(query) !== -1 || it.official_name.indexOf(query) !== -1;
@@ -263,6 +292,46 @@ function fetchCrop(cropName, rocDate) {
     Logger.log('fetchCrop error (' + cropName + ' ' + rocDate + '): ' + err);
     return [];
   }
+}
+
+/** Parses MOA rows from a single HTTPResponse. */
+function parseRows(resp) {
+  try {
+    if (resp.getResponseCode() !== 200) return [];
+    var json = JSON.parse(resp.getContentText());
+    return (json && json.Data) ? json.Data : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+/**
+ * Concurrently fetches rows for many crop-name prefixes on one ROC date.
+ * Uses UrlFetchApp.fetchAll so the board crawl finishes within trigger limits.
+ * @returns {Object} map of cropName → rows[]
+ */
+function fetchAllRows(cropNames, rocDate) {
+  var requests = cropNames.map(function (name) {
+    return {
+      url: AGRICULTURE_API_URL + '?' + [
+        'CropName=' + encodeURIComponent(name),
+        'Start_time=' + encodeURIComponent(rocDate),
+        'End_time=' + encodeURIComponent(rocDate)
+      ].join('&'),
+      muteHttpExceptions: true
+    };
+  });
+
+  var out = {};
+  try {
+    var responses = UrlFetchApp.fetchAll(requests);
+    for (var i = 0; i < responses.length; i++) {
+      out[cropNames[i]] = parseRows(responses[i]);
+    }
+  } catch (err) {
+    Logger.log('fetchAllRows error (' + rocDate + '): ' + err);
+  }
+  return out;
 }
 
 /** Finds the latest ROC date with data and the previous available date. */
