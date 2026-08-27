@@ -2,10 +2,11 @@
  * Google Apps Script (GAS) backend for VeggieRadar — Board-First Architecture
  *
  * Goal: shoppers open the app and instantly see today's common produce prices
- *       at a glance — green when cheaper, clay when pricier.
+ *       at a glance — green when cheaper, clay when pricier — plus an estimated
+ *       traditional-market retail band they can use while standing at the stall.
  *
  * How it works:
- *   - A daily time-trigger (`refreshBoardCache`) pre-warms a cached board so users
+ *   - A time-trigger (`refreshBoardCache`) pre-warms a cached board so users
  *     never pay the crawl latency.
  *   - `doGet` (default) returns the cached board instantly.
  *   - `doGet?action=search&query=<name>` filters the board / falls back to a live query.
@@ -15,86 +16,274 @@
  *   Endpoint : https://data.moa.gov.tw/api/v1/AgriProductsTransType/
  *   Dates    : ROC calendar, e.g. 115.08.26
  *   Prices   : NT$ / kg
+ *
+ * Two MOA quirks drive the shape of this file:
+ *
+ *   1. `CropName` is matched as a SUBSTRING of the full `<root>-<variety>` name,
+ *      not as a prefix. Querying `蔥` returns 洋蔥 (onion) and 大蒜-蔥蒜; querying
+ *      `蘿蔔` returns 胡蘿蔔 (carrot); querying `胡瓜` returns 花胡瓜 (小黃瓜).
+ *      Every board item therefore declares the exact `root` it wants, plus an
+ *      optional variety include/exclude, and rows are filtered locally.
+ *
+ *   2. On a day a market is closed — including today before the closing prices
+ *      publish — MOA returns placeholder rows with `CropName: "休市"` and zeroed
+ *      price/quantity. Those rows must never count as "this date has data".
  */
 
 // --- Configuration ---
 var AGRICULTURE_API_URL = 'https://data.moa.gov.tw/api/v1/AgriProductsTransType/';
-var MIN_TRADE_VOLUME = 200;      // kg; filters out sparse trades
+var MIN_TRADE_VOLUME = 200;      // kg; filters out sparse trades for one item
+var PROBE_MIN_VOLUME = 50000;    // kg; a real island-wide trading day for the probe crop
 var CATTY_PER_KG = 0.6;          // 1 catty = 0.6 kg
-var BOARD_CACHE_KEY = 'veggie_board_v1';
+var BOARD_CACHE_KEY = 'veggie_board_v2';
 var BOARD_CACHE_TTL = 6 * 60 * 60; // 6 hours
 var MAX_LOOKBACK_DAYS = 8;       // walk back to the latest day that has data
+var FETCH_BATCH = 13;            // concurrent UrlFetchApp requests; a 70+ burst trips MOA's per-IP limit
+
+// Durable board storage. ScriptProperties caps a single value at 9 KB and the
+// board is ~25 KB, so it is written as numbered chunks.
+var BOARD_PROP_PREFIX = 'veggie_board_v2_chunk_';
+var BOARD_PROP_COUNT = 'veggie_board_v2_chunks';
+var PROP_CHUNK_SIZE = 8000;
 
 /**
- * Board items: the produce people buy most often.
+ * Board items: the produce people actually buy.
+ *
  * name     = display name (Chinese; shown in the UI)
- * official = MOA API CropName prefix (Chinese; covers all varieties/markets)
+ * official = EXACT MOA root name, i.e. the part of `CropName` before the first
+ *            '-'. Verified against the live API — several differ from the
+ *            colloquial name (地瓜葉 = 甘薯葉, 山藥 = 薯蕷, 蒲瓜 = 扁蒲,
+ *            佛手瓜 = 隼人瓜, 香瓜 = 甜瓜, 木耳 = 濕木耳, 金針菇 = 金絲菇).
+ * variety  = optional; keep only rows whose variety part contains this string.
+ * excludes = optional; drop rows whose variety part contains any of these.
  * category = category shown in the front-end filter (Chinese)
+ *
+ * Out-of-season items simply return no rows and are skipped, so the board is
+ * seasonal by construction.
  */
 var BOARD_ITEMS = [
-  { name: '高麗菜', official: '甘藍',     category: '葉菜類' },
-  { name: '小白菜', official: '小白菜',   category: '葉菜類' },
-  { name: '青江菜', official: '青江白菜', category: '葉菜類' },
-  { name: '空心菜', official: '蕹菜',     category: '葉菜類' },
-  { name: '菠菜',   official: '菠菜',     category: '葉菜類' },
-  { name: '萵苣',   official: '萵苣',     category: '葉菜類' },
-  { name: '芥藍',   official: '芥藍',     category: '葉菜類' },
-  { name: '韭菜',   official: '韭菜',     category: '葉菜類' },
-  { name: '芹菜',   official: '芹菜',     category: '葉菜類' },
-  { name: '花椰菜', official: '花椰菜',   category: '葉菜類' },
-  { name: '白蘿蔔', official: '蘿蔔',     category: '根莖類' },
-  { name: '紅蘿蔔', official: '胡蘿蔔',   category: '根莖類' },
-  { name: '洋蔥',   official: '洋蔥',     category: '根莖類' },
-  { name: '馬鈴薯', official: '馬鈴薯',   category: '根莖類' },
-  { name: '番茄',   official: '番茄',     category: '果菜類' },
-  { name: '茄子',   official: '茄子',     category: '果菜類' },
-  { name: '青椒',   official: '青椒',     category: '果菜類' },
-  { name: '甜椒',   official: '甜椒',     category: '果菜類' },
-  { name: '玉米',   official: '玉米',     category: '果菜類' },
-  { name: '敏豆',   official: '敏豆',     category: '果菜類' },
-  { name: '苦瓜',   official: '苦瓜',     category: '瓜果類' },
-  { name: '絲瓜',   official: '絲瓜',     category: '瓜果類' },
-  { name: '大黃瓜', official: '胡瓜',     category: '瓜果類' },
-  { name: '冬瓜',   official: '冬瓜',     category: '瓜果類' },
-  { name: '南瓜',   official: '南瓜',     category: '瓜果類' },
-  { name: '蔥',     official: '蔥',       category: '辛香類' },
-  { name: '薑',     official: '薑',       category: '辛香類' },
-  { name: '大蒜',   official: '大蒜',     category: '辛香類' },
-  { name: '辣椒',   official: '辣椒',     category: '辛香類' },
-  { name: '九層塔', official: '九層塔',   category: '辛香類' },
-  { name: '豆芽',   official: '豆芽',     category: '其他' },
-  { name: '香菇',   official: '香菇',     category: '其他' },
-  { name: '金針菇', official: '金針菇',   category: '其他' },
-  { name: '香蕉',   official: '香蕉',     category: '水果' },
-  { name: '蘋果',   official: '蘋果',     category: '水果' },
-  { name: '木瓜',   official: '木瓜',     category: '水果' },
-  { name: '鳳梨',   official: '鳳梨',     category: '水果' },
-  { name: '西瓜',   official: '西瓜',     category: '水果' }
+  // 葉菜類
+  { name: '高麗菜',   official: '甘藍',       category: '葉菜類' },
+  { name: '大白菜',   official: '包心白菜',   category: '葉菜類' },
+  { name: '小白菜',   official: '小白菜',     category: '葉菜類' },
+  { name: '青江菜',   official: '青江白菜',   category: '葉菜類' },
+  { name: '空心菜',   official: '蕹菜',       category: '葉菜類' },
+  { name: '地瓜葉',   official: '甘薯葉',     category: '葉菜類' },
+  { name: '菠菜',     official: '菠菜',       category: '葉菜類' },
+  { name: '萵苣',     official: '萵苣菜',     category: '葉菜類' },
+  { name: '芥藍',     official: '芥藍菜',     category: '葉菜類' },
+  { name: '莧菜',     official: '莧菜',       category: '葉菜類' },
+  { name: '茼蒿',     official: '茼蒿',       category: '葉菜類' },
+  { name: '油菜',     official: '油菜',       category: '葉菜類' },
+  { name: '芥菜',     official: '芥菜',       category: '葉菜類' },
+  { name: '皇宮菜',   official: '皇宮菜',     category: '葉菜類' },
+  { name: '韭菜',     official: '韭菜',       category: '葉菜類' },
+  { name: '芹菜',     official: '芹菜',       category: '葉菜類' },
+  { name: '芫荽',     official: '芫荽',       category: '葉菜類' },
+  { name: '過貓',     official: '蕨菜',       category: '葉菜類' },
+  { name: '蘆筍',     official: '蘆筍',       category: '葉菜類' },
+  { name: '白花椰菜', official: '花椰菜',     category: '葉菜類', variety: '白' },
+  { name: '青花菜',   official: '花椰菜',     category: '葉菜類', variety: '青' },
+
+  // 根莖類
+  { name: '白蘿蔔',   official: '蘿蔔',       category: '根莖類', excludes: ['甜菜根', '櫻桃'] },
+  { name: '紅蘿蔔',   official: '胡蘿蔔',     category: '根莖類' },
+  { name: '洋蔥',     official: '洋蔥',       category: '根莖類' },
+  { name: '馬鈴薯',   official: '馬鈴薯',     category: '根莖類' },
+  { name: '地瓜',     official: '甘薯',       category: '根莖類' },
+  { name: '芋頭',     official: '芋',         category: '根莖類' },
+  { name: '山藥',     official: '薯蕷',       category: '根莖類' },
+  { name: '牛蒡',     official: '牛蒡',       category: '根莖類' },
+  { name: '竹筍',     official: '竹筍',       category: '根莖類' },
+  { name: '茭白筍',   official: '茭白筍',     category: '根莖類' },
+  { name: '蓮藕',     official: '蓮藕',       category: '根莖類' },
+  { name: '豆薯',     official: '豆薯',       category: '根莖類' },
+
+  // 果菜類
+  { name: '番茄',     official: '番茄',       category: '果菜類' },
+  { name: '小番茄',   official: '小番茄',     category: '果菜類' },
+  { name: '茄子',     official: '茄子',       category: '果菜類' },
+  { name: '青椒',     official: '甜椒',       category: '果菜類', variety: '青椒' },
+  { name: '甜椒',     official: '甜椒',       category: '果菜類', excludes: ['青椒'] },
+  { name: '玉米',     official: '玉米',       category: '果菜類', excludes: ['玉米筍'] },
+  { name: '玉米筍',   official: '玉米',       category: '果菜類', variety: '玉米筍' },
+  { name: '四季豆',   official: '敏豆',       category: '果菜類' },
+  { name: '菜豆',     official: '菜豆',       category: '果菜類' },
+  { name: '豌豆',     official: '豌豆',       category: '果菜類' },
+  { name: '秋葵',     official: '秋葵',       category: '果菜類' },
+
+  // 瓜果類
+  { name: '苦瓜',     official: '苦瓜',       category: '瓜果類' },
+  { name: '絲瓜',     official: '絲瓜',       category: '瓜果類' },
+  { name: '大黃瓜',   official: '胡瓜',       category: '瓜果類' },
+  { name: '小黃瓜',   official: '花胡瓜',     category: '瓜果類' },
+  { name: '冬瓜',     official: '冬瓜',       category: '瓜果類' },
+  { name: '南瓜',     official: '南瓜',       category: '瓜果類' },
+  { name: '蒲瓜',     official: '扁蒲',       category: '瓜果類' },
+  { name: '佛手瓜',   official: '隼人瓜',     category: '瓜果類' },
+
+  // 辛香類
+  { name: '蔥',       official: '青蔥',       category: '辛香類', excludes: ['紅蔥頭'] },
+  { name: '紅蔥頭',   official: '青蔥',       category: '辛香類', variety: '紅蔥頭' },
+  { name: '薑',       official: '薑',         category: '辛香類' },
+  { name: '大蒜',     official: '大蒜',       category: '辛香類' },
+  { name: '辣椒',     official: '辣椒',       category: '辛香類' },
+  { name: '九層塔',   official: '九層塔',     category: '辛香類' },
+
+  // 菇類
+  { name: '香菇',     official: '濕香菇',     category: '菇類' },
+  { name: '金針菇',   official: '金絲菇',     category: '菇類' },
+  { name: '杏鮑菇',   official: '杏鮑菇',     category: '菇類' },
+  { name: '鴻喜菇',   official: '鴻喜菇',     category: '菇類' },
+  { name: '洋菇',     official: '洋菇',       category: '菇類' },
+  { name: '秀珍菇',   official: '秀珍菇',     category: '菇類' },
+  { name: '木耳',     official: '濕木耳',     category: '菇類' },
+
+  // 水果
+  { name: '香蕉',     official: '香蕉',       category: '水果' },
+  { name: '蘋果',     official: '蘋果',       category: '水果' },
+  { name: '木瓜',     official: '木瓜',       category: '水果' },
+  { name: '鳳梨',     official: '鳳梨',       category: '水果' },
+  { name: '西瓜',     official: '西瓜',       category: '水果' },
+  { name: '香瓜',     official: '甜瓜',       category: '水果' },
+  { name: '哈密瓜',   official: '洋香瓜',     category: '水果' },
+  { name: '芭樂',     official: '番石榴',     category: '水果' },
+  { name: '火龍果',   official: '紅龍果',     category: '水果' },
+  { name: '葡萄',     official: '葡萄',       category: '水果' },
+  { name: '芒果',     official: '芒果',       category: '水果' },
+  { name: '荔枝',     official: '荔枝',       category: '水果' },
+  { name: '龍眼',     official: '龍眼',       category: '水果' },
+  { name: '梨',       official: '梨',         category: '水果' },
+  { name: '桃子',     official: '桃子',       category: '水果' },
+  { name: '李子',     official: '李',         category: '水果' },
+  { name: '棗子',     official: '棗子',       category: '水果' },
+  { name: '柿子',     official: '柿子',       category: '水果', excludes: ['柿餅'] },
+  { name: '蓮霧',     official: '蓮霧',       category: '水果' },
+  { name: '釋迦',     official: '釋迦',       category: '水果' },
+  { name: '楊桃',     official: '楊桃',       category: '水果' },
+  { name: '百香果',   official: '百香果',     category: '水果' },
+  { name: '枇杷',     official: '枇杷',       category: '水果' },
+  { name: '檸檬',     official: '雜柑',       category: '水果', variety: '檸檬' },
+  { name: '柳丁',     official: '甜橙',       category: '水果' },
+  { name: '椪柑',     official: '椪柑',       category: '水果' },
+  { name: '桶柑',     official: '桶柑',       category: '水果' },
+  { name: '海梨柑',   official: '海梨柑',     category: '水果' },
+  { name: '茂谷柑',   official: '茂谷柑',     category: '水果' },
+  { name: '柚子',     official: '柚子',       category: '水果' },
+  { name: '葡萄柚',   official: '葡萄柚',     category: '水果' },
+  { name: '酪梨',     official: '酪梨',       category: '水果' },
+  { name: '奇異果',   official: '奇異果',     category: '水果' },
+  { name: '草莓',     official: '草莓',       category: '水果' },
+  { name: '櫻桃',     official: '櫻桃',       category: '水果' },
+  { name: '藍莓',     official: '藍莓',       category: '水果' },
+  { name: '椰子',     official: '椰子',       category: '水果' },
+
+  // 其他
+  { name: '豆芽',     official: '芽菜類',     category: '其他' },
+  { name: '海菜',     official: '海菜',       category: '其他' }
 ];
 
 /**
- * Search aliases → MOA official CropName (Chinese; the API only accepts
- * Chinese). Covers common English and colloquial terms. MOA matches CropName
- * as a prefix, so exact Chinese input already works without an entry here.
+ * Estimated traditional-market retail markup, in 元/台斤 ADDED to the wholesale
+ * catty price. Additive rather than multiplicative because a stall's margin is
+ * driven by handling, shrinkage and rent amortised per unit sold, not by a
+ * percentage: a NT$9/catty cabbage retails around NT$35, a 4x ratio, while a
+ * NT$41/catty pear retails around NT$67, a 1.6x ratio. The same NT$25-30
+ * absolute markup explains both.
+ *
+ * Calibrated against real municipal retail data joined to MOA wholesale on the
+ * same dates:
+ *   - 臺中市公有零售市場每日蔬果價格表 (14 markets, daily, 元/台斤) — 365 days
+ *   - 臺北市公有零售市場行情 (122 items, monthly, 元/台斤) — 114年12月
+ * Median absolute error of the midpoint is 7-24% depending on category, so the
+ * UI must present a band and label it an estimate — never a quoted price.
+ */
+var RETAIL_MARKUP_ROOT = {
+  // Each entry has >= 5 paired retail/wholesale observations across 25 dates.
+  '包心白菜': 24, '大蒜': 68, '小番茄': 59, '木瓜': 29, '柚子': 49, '柿子': 57,
+  '桶柑': 31, '梨': 36, '棗子': 49, '椪柑': 34, '洋蔥': 18, '甘藍': 29,
+  '番石榴': 20, '紅龍果': 38, '絲瓜': 27, '胡瓜': 28, '胡蘿蔔': 18, '芒果': 33,
+  '花椰菜': 36, '花胡瓜': 22, '茂谷柑': 50, '荔枝': 22, '蓮霧': 52, '蕹菜': 21,
+  '蘿蔔': 20, '西瓜': 18, '青江白菜': 33, '青蔥': 51, '香蕉': 14, '鳳梨': 13
+};
+
+/** Per-category fallback [low, mid, high] markup in 元/台斤. */
+var RETAIL_MARKUP_CATEGORY = {
+  '葉菜類': [20, 35, 50],
+  '根莖類': [19, 28, 48],
+  '果菜類': [48, 70, 88],
+  '瓜果類': [22, 32, 50],
+  '辛香類': [45, 55, 80],
+  '菇類':   [40, 60, 85],
+  '水果':   [17, 32, 62],
+  '其他':   [20, 35, 50]
+};
+
+/** Band width applied to a per-root markup, which is a midpoint only. */
+var RETAIL_BAND_LOW = 0.75;
+var RETAIL_BAND_HIGH = 1.35;
+
+/**
+ * Search aliases → MOA root name (Chinese; the API only accepts Chinese).
+ * Covers common English and colloquial terms plus the many cases where the
+ * everyday name is not the MOA root name.
  */
 var SEARCH_ALIASES = {
-  // English → official Chinese
-  'cabbage': '甘藍', 'bok choy': '小白菜', 'baby bok choy': '青江白菜',
-  'water spinach': '蕹菜', 'spinach': '菠菜', 'lettuce': '萵苣',
-  'chinese kale': '芥藍', 'kale': '芥藍', 'chives': '韭菜', 'celery': '芹菜',
-  'cauliflower': '花椰菜', 'daikon': '蘿蔔', 'radish': '蘿蔔', 'carrot': '胡蘿蔔',
-  'onion': '洋蔥', 'potato': '馬鈴薯', 'tomato': '番茄', 'eggplant': '茄子',
-  'green pepper': '青椒', 'bell pepper': '甜椒', 'pepper': '甜椒', 'corn': '玉米',
-  'green bean': '敏豆', 'bitter gourd': '苦瓜', 'luffa': '絲瓜', 'cucumber': '胡瓜',
-  'winter melon': '冬瓜', 'pumpkin': '南瓜', 'scallion': '蔥', 'green onion': '蔥',
-  'ginger': '薑', 'garlic': '大蒜', 'chili': '辣椒', 'chili pepper': '辣椒',
-  'thai basil': '九層塔', 'basil': '九層塔', 'bean sprouts': '豆芽',
-  'shiitake': '香菇', 'mushroom': '香菇', 'enoki': '金針菇', 'banana': '香蕉',
-  'apple': '蘋果', 'papaya': '木瓜', 'pineapple': '鳳梨', 'watermelon': '西瓜',
-  // colloquial Chinese → official Chinese
-  '高麗菜': '甘藍', '空心菜': '蕹菜', '青江菜': '青江白菜',
-  '紅蘿蔔': '胡蘿蔔', '白蘿蔔': '蘿蔔', '地瓜葉': '甘藷葉',
-  '四季豆': '敏豆', '大黃瓜': '胡瓜', '小黃瓜': '花胡瓜'
+  // English → MOA root
+  'cabbage': '甘藍', 'napa cabbage': '包心白菜', 'bok choy': '小白菜',
+  'baby bok choy': '青江白菜', 'water spinach': '蕹菜', 'sweet potato leaf': '甘薯葉',
+  'spinach': '菠菜', 'lettuce': '萵苣菜', 'chinese kale': '芥藍菜', 'kale': '芥藍菜',
+  'amaranth': '莧菜', 'chrysanthemum greens': '茼蒿', 'mustard greens': '芥菜',
+  'chives': '韭菜', 'celery': '芹菜', 'cilantro': '芫荽', 'coriander': '芫荽',
+  'asparagus': '蘆筍', 'cauliflower': '花椰菜', 'broccoli': '花椰菜',
+  'daikon': '蘿蔔', 'radish': '蘿蔔', 'carrot': '胡蘿蔔', 'onion': '洋蔥',
+  'potato': '馬鈴薯', 'sweet potato': '甘薯', 'taro': '芋', 'yam': '薯蕷',
+  'burdock': '牛蒡', 'bamboo shoot': '竹筍', 'water bamboo': '茭白筍',
+  'lotus root': '蓮藕', 'jicama': '豆薯',
+  'tomato': '番茄', 'cherry tomato': '小番茄', 'eggplant': '茄子',
+  'green pepper': '甜椒', 'bell pepper': '甜椒', 'pepper': '甜椒',
+  'corn': '玉米', 'baby corn': '玉米', 'green bean': '敏豆', 'string bean': '敏豆',
+  'yard long bean': '菜豆', 'pea': '豌豆', 'okra': '秋葵',
+  'bitter gourd': '苦瓜', 'luffa': '絲瓜', 'cucumber': '花胡瓜',
+  'winter melon': '冬瓜', 'pumpkin': '南瓜', 'bottle gourd': '扁蒲',
+  'chayote': '隼人瓜',
+  'scallion': '青蔥', 'green onion': '青蔥', 'shallot': '青蔥', 'ginger': '薑',
+  'garlic': '大蒜', 'chili': '辣椒', 'chili pepper': '辣椒',
+  'thai basil': '九層塔', 'basil': '九層塔',
+  'shiitake': '濕香菇', 'mushroom': '濕香菇', 'enoki': '金絲菇',
+  'king oyster mushroom': '杏鮑菇', 'shimeji': '鴻喜菇', 'button mushroom': '洋菇',
+  'oyster mushroom': '秀珍菇', 'wood ear': '濕木耳', 'bean sprouts': '芽菜類',
+  'banana': '香蕉', 'apple': '蘋果', 'papaya': '木瓜', 'pineapple': '鳳梨',
+  'watermelon': '西瓜', 'melon': '甜瓜', 'cantaloupe': '洋香瓜',
+  'guava': '番石榴', 'dragon fruit': '紅龍果', 'grape': '葡萄', 'mango': '芒果',
+  'lychee': '荔枝', 'longan': '龍眼', 'pear': '梨', 'peach': '桃子', 'plum': '李',
+  'jujube': '棗子', 'persimmon': '柿子', 'wax apple': '蓮霧',
+  'sugar apple': '釋迦', 'custard apple': '釋迦', 'starfruit': '楊桃',
+  'passion fruit': '百香果', 'loquat': '枇杷', 'lemon': '雜柑', 'lime': '雜柑',
+  'orange': '甜橙', 'mandarin': '椪柑', 'pomelo': '柚子', 'grapefruit': '葡萄柚',
+  'avocado': '酪梨', 'kiwi': '奇異果', 'strawberry': '草莓', 'cherry': '櫻桃',
+  'blueberry': '藍莓', 'coconut': '椰子',
+
+  // colloquial Chinese → MOA root
+  '高麗菜': '甘藍', '結球白菜': '包心白菜', '山東白菜': '包心白菜',
+  '空心菜': '蕹菜', '青江菜': '青江白菜', '地瓜葉': '甘薯葉', '番薯葉': '甘薯葉',
+  '大陸妹': '萵苣菜', 'A菜': '萵苣菜', '油麥菜': '萵苣菜', '生菜': '萵苣菜',
+  '芥蘭': '芥藍菜', '香菜': '芫荽', '過溝菜': '蕨菜', '過貓': '蕨菜',
+  '青花菜': '花椰菜', '花菜': '花椰菜', '綠花椰': '花椰菜',
+  '紅蘿蔔': '胡蘿蔔', '白蘿蔔': '蘿蔔', '菜頭': '蘿蔔',
+  '地瓜': '甘薯', '番薯': '甘薯', '芋頭': '芋', '山藥': '薯蕷',
+  '聖女番茄': '小番茄', '玉女番茄': '小番茄', '小番茄': '小番茄',
+  '青椒': '甜椒', '四季豆': '敏豆', '長豆': '菜豆', '豇豆': '菜豆',
+  '甜豌豆': '豌豆', '荷蘭豆': '豌豆',
+  '大黃瓜': '胡瓜', '小黃瓜': '花胡瓜', '花胡瓜': '花胡瓜',
+  '蒲瓜': '扁蒲', '瓠瓜': '扁蒲', '佛手瓜': '隼人瓜', '隼人瓜': '隼人瓜',
+  '蔥': '青蔥', '青蒜': '青蔥', '蒜頭': '大蒜',
+  '香菇': '濕香菇', '金針菇': '金絲菇', '木耳': '濕木耳', '黑木耳': '濕木耳',
+  '豆芽': '芽菜類', '豆芽菜': '芽菜類', '綠豆芽': '芽菜類',
+  '香瓜': '甜瓜', '美濃瓜': '甜瓜', '哈密瓜': '洋香瓜',
+  '芭樂': '番石榴', '火龍果': '紅龍果', '檸檬': '雜柑', '金桔': '雜柑',
+  '柳丁': '甜橙', '柳橙': '甜橙', '文旦': '柚子', '柚子': '柚子',
+  '奇異果': '奇異果', '番荔枝': '釋迦'
 };
 
 // --- Web App entry point ---
@@ -141,7 +330,7 @@ function readBoard() {
     p.cached = true;
     return p;
   }
-  var durable = PropertiesService.getScriptProperties().getProperty(BOARD_CACHE_KEY);
+  var durable = readDurableBoard();
   if (durable) {
     cache.put(BOARD_CACHE_KEY, durable, BOARD_CACHE_TTL);
     var d = JSON.parse(durable);
@@ -159,19 +348,19 @@ function readBoard() {
 function buildBoard() {
   var dates = resolveTradeDates();
   if (!dates.latest) {
-    return { type: 'board', error: '近期查無交易資料', items: [] };
+    return { type: 'board', error: '近期查無交易資料', count: 0, items: [] };
   }
 
-  var names = BOARD_ITEMS.map(function (d) { return d.official; });
-  var today = fetchAllRows(names, dates.latest);
-  var prev = dates.prev ? fetchAllRows(names, dates.prev) : {};
+  var roots = boardRoots();
+  var today = fetchRootRows(roots, dates.latest);
+  var prev = dates.prev ? fetchRootRows(roots, dates.prev) : {};
 
   var items = [];
   for (var i = 0; i < BOARD_ITEMS.length; i++) {
     var def = BOARD_ITEMS[i];
-    var todayRows = today[def.official] || [];
+    var todayRows = selectRows(today[def.official], def);
     if (!todayRows.length) continue;
-    var card = aggregateGroup(def.name, def.official, def.category, todayRows, prev[def.official] || []);
+    var card = aggregateGroup(def, todayRows, selectRows(prev[def.official], def));
     if (card) items.push(card);
   }
 
@@ -185,16 +374,63 @@ function buildBoard() {
   };
 }
 
-/** Persists a healthy board to both the fast cache and durable properties. */
+/** Distinct MOA root names to fetch — several board items share one root. */
+function boardRoots() {
+  var seen = {};
+  var roots = [];
+  for (var i = 0; i < BOARD_ITEMS.length; i++) {
+    var root = BOARD_ITEMS[i].official;
+    if (!seen[root]) {
+      seen[root] = true;
+      roots.push(root);
+    }
+  }
+  return roots;
+}
+
+/** Persists a healthy board to the fast cache and to chunked durable properties. */
 function storeBoard(payload) {
   var json = JSON.stringify(payload);
   CacheService.getScriptCache().put(BOARD_CACHE_KEY, json, BOARD_CACHE_TTL);
   try {
-    if (json.length <= 9000) { // ScriptProperties per-value limit is 9KB
-      PropertiesService.getScriptProperties().setProperty(BOARD_CACHE_KEY, json);
+    var props = PropertiesService.getScriptProperties();
+    var chunks = Math.ceil(json.length / PROP_CHUNK_SIZE);
+    var write = {};
+    for (var i = 0; i < chunks; i++) {
+      write[BOARD_PROP_PREFIX + i] = json.substring(i * PROP_CHUNK_SIZE, (i + 1) * PROP_CHUNK_SIZE);
+    }
+    write[BOARD_PROP_COUNT] = String(chunks);
+    props.setProperties(write);
+
+    // Drop chunks left over from a previously larger board.
+    var existing = props.getProperties();
+    for (var key in existing) {
+      if (key.indexOf(BOARD_PROP_PREFIX) !== 0) continue;
+      var idx = parseInt(key.substring(BOARD_PROP_PREFIX.length), 10);
+      if (!isNaN(idx) && idx >= chunks) props.deleteProperty(key);
     }
   } catch (err) {
     Logger.log('storeBoard property error: ' + err);
+  }
+}
+
+/** Reassembles the chunked durable board, or null when absent/incomplete. */
+function readDurableBoard() {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var all = props.getProperties();
+    var chunks = parseInt(all[BOARD_PROP_COUNT] || '0', 10);
+    if (!chunks) return null;
+    var parts = [];
+    for (var i = 0; i < chunks; i++) {
+      var part = all[BOARD_PROP_PREFIX + i];
+      if (part == null) return null; // torn write — treat as missing
+      parts.push(part);
+    }
+    return parts.join('');
+  } catch (err) {
+    Logger.log('readDurableBoard error: ' + err);
+    return null;
   }
 }
 
@@ -204,7 +440,7 @@ function refreshBoardCache() {
   if (board.items && board.items.length) {
     storeBoard(board);
   }
-  Logger.log('Board refreshed: ' + (board.count || 0) + ' items');
+  Logger.log('Board refreshed: ' + (board.count || 0) + ' items for ' + (board.roc_date || 'n/a'));
   return board;
 }
 
@@ -228,27 +464,28 @@ function handleSearch(params) {
     }
   }
 
-  // 2. Fall back to a live query against the MOA API (needs Chinese CropName).
+  // 2. Fall back to a live query against the MOA API (needs a Chinese CropName).
   var term = SEARCH_ALIASES[q] || SEARCH_ALIASES[query] || query;
   var dates = resolveTradeDates();
   if (!dates.latest) return { type: 'search', query: query, error: '近期查無交易資料', items: [] };
 
-  var todayRows = fetchCrop(term, dates.latest);
+  var todayRows = tradedRows(fetchCrop(term, dates.latest));
   if (!todayRows.length) {
     return { type: 'search', query: query, error: '查無此品項', suggestion: '試試：高麗菜、番茄、菠菜' };
   }
-  var prevRows = fetchCrop(term, dates.prev);
+  var prevRows = tradedRows(fetchCrop(term, dates.prev));
 
-  // Group live results per official variant name.
+  // Group live results by MOA root so a search behaves like the board.
   var groups = {};
   for (var i = 0; i < todayRows.length; i++) {
-    var nm = todayRows[i].CropName;
-    (groups[nm] = groups[nm] || []).push(todayRows[i]);
+    var root = rowRoot(todayRows[i].CropName);
+    (groups[root] = groups[root] || []).push(todayRows[i]);
   }
   var items = [];
-  Object.keys(groups).forEach(function (nm) {
-    var prevForName = prevRows.filter(function (r) { return r.CropName === nm; });
-    var card = aggregateGroup(nm, nm, categoryOf(nm), groups[nm], prevForName);
+  Object.keys(groups).forEach(function (root) {
+    var prevForRoot = prevRows.filter(function (r) { return rowRoot(r.CropName) === root; });
+    var def = { name: root, official: root, category: categoryOf(root) };
+    var card = aggregateGroup(def, groups[root], prevForRoot);
     if (card) items.push(card);
   });
   items.sort(function (a, b) { return b.trade_volume - a.trade_volume; });
@@ -267,18 +504,19 @@ function handleTrend(params) {
   if (!cropName) return { error: '請提供 cropName 參數', message: '?action=getTrend&cropName=甘藍&days=7' };
 
   var term = SEARCH_ALIASES[cropName] || cropName;
+  var root = rowRoot(term);
   var trend = [];
   var today = new Date();
   for (var i = days - 1; i >= 0; i--) {
     var d = new Date(today);
     d.setDate(today.getDate() - i);
-    var roc = dateToROC(d);
-    var rows = fetchCrop(term, roc);
+    var rows = tradedRows(fetchCrop(term, dateToROC(d))).filter(function (r) {
+      return rowRoot(r.CropName) === root;
+    });
     if (rows.length) {
-      var agg = weightedAverage(rows);
-      trend.push(round1(agg.avg));
+      trend.push(round1(weightedAverage(rows).avg));
     } else {
-      trend.push(null); // no market that day (e.g. weekend/holiday)
+      trend.push(null); // no market that day (e.g. weekend/holiday/closed)
     }
     Utilities.sleep(80);
   }
@@ -288,25 +526,27 @@ function handleTrend(params) {
 // --- MOA API access ---
 
 /**
- * Fetches all rows for a crop-name prefix on a given ROC date.
- * Single-crop queries stay well under the 1000-row page limit.
+ * Fetches all rows for a crop-name term on a given ROC date. MOA matches the
+ * term anywhere inside `CropName`, so the result is a superset of the wanted
+ * root — callers must filter with `selectRows` / `rowRoot`.
  */
 function fetchCrop(cropName, rocDate) {
-  var url = AGRICULTURE_API_URL + '?' + [
-    'CropName=' + encodeURIComponent(cropName),
-    'Start_time=' + encodeURIComponent(rocDate),
-    'End_time=' + encodeURIComponent(rocDate)
-  ].join('&');
-
+  if (!cropName || !rocDate) return [];
   try {
-    var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-    if (resp.getResponseCode() !== 200) return [];
-    var json = JSON.parse(resp.getContentText());
-    return (json && json.Data) ? json.Data : [];
+    var resp = UrlFetchApp.fetch(cropUrl(cropName, rocDate), { muteHttpExceptions: true });
+    return parseRows(resp);
   } catch (err) {
     Logger.log('fetchCrop error (' + cropName + ' ' + rocDate + '): ' + err);
     return [];
   }
+}
+
+function cropUrl(cropName, rocDate) {
+  return AGRICULTURE_API_URL + '?' + [
+    'CropName=' + encodeURIComponent(cropName),
+    'Start_time=' + encodeURIComponent(rocDate),
+    'End_time=' + encodeURIComponent(rocDate)
+  ].join('&');
 }
 
 /** Parses MOA rows from a single HTTPResponse. */
@@ -321,25 +561,17 @@ function parseRows(resp) {
 }
 
 /**
- * Fetches rows for many crop-name prefixes on one ROC date, in small
- * concurrent batches. A single 70+ request burst trips MOA's per-IP limit and
- * comes back empty, so we cap concurrency and pause briefly between batches.
- * @returns {Object} map of cropName → rows[]
+ * Fetches rows for many root names on one ROC date, in small concurrent
+ * batches. A single 70+ request burst trips MOA's per-IP limit and comes back
+ * empty, so concurrency is capped and each batch pauses briefly.
+ * @returns {Object} map of root → rows[]
  */
 function fetchAllRows(cropNames, rocDate) {
-  var BATCH = 13;
   var out = {};
-  for (var start = 0; start < cropNames.length; start += BATCH) {
-    var slice = cropNames.slice(start, start + BATCH);
+  for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
+    var slice = cropNames.slice(start, start + FETCH_BATCH);
     var requests = slice.map(function (name) {
-      return {
-        url: AGRICULTURE_API_URL + '?' + [
-          'CropName=' + encodeURIComponent(name),
-          'Start_time=' + encodeURIComponent(rocDate),
-          'End_time=' + encodeURIComponent(rocDate)
-        ].join('&'),
-        muteHttpExceptions: true
-      };
+      return { url: cropUrl(name, rocDate), muteHttpExceptions: true };
     });
     try {
       var responses = UrlFetchApp.fetchAll(requests);
@@ -349,12 +581,31 @@ function fetchAllRows(cropNames, rocDate) {
     } catch (err) {
       Logger.log('fetchAllRows batch error (' + rocDate + '): ' + err);
     }
-    if (start + BATCH < cropNames.length) Utilities.sleep(120);
+    if (start + FETCH_BATCH < cropNames.length) Utilities.sleep(120);
   }
   return out;
 }
 
-/** Finds the latest ROC date with data and the previous available date. */
+/**
+ * Like `fetchAllRows`, but retries the roots that returned nothing once. With
+ * ~100 roots a throttled batch would silently drop whole rows from the board;
+ * genuinely out-of-season roots just stay empty.
+ */
+function fetchRootRows(roots, rocDate) {
+  var out = fetchAllRows(roots, rocDate);
+  var misses = roots.filter(function (r) { return !out[r] || !out[r].length; });
+  if (!misses.length) return out;
+
+  Utilities.sleep(1500);
+  var retry = fetchAllRows(misses, rocDate);
+  for (var i = 0; i < misses.length; i++) {
+    var root = misses[i];
+    if (retry[root] && retry[root].length) out[root] = retry[root];
+  }
+  return out;
+}
+
+/** Finds the latest ROC date with real trades and the previous such date. */
 function resolveTradeDates() {
   var probe = '甘藍'; // cabbage: year-round, all markets, high volume — the most reliable probe
   var today = new Date();
@@ -365,7 +616,7 @@ function resolveTradeDates() {
     var d = new Date(today);
     d.setDate(today.getDate() - i);
     var roc = dateToROC(d);
-    if (fetchCrop(probe, roc).length) latest = roc;
+    if (isTradingDate(probe, roc)) latest = roc;
   }
   if (!latest) return { latest: null, prev: null };
 
@@ -374,18 +625,86 @@ function resolveTradeDates() {
     var pd = new Date(latestDate);
     pd.setDate(latestDate.getDate() - j);
     var proc = dateToROC(pd);
-    if (fetchCrop(probe, proc).length) prev = proc;
+    if (isTradingDate(probe, proc)) prev = proc;
   }
   return { latest: latest, prev: prev };
+}
+
+/**
+ * True when the probe crop really traded island-wide on this date. MOA returns
+ * `休市` placeholder rows with zero price/quantity for closed markets — and for
+ * today, before the closing prices publish — so row count alone is not enough:
+ * it would pick a date on which every board item aggregates to nothing.
+ */
+function isTradingDate(probe, rocDate) {
+  var rows = tradedRows(fetchCrop(probe, rocDate));
+  var volume = 0;
+  for (var i = 0; i < rows.length; i++) {
+    volume += parseFloat(rows[i].Trans_Quantity || 0);
+  }
+  return volume >= PROBE_MIN_VOLUME;
+}
+
+// --- Row filtering ---
+
+/** MOA `CropName` is `<root>` or `<root>-<variety>`. */
+function rowRoot(cropName) {
+  if (!cropName) return '';
+  var i = cropName.indexOf('-');
+  return i === -1 ? cropName : cropName.substring(0, i);
+}
+
+function rowVariety(cropName) {
+  if (!cropName) return '';
+  var i = cropName.indexOf('-');
+  return i === -1 ? '' : cropName.substring(i + 1);
+}
+
+/** Drops `休市` placeholders and any row without a real price and quantity. */
+function tradedRows(rows) {
+  var out = [];
+  for (var i = 0; i < (rows || []).length; i++) {
+    var r = rows[i];
+    if (!r || !r.CropName || r.CropName === '休市') continue;
+    if (!(parseFloat(r.Avg_Price || 0) > 0) || !(parseFloat(r.Trans_Quantity || 0) > 0)) continue;
+    out.push(r);
+  }
+  return out;
+}
+
+/**
+ * Keeps only the rows a board item actually wants: exact root match plus the
+ * optional variety include/exclude. Without this, `蔥` picks up 洋蔥, `蘿蔔`
+ * picks up 胡蘿蔔, `胡瓜` picks up 花胡瓜 and `薑` picks up 薑荷花.
+ */
+function selectRows(rows, def) {
+  var out = [];
+  var candidates = tradedRows(rows);
+  for (var i = 0; i < candidates.length; i++) {
+    var r = candidates[i];
+    if (rowRoot(r.CropName) !== def.official) continue;
+    var variety = rowVariety(r.CropName);
+    if (def.variety && variety.indexOf(def.variety) === -1) continue;
+    if (def.excludes && containsAny(variety, def.excludes)) continue;
+    out.push(r);
+  }
+  return out;
+}
+
+function containsAny(text, needles) {
+  for (var i = 0; i < needles.length; i++) {
+    if (text.indexOf(needles[i]) !== -1) return true;
+  }
+  return false;
 }
 
 // --- Aggregation ---
 
 /**
- * Aggregates raw MOA rows (across markets/variants) into one board card.
- * Price = volume-weighted average of Avg_Price; change vs previous date.
+ * Aggregates already-filtered MOA rows into one board card.
+ * Price = volume-weighted average of Avg_Price; change vs the previous date.
  */
-function aggregateGroup(displayName, officialName, category, todayRows, prevRows) {
+function aggregateGroup(def, todayRows, prevRows) {
   var today = weightedAverage(todayRows);
   if (today.volume < MIN_TRADE_VOLUME || today.avg <= 0) return null;
 
@@ -397,18 +716,58 @@ function aggregateGroup(displayName, officialName, category, todayRows, prevRows
     }
   }
 
+  var cattyPrice = today.avg * CATTY_PER_KG;
+  var retail = retailBand(cattyPrice, def.official, def.category);
+
   return {
-    code: (todayRows[0] && todayRows[0].CropCode) || officialName,
-    name: displayName,
-    official_name: officialName,
-    category: category,
+    code: (todayRows[0] && todayRows[0].CropCode) || def.official,
+    name: def.name,
+    official_name: def.official,
+    category: def.category,
     avg_price: round1(today.avg),
-    catty_price: round1(today.avg * CATTY_PER_KG),
+    catty_price: round1(cattyPrice),
+    retail_low: retail.low,
+    retail_price: retail.mid,
+    retail_high: retail.high,
+    retail_estimated: true,
     change_percent: round1(changePercent),
     trade_volume: Math.round(today.volume),
     unit: '公斤',
     markets_count: today.markets
   };
+}
+
+/**
+ * Estimated traditional-market retail band in 元/台斤. Rounded outward to the
+ * nearest NT$5 because stalls price in round numbers, and because implying
+ * single-digit precision on an estimate would be dishonest.
+ */
+function retailBand(cattyPrice, root, category) {
+  var markup = RETAIL_MARKUP_ROOT[root];
+  var low, mid, high;
+  if (markup) {
+    low = markup * RETAIL_BAND_LOW;
+    mid = markup;
+    high = markup * RETAIL_BAND_HIGH;
+  } else {
+    var band = RETAIL_MARKUP_CATEGORY[category] || RETAIL_MARKUP_CATEGORY['其他'];
+    low = band[0];
+    mid = band[1];
+    high = band[2];
+  }
+  return {
+    low: floorTo5(cattyPrice + low),
+    mid: Math.round(cattyPrice + mid),
+    high: ceilTo5(cattyPrice + high)
+  };
+}
+
+function floorTo5(n) {
+  return Math.max(5, Math.floor(n / 5) * 5);
+}
+
+function ceilTo5(n) {
+  return Math.ceil(n / 5) * 5;
 }
 
 /** Volume-weighted average price across rows. */
@@ -430,13 +789,16 @@ function weightedAverage(rows) {
   };
 }
 
-/** Best-effort category from crop name (used for live search results). */
-function categoryOf(name) {
+/** Best-effort category for a MOA root that is not on the board. */
+function categoryOf(root) {
   for (var i = 0; i < BOARD_ITEMS.length; i++) {
-    if (name.indexOf(BOARD_ITEMS[i].official) === 0) return BOARD_ITEMS[i].category;
+    if (BOARD_ITEMS[i].official === root) return BOARD_ITEMS[i].category;
   }
-  if (/瓜/.test(name)) return '瓜果類';
-  if (/菜|蔥|韭|芹|萵/.test(name)) return '葉菜類';
+  if (/菇|菌|木耳/.test(root)) return '菇類';
+  if (/瓜/.test(root)) return '瓜果類';
+  if (/柑|橙|柚|梨|桃|李|莓|蕉|果|棗|柿|葡萄|釋迦|蓮霧/.test(root)) return '水果';
+  if (/菜|蔥|韭|芹|萵|蒿|莧/.test(root)) return '葉菜類';
+  if (/薯|芋|筍|藕|蔔|蒡/.test(root)) return '根莖類';
   return '其他';
 }
 

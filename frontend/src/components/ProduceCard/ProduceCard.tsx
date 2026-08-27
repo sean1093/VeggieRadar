@@ -14,6 +14,7 @@ const ProduceCard: React.FC<ProduceCardProps> = ({ item, onClick, watched = fals
   const tone = flat ? 'text-stone' : down ? 'text-sage' : 'text-clay';
   const arrow = flat ? '→' : down ? '↓' : '↑';
   const label = flat ? '持平' : down ? '便宜了' : '變貴了';
+  const hasRetail = item.retail_low != null && item.retail_high != null;
 
   const open = () => onClick(item);
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -29,7 +30,9 @@ const ProduceCard: React.FC<ProduceCardProps> = ({ item, onClick, watched = fals
       tabIndex={0}
       onClick={open}
       onKeyDown={onKeyDown}
-      aria-label={`${item.name}，每台斤 ${item.catty_price.toFixed(1)} 元，${label}`}
+      aria-label={`${item.name}，批發每台斤 ${item.catty_price.toFixed(1)} 元，${label}${
+        hasRetail ? `，菜市場參考價每台斤 ${item.retail_low} 到 ${item.retail_high} 元` : ''
+      }`}
       className="group flex cursor-pointer items-center justify-between gap-3 px-5 py-4 transition-colors hover:bg-sage-soft/40 active:bg-sage-soft/60 focus:outline-none focus-visible:bg-sage-soft/40"
     >
       <div className="flex min-w-0 items-center gap-3">
@@ -61,7 +64,13 @@ const ProduceCard: React.FC<ProduceCardProps> = ({ item, onClick, watched = fals
             <span className="text-2xl font-semibold tabular-nums">{item.catty_price.toFixed(1)}</span>
             <span className="ml-1 text-sm font-normal text-stone">元/台斤</span>
           </p>
-          <p className="mt-1 text-[11px] text-stone tabular-nums">約 {item.avg_price.toFixed(0)} 元/公斤</p>
+          {hasRetail ? (
+            <p className="mt-1 text-[11px] text-stone tabular-nums">
+              市場約 {item.retail_low}–{item.retail_high}
+            </p>
+          ) : (
+            <p className="mt-1 text-[11px] text-stone tabular-nums">約 {item.avg_price.toFixed(0)} 元/公斤</p>
+          )}
         </div>
 
         <div className={`w-14 text-right ${tone}`}>

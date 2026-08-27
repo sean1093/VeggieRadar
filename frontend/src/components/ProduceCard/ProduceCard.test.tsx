@@ -6,12 +6,14 @@ import type { ProduceItem } from '../../types/produce';
 const down: ProduceItem = {
   code: 'LA', name: '高麗菜', official_name: '甘藍', category: '葉菜類',
   avg_price: 24.4, catty_price: 14.6, change_percent: -3.1,
+  retail_low: 35, retail_price: 44, retail_high: 55, retail_estimated: true,
   trade_volume: 416301, unit: '公斤', markets_count: 6,
 };
 
 const up: ProduceItem = {
-  code: 'SA', name: '蔥', official_name: '蔥', category: '辛香類',
+  code: 'SE', name: '蔥', official_name: '青蔥', category: '辛香類',
   avg_price: 58.3, catty_price: 35.0, change_percent: 25.7,
+  retail_low: 70, retail_price: 86, retail_high: 105, retail_estimated: true,
   trade_volume: 77610, unit: '公斤', markets_count: 6,
 };
 
@@ -21,6 +23,29 @@ describe('ProduceCard', () => {
     expect(screen.getByText('高麗菜')).toBeInTheDocument();
     expect(screen.getByText('14.6')).toBeInTheDocument();
     expect(screen.getByText('元/台斤')).toBeInTheDocument();
+  });
+
+  it('shows the retail reference band instead of the 元/公斤 line', () => {
+    render(<ProduceCard item={down} onClick={vi.fn()} />);
+    expect(screen.getByText('市場約 35–55')).toBeInTheDocument();
+    expect(screen.queryByText(/元\/公斤/)).not.toBeInTheDocument();
+  });
+
+  it('announces both wholesale and retail reference to screen readers', () => {
+    render(<ProduceCard item={down} onClick={vi.fn()} />);
+    expect(
+      screen.getByRole('button', { name: '高麗菜，批發每台斤 14.6 元，便宜了，菜市場參考價每台斤 35 到 55 元' }),
+    ).toBeInTheDocument();
+  });
+
+  it('falls back to 元/公斤 when a cached board has no retail fields', () => {
+    const legacy: ProduceItem = { ...down };
+    delete legacy.retail_low;
+    delete legacy.retail_price;
+    delete legacy.retail_high;
+    render(<ProduceCard item={legacy} onClick={vi.fn()} />);
+    expect(screen.getByText('約 24 元/公斤')).toBeInTheDocument();
+    expect(screen.queryByText(/市場約/)).not.toBeInTheDocument();
   });
 
   it('uses sage + 便宜了 when price falls', () => {

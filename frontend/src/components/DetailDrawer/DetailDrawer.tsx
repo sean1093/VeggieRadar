@@ -43,6 +43,7 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
   const down = item.change_percent < 0;
   const tone = down ? 'text-sage' : 'text-clay';
   const arrow = down ? '↓' : '↑';
+  const hasRetail = item.retail_low != null && item.retail_high != null;
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
@@ -72,7 +73,7 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
           {/* Price */}
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <p className="text-xs text-stone">今日價格</p>
+              <p className="text-xs text-stone">批發收盤均價</p>
               <p className="mt-1 leading-none">
                 <span className="text-3xl font-semibold tabular-nums">{item.catty_price.toFixed(1)}</span>
                 <span className="ml-1 text-sm text-stone">元/台斤</span>
@@ -87,6 +88,25 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
               <p className="mt-1 text-xs text-stone">{down ? '便宜了，可以多買' : '變貴了，可考慮替代'}</p>
             </div>
           </div>
+
+          {/* Traditional-market retail reference — an estimate, never a quote */}
+          {hasRetail && (
+            <div className="rounded-xl bg-sage-soft/50 px-4 py-3">
+              <div className="flex items-baseline justify-between gap-3">
+                <p className="text-xs text-stone">菜市場參考價</p>
+                <p className="leading-none text-ink">
+                  <span className="text-2xl font-semibold tabular-nums">
+                    {item.retail_low}–{item.retail_high}
+                  </span>
+                  <span className="ml-1 text-sm text-stone">元/台斤</span>
+                </p>
+              </div>
+              <p className="mt-2 text-xs leading-relaxed text-stone">
+                以批發價加上攤販常見加成推估（此品項約 +{Math.round((item.retail_price ?? 0) - item.catty_price)} 元/台斤），
+                非實際報價。實測落在此區間的機率約八成，買到低於 {item.retail_low} 元就算便宜。
+              </p>
+            </div>
+          )}
 
           {/* 7-day trend */}
           <div>

@@ -15,6 +15,13 @@ export interface ProduceItem {
   unit: string;            // 公斤
   markets_count: number;   // 納入平均的市場數
 
+  // 傳統市場零售「參考」價（元 / 台斤）。由批發價加上校準過的攤販加成估算，
+  // 不是實際報價 —— 後端以 retail_estimated 標示。舊版回應可能沒有這些欄位。
+  retail_low?: number;
+  retail_price?: number;
+  retail_high?: number;
+  retail_estimated?: boolean;
+
   // Optional — only present in some responses / kept for the detail drawer.
   market?: string;
   origin?: string;
