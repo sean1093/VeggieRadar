@@ -29,6 +29,7 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
   const logs: string[] = [];
   const props = new Map<string, string>();
   const cache = new Map<string, string>();
+  const triggers: { handler: string; kind: string }[] = [];
 
   const respond = (url: string) => {
     const hit = Object.keys(responses).find((key) => url.includes(encodeURIComponent(key)));
@@ -48,6 +49,7 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
       getScriptCache: () => ({
         get: (k: string) => cache.get(k) ?? null,
         put: (k: string, v: string) => void cache.set(k, v),
+        remove: (k: string) => void cache.delete(k),
       }),
     },
     PropertiesService: {
@@ -66,19 +68,40 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
       MimeType: { JSON: 'json' },
       createTextOutput: (t: string) => ({ setMimeType: () => ({ body: t }) }),
     },
-    ScriptApp: { getProjectTriggers: () => [] },
+    ScriptApp: {
+      getProjectTriggers: () =>
+        triggers.map((t) => ({
+          getHandlerFunction: () => t.handler,
+          getUniqueId: () => `${t.handler}:${t.kind}`,
+        })),
+      deleteTrigger: (t: { getHandlerFunction: () => string }) => {
+        const i = triggers.findIndex((x) => x.handler === t.getHandlerFunction());
+        if (i >= 0) triggers.splice(i, 1);
+      },
+      newTrigger: (handler: string) => {
+        const spec = { handler, kind: 'unset' };
+        const clock = {
+          after: (ms: number) => ((spec.kind = `after:${ms}`), clock),
+          everyHours: (h: number) => ((spec.kind = `everyHours:${h}`), clock),
+          create: () => void triggers.push(spec),
+        };
+        return { timeBased: () => clock };
+      },
+    },
   };
 
   const exported = [
     'tradedRows', 'selectRows', 'rowRoot', 'rowVariety', 'isTradingDate',
     'retailBand', 'aggregateGroup', 'boardRoots', 'BOARD_ITEMS',
     'RETAIL_MARKUP_ROOT', 'RETAIL_MARKUP_CATEGORY', 'storeBoard', 'readDurableBoard',
+    'readBoard', 'boardAgeMs', 'scheduleRefresh', 'dropTriggers', 'handleWarm',
+    'handleDiag', 'BOARD_MAX_AGE_MS', 'REFRESH_ONCE_FN',
   ];
   const factory = new Function(
     ...Object.keys(services),
     `${SOURCE}\nreturn { ${exported.join(', ')} };`,
   );
-  return { api: factory(...Object.values(services)), logs, props };
+  return { api: factory(...Object.values(services)), logs, props, cache, triggers };
 }
 
 const row = (CropName: string, Avg_Price: number, Trans_Quantity: number, MarketName = '台北一'): Row =>
@@ -306,5 +329,118 @@ describe('storeBoard / readDurableBoard', () => {
     expect(Number(props.get('veggie_board_v2_chunks'))).toBe(1);
     expect(props.has('veggie_board_v2_chunk_1')).toBe(false);
     expect(api.readDurableBoard()).toBe(JSON.stringify(small));
+  });
+});
+
+/**
+ * The board's trading date legitimately stands still (weekends, holidays, typhoon
+ * closures — MOA then publishes only 休市 rows). What must never stand still is
+ * `generated_at`. These lock down the freshness contract the UI reads, plus the
+ * self-heal that stopped a dead refresh trigger from freezing the app on an old date.
+ */
+describe('readBoard freshness', () => {
+  const storedBoard = (generatedAt: string | null) => {
+    const board: Record<string, unknown> = {
+      type: 'board',
+      date: '2026-08-26',
+      roc_date: '115.08.26',
+      count: 1,
+      items: [{ code: 'C1', name: '高麗菜' }],
+    };
+    if (generatedAt) board.generated_at = generatedAt;
+    return board;
+  };
+
+  it('marks a freshly built board fresh and queues nothing', () => {
+    const { api, triggers } = loadBackend();
+    api.storeBoard(storedBoard(new Date().toISOString()));
+
+    const board = api.readBoard();
+    expect(board.stale).toBe(false);
+    expect(board.cached).toBe(true);
+    expect(board.age_ms).toBeLessThan(api.BOARD_MAX_AGE_MS);
+    expect(triggers).toHaveLength(0);
+  });
+
+  it('keeps serving a stale board but queues a background rebuild', () => {
+    const { api, triggers } = loadBackend();
+    const old = new Date(Date.now() - api.BOARD_MAX_AGE_MS - 60_000).toISOString();
+    api.storeBoard(storedBoard(old));
+
+    const board = api.readBoard();
+    expect(board.stale).toBe(true);
+    expect(board.refresh_queued).toBe(true);
+    // Prices still render; a stale board beats an empty one.
+    expect(board.date).toBe('2026-08-26');
+    expect(board.items).toHaveLength(1);
+    expect(triggers).toEqual([{ handler: api.REFRESH_ONCE_FN, kind: 'after:1000' }]);
+  });
+
+  it('treats a board with no generated_at as stale — its real age is unknown', () => {
+    const { api } = loadBackend();
+    api.storeBoard(storedBoard(null));
+
+    const board = api.readBoard();
+    expect(board.age_ms).toBeNull();
+    expect(board.stale).toBe(true);
+    expect(board.refresh_queued).toBe(true);
+  });
+
+  it('queues one rebuild per lock window, not one per request', () => {
+    const { api, triggers } = loadBackend();
+    api.storeBoard(storedBoard(null));
+
+    expect(api.readBoard().refresh_queued).toBe(true);
+    expect(api.readBoard().refresh_queued).toBe(false);
+    expect(api.readBoard().refresh_queued).toBe(false);
+    expect(triggers).toHaveLength(1);
+  });
+
+  it('reports warming when nothing is stored yet', () => {
+    const { api, triggers } = loadBackend();
+    const board = api.readBoard();
+    expect(board.warming).toBe(true);
+    expect(board.stale).toBe(true);
+    expect(board.items).toEqual([]);
+    expect(triggers).toHaveLength(1);
+  });
+});
+
+describe('refresh scheduling', () => {
+  it('never deletes the recurring trigger when pruning one-off ones', () => {
+    const { api, triggers } = loadBackend();
+    triggers.push({ handler: 'refreshBoardCache', kind: 'everyHours:4' });
+
+    api.scheduleRefresh();
+    expect(triggers.map((t) => t.handler)).toEqual(['refreshBoardCache', api.REFRESH_ONCE_FN]);
+
+    expect(api.dropTriggers(api.REFRESH_ONCE_FN)).toBe(1);
+    expect(triggers.map((t) => t.handler)).toEqual(['refreshBoardCache']);
+  });
+
+  it('answers ?action=warm immediately instead of crawling', () => {
+    const { api } = loadBackend();
+    api.storeBoard({ type: 'board', date: '2026-08-26', roc_date: '115.08.26', count: 1, items: [{ code: 'C1' }] });
+
+    const first = api.handleWarm({});
+    expect(first).toMatchObject({ type: 'warm', queued: true });
+    expect(first.board).toMatchObject({ date: '2026-08-26', stale: true, count: 1 });
+
+    expect(api.handleWarm({}).queued).toBe(false);
+    // force jumps the lock so a stuck refresh can be retried by hand.
+    expect(api.handleWarm({ force: '1' }).queued).toBe(true);
+  });
+
+  it('surfaces trigger state and last refresh outcome via ?action=diag', () => {
+    const { api, props, triggers } = loadBackend();
+    triggers.push({ handler: 'refreshBoardCache', kind: 'everyHours:4' });
+    props.set('veggie_last_refresh_ok', '2026-08-28T00:10:00.000Z 115.08.26 94 items');
+
+    const diag = api.handleDiag();
+    expect(diag.type).toBe('diag');
+    expect(diag.triggers).toEqual(['refreshBoardCache']);
+    expect(diag.last_refresh_ok).toContain('115.08.26');
+    expect(diag.last_refresh_fail).toBeNull();
+    expect(diag.board_items_configured).toBe(api.BOARD_ITEMS.length);
   });
 });

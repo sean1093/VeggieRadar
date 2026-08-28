@@ -13,6 +13,16 @@ describe('App (board-first)', () => {
     expect(screen.getAllByText(/元\/台斤/).length).toBeGreaterThan(0);
   });
 
+  it('separates the trading date from the refresh time so a stuck date is explainable', async () => {
+    render(<App />);
+    await screen.findByText('高麗菜');
+    // The mock board is stamped as crawled just now, so the old trading date
+    // must be explained as a closure — never as a dead refresh pipeline.
+    expect(screen.getByText(/更新於 \d{2}\/\d{2} \d{2}:\d{2}/)).toBeInTheDocument();
+    expect(screen.getByText('批發市場休市中，顯示最近一次收盤行情')).toBeInTheDocument();
+    expect(screen.queryByText(/資料更新中/)).not.toBeInTheDocument();
+  });
+
   it('filters the board by category', async () => {
     render(<App />);
     await screen.findByText('高麗菜');

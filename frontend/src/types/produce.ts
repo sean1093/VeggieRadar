@@ -33,12 +33,19 @@ export interface ProduceItem {
 
 export interface BoardResponse {
   type: 'board';
-  date: string;          // ISO, e.g. 2026-08-26
+  date: string;          // ISO 交易日期, e.g. 2026-08-26 —— 休市時會停在最近一次交易日
   roc_date: string;      // 115.08.26
   prev_date: string;
   count: number;
   items: ProduceItem[];
   cached?: boolean;
+
+  // 後端最後一次爬取的時間（ISO）與新鮮度旗標。交易日期停住是正常的（休市），
+  // 但 generated_at 停住代表更新流程壞了 —— 兩者必須分開呈現。
+  generated_at?: string;
+  age_ms?: number | null;
+  stale?: boolean;
+  warming?: boolean;
 }
 
 export interface SearchResponse {

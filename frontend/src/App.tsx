@@ -7,12 +7,14 @@ import EmptyState from './components/EmptyState/EmptyState';
 import ErrorMessage from './components/ErrorMessage/ErrorMessage';
 import { fetchBoard, searchProduce } from './services/api';
 import { useWatchlist } from './hooks/useWatchlist';
+import { describeFreshness, type FreshnessNotice } from './lib/utils/freshness';
 import { isApiError, type ProduceItem } from './types/produce';
 import './App.css';
 
 function App() {
   const [board, setBoard] = useState<ProduceItem[]>([]);
   const [boardDate, setBoardDate] = useState('');
+  const [freshness, setFreshness] = useState<FreshnessNotice>({ note: null, checkedAt: null });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -35,6 +37,9 @@ function App() {
       } else {
         setBoard(res.items);
         if ('date' in res) setBoardDate(res.date);
+        if (res.type === 'board') {
+          setFreshness(describeFreshness({ date: res.date, generatedAt: res.generated_at, stale: res.stale }));
+        }
       }
       setLoading(false);
     });
@@ -106,8 +111,12 @@ function App() {
               {query ? `搜尋「${query}」` : '今日菜價'}
             </h2>
             {boardDate && (
-              <p className="mt-1 text-sm text-stone">資料日期 {boardDate}・批發市場收盤均價</p>
+              <p className="mt-1 text-sm text-stone">
+                資料日期 {boardDate}・批發市場收盤均價
+                {freshness.checkedAt && <span className="text-stone">・更新於 {freshness.checkedAt}</span>}
+              </p>
             )}
+            {freshness.note && <p className="mt-1 text-xs text-clay">{freshness.note}</p>}
             <p className="mt-1 text-xs text-stone">
               價格以每台斤（600&nbsp;克）計。<span className="text-sage">↓ 便宜</span>・<span className="text-clay">↑ 變貴</span>
             </p>

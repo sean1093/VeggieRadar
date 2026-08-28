@@ -8,9 +8,15 @@
  * How it works:
  *   - A time-trigger (`refreshBoardCache`) pre-warms a cached board so users
  *     never pay the crawl latency.
- *   - `doGet` (default) returns the cached board instantly.
+ *   - `doGet` (default) returns the cached board instantly, tagged with
+ *     `generated_at` (when the backend last crawled) so the client can tell
+ *     "markets were closed" apart from "our pipeline is dead". A board older
+ *     than `BOARD_MAX_AGE_MS` schedules a background rebuild on the spot, so a
+ *     dead trigger self-heals instead of freezing the app on an old date.
  *   - `doGet?action=search&query=<name>` filters the board / falls back to a live query.
  *   - `doGet?action=getTrend&cropName=<name>&days=7` returns a price trend.
+ *   - `doGet?action=warm` queues a rebuild and returns immediately.
+ *   - `doGet?action=diag` reports board freshness and trigger state.
  *
  * Data source: Taiwan MOA wholesale market transactions (open data, no key required).
  *   Endpoint : https://data.moa.gov.tw/api/v1/AgriProductsTransType/
@@ -45,6 +51,18 @@ var FETCH_BATCH = 13;            // concurrent UrlFetchApp requests; a 70+ burst
 var BOARD_PROP_PREFIX = 'veggie_board_v2_chunk_';
 var BOARD_PROP_COUNT = 'veggie_board_v2_chunks';
 var PROP_CHUNK_SIZE = 8000;
+
+// Freshness. `date`/`roc_date` is the trading date of the prices — it legitimately
+// stays put over weekends, holidays and typhoon closures, when MOA publishes only
+// `休市` rows. `generated_at` is when we last crawled, which must keep moving; a
+// board that stops being regenerated is the actual failure mode.
+var BOARD_MAX_AGE_MS = 4 * 60 * 60 * 1000; // rebuild on demand past this age
+var REFRESH_LOCK_KEY = 'veggie_refresh_queued';
+var REFRESH_LOCK_TTL = 15 * 60;            // seconds; one queued rebuild per window
+var REFRESH_ONCE_FN = 'refreshBoardCacheOnce';
+var REFRESH_CRON_FN = 'refreshBoardCache';
+var LAST_OK_PROP = 'veggie_last_refresh_ok';
+var LAST_FAIL_PROP = 'veggie_last_refresh_fail';
 
 /**
  * Board items: the produce people actually buy.
@@ -298,7 +316,9 @@ function doGet(e) {
     } else if (action === 'search') {
       payload = handleSearch(params);
     } else if (action === 'warm') {
-      payload = refreshBoardCache();
+      payload = handleWarm(params);
+    } else if (action === 'diag') {
+      payload = handleDiag();
     } else {
       payload = readBoard();
     }
@@ -321,24 +341,39 @@ function jsonOut(obj) {
  * Serves the board for user requests. NEVER crawls synchronously — a cold
  * crawl exceeds the Web App response window and returns an error page.
  * Order: in-memory cache → durable ScriptProperties → "warming" placeholder.
+ *
+ * Anything past `BOARD_MAX_AGE_MS` is served as-is but queues a background
+ * rebuild, so the app recovers on its own if the refresh trigger stops firing.
  */
 function readBoard() {
   var cache = CacheService.getScriptCache();
-  var cached = cache.get(BOARD_CACHE_KEY);
-  if (cached) {
-    var p = JSON.parse(cached);
-    p.cached = true;
-    return p;
+  var json = cache.get(BOARD_CACHE_KEY);
+  if (!json) {
+    json = readDurableBoard();
+    if (json) cache.put(BOARD_CACHE_KEY, json, BOARD_CACHE_TTL);
   }
-  var durable = readDurableBoard();
-  if (durable) {
-    cache.put(BOARD_CACHE_KEY, durable, BOARD_CACHE_TTL);
-    var d = JSON.parse(durable);
-    d.cached = true;
-    return d;
+  if (!json) {
+    // No data yet — trigger never ran. Fast, non-crawling response.
+    scheduleRefresh();
+    return { type: 'board', warming: true, stale: true, count: 0, items: [] };
   }
-  // No data yet — trigger not run. Fast, non-crawling response.
-  return { type: 'board', warming: true, count: 0, items: [] };
+
+  var board = JSON.parse(json);
+  board.cached = true;
+  board.age_ms = boardAgeMs(board);
+  board.stale = board.age_ms === null || board.age_ms > BOARD_MAX_AGE_MS;
+  if (board.stale) board.refresh_queued = scheduleRefresh();
+  return board;
+}
+
+/**
+ * Milliseconds since the board was crawled, or null when the board predates
+ * `generated_at` (which counts as stale — its real age is unknown).
+ */
+function boardAgeMs(board) {
+  if (!board || !board.generated_at) return null;
+  var built = Date.parse(board.generated_at);
+  return isNaN(built) ? null : Math.max(0, Date.now() - built);
 }
 
 /**
@@ -348,7 +383,13 @@ function readBoard() {
 function buildBoard() {
   var dates = resolveTradeDates();
   if (!dates.latest) {
-    return { type: 'board', error: '近期查無交易資料', count: 0, items: [] };
+    return {
+      type: 'board',
+      error: '近期查無交易資料',
+      generated_at: new Date().toISOString(),
+      count: 0,
+      items: []
+    };
   }
 
   var roots = boardRoots();
@@ -369,6 +410,10 @@ function buildBoard() {
     date: rocToISO(dates.latest),
     roc_date: dates.latest,
     prev_date: dates.prev,
+    // When the backend crawled, as opposed to the trading date above. The UI
+    // needs both: a stuck `date` with a moving `generated_at` means 休市, while
+    // a frozen `generated_at` means the refresh pipeline is broken.
+    generated_at: new Date().toISOString(),
     count: items.length,
     items: items
   };
@@ -434,14 +479,112 @@ function readDurableBoard() {
   }
 }
 
-/** Time-driven trigger target — rebuilds and stores the board. */
+/**
+ * Trigger target — rebuilds and stores the board. An empty build is never
+ * stored (a throttled crawl must not wipe a good board), but it is recorded so
+ * `?action=diag` can show that refreshes are running and why they yield nothing.
+ */
 function refreshBoardCache() {
   var board = buildBoard();
+  var props = PropertiesService.getScriptProperties();
   if (board.items && board.items.length) {
     storeBoard(board);
+    props.setProperty(LAST_OK_PROP, board.generated_at + ' ' + board.roc_date + ' ' + board.count + ' items');
+  } else {
+    props.setProperty(LAST_FAIL_PROP, new Date().toISOString() + ' ' + (board.error || 'empty board'));
   }
   Logger.log('Board refreshed: ' + (board.count || 0) + ' items for ' + (board.roc_date || 'n/a'));
   return board;
+}
+
+/**
+ * One-off trigger target used by `scheduleRefresh`. A dedicated handler name is
+ * what makes spent one-off triggers safely distinguishable from the recurring
+ * one, since both report a CLOCK event type.
+ */
+function refreshBoardCacheOnce() {
+  try {
+    refreshBoardCache();
+  } finally {
+    dropTriggers(REFRESH_ONCE_FN);
+    CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
+  }
+}
+
+/**
+ * Queues a background rebuild without making the caller wait for the crawl,
+ * which takes minutes and would blow the Web App response window.
+ * @returns {boolean} true when this call queued the rebuild.
+ */
+function scheduleRefresh() {
+  var cache = CacheService.getScriptCache();
+  if (cache.get(REFRESH_LOCK_KEY)) return false; // rebuild already pending
+  cache.put(REFRESH_LOCK_KEY, '1', REFRESH_LOCK_TTL);
+  try {
+    dropTriggers(REFRESH_ONCE_FN); // never accumulate toward the 20-trigger cap
+    ScriptApp.newTrigger(REFRESH_ONCE_FN).timeBased().after(1000).create();
+    return true;
+  } catch (err) {
+    Logger.log('scheduleRefresh error: ' + err);
+    cache.remove(REFRESH_LOCK_KEY);
+    return false;
+  }
+}
+
+/** Deletes every project trigger bound to one handler function. */
+function dropTriggers(handler) {
+  var triggers = ScriptApp.getProjectTriggers();
+  var dropped = 0;
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() !== handler) continue;
+    ScriptApp.deleteTrigger(triggers[i]);
+    dropped++;
+  }
+  return dropped;
+}
+
+/** `?action=warm` — queues a rebuild and answers immediately. `force=1` jumps the lock. */
+function handleWarm(params) {
+  if (params && params.force) CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
+  var queued = scheduleRefresh();
+  return {
+    type: 'warm',
+    queued: queued,
+    message: queued ? '已排入背景更新，約一分鐘後生效' : '已有更新排程進行中',
+    board: boardSummary()
+  };
+}
+
+/** `?action=diag` — makes refresh liveness observable without opening the GAS console. */
+function handleDiag() {
+  var props = PropertiesService.getScriptProperties().getProperties();
+  var handlers = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
+  return {
+    type: 'diag',
+    now: new Date().toISOString(),
+    board: boardSummary(),
+    board_items_configured: BOARD_ITEMS.length,
+    triggers: handlers,
+    refresh_queued: !!CacheService.getScriptCache().get(REFRESH_LOCK_KEY),
+    last_refresh_ok: props[LAST_OK_PROP] || null,
+    last_refresh_fail: props[LAST_FAIL_PROP] || null
+  };
+}
+
+/** Freshness header of the stored board — no items, so it stays cheap to serve. */
+function boardSummary() {
+  var json = CacheService.getScriptCache().get(BOARD_CACHE_KEY) || readDurableBoard();
+  if (!json) return null;
+  var board = JSON.parse(json);
+  var age = boardAgeMs(board);
+  return {
+    date: board.date || null,
+    roc_date: board.roc_date || null,
+    generated_at: board.generated_at || null,
+    age_ms: age,
+    stale: age === null || age > BOARD_MAX_AGE_MS,
+    count: board.count || 0
+  };
 }
 
 // --- Search ---
@@ -826,14 +969,9 @@ function round1(n) {
   return Math.round(n * 10) / 10;
 }
 
-// --- Setup helper: run once to install the daily refresh trigger ---
+// --- Setup helper: run once to install the recurring refresh trigger ---
 function installDailyTrigger() {
-  var triggers = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction() === 'refreshBoardCache') {
-      ScriptApp.deleteTrigger(triggers[i]);
-    }
-  }
-  ScriptApp.newTrigger('refreshBoardCache').timeBased().everyHours(6).create();
-  refreshBoardCache();
+  dropTriggers(REFRESH_CRON_FN);
+  ScriptApp.newTrigger(REFRESH_CRON_FN).timeBased().everyHours(4).create();
+  return refreshBoardCache();
 }

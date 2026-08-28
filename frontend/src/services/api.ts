@@ -89,5 +89,8 @@ function mockResponse(params: Record<string, string>): ApiResponse {
     };
     return items.length ? search : { type: 'search', query: q, error: '查無此品項', items: [] };
   }
-  return MOCK_BOARD as BoardResponse;
+  // The bundled snapshot was "fetched" just now, so it is fresh by definition —
+  // stamping the real time keeps the freshness notice honest offline: the UI
+  // explains the old trading date as a market closure, not a broken pipeline.
+  return { ...(MOCK_BOARD as BoardResponse), generated_at: new Date().toISOString(), stale: false };
 }

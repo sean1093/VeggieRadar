@@ -18,6 +18,8 @@ jobs:
     env:
       HAS_SA: ${{ secrets.GCP_SA_KEY != '' }}
       HAS_TOKEN: ${{ secrets.CLASP_TOKEN != '' }}
+      # The live Web App deployment the frontend calls (public; also in frontend/.env).
+      DEPLOYMENT_ID: AKfycbyKixQhgD42GXjZePZB6P62_LXmNqKZ0vtepsu1wTvw9LZXwv3GAIRIa6c8Hqu92EcM
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -47,6 +49,19 @@ jobs:
         # .clasp.json lives at the repo root and points rootDir to backend/.
         if: env.HAS_SA == 'true' || env.HAS_TOKEN == 'true'
         run: clasp push --force
+
+      - name: Redeploy the Web App
+        # `clasp push` only moves HEAD. The /exec URL serves a pinned version, so
+        # without this the deployed backend silently keeps running the old code.
+        if: env.HAS_SA == 'true' || env.HAS_TOKEN == 'true'
+        run: clasp deploy -i "$DEPLOYMENT_ID" -d "ci ${GITHUB_SHA::7}"
+
+      - name: Queue a board refresh
+        # Non-blocking: the endpoint schedules the crawl and returns at once.
+        if: env.HAS_SA == 'true' || env.HAS_TOKEN == 'true'
+        run: |
+          curl -fsSL --max-time 60 \
+            "https://script.google.com/macros/s/$DEPLOYMENT_ID/exec?action=warm&force=1"
 
       - name: Skip notice
         if: env.HAS_SA != 'true' && env.HAS_TOKEN != 'true'

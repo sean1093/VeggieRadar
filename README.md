@@ -55,11 +55,17 @@ MOA open-data API ──▶ GAS daily cache (board) ──▶ Frontend board (Gi
     in `CacheService` plus durable `ScriptProperties`.
   - `doGet` (default) — serves the stored board instantly. **It never crawls
     synchronously** (a cold crawl exceeds the Web App response window and 404s).
+    A board past `BOARD_MAX_AGE_MS` (4 h) is still served, but the request also
+    queues a background rebuild, so a dead trigger self-heals instead of
+    freezing the app on an old date.
   - `doGet?action=search&query=<name>` — filters the board, falling back to a live
     query. Accepts Chinese and common English/colloquial terms via an alias table.
   - `doGet?action=getTrend&cropName=<name>&days=7` — price trend for the drawer.
-  - `doGet?action=warm` — builds + stores the board (used by the trigger and for a
-    one-time bootstrap).
+  - `doGet?action=warm` — queues a rebuild and returns immediately (`force=1`
+    jumps the once-per-15-minutes lock). The crawl takes minutes, so it runs in a
+    one-off trigger rather than on the request.
+  - `doGet?action=diag` — board freshness, installed triggers and the last refresh
+    outcome, so a stalled pipeline is diagnosable without the GAS console.
   - Prices are volume-weighted averages across markets; items below 200 kg traded
     are filtered; the latest day with real trades is found automatically.
 - **Frontend (`frontend/`):** React + Vite + TypeScript + Tailwind + shadcn/ui.
@@ -92,6 +98,19 @@ the board (including 高麗菜) without any error; and `storeBoard()` splits the
 ~24 KB board across numbered `ScriptProperties` chunks, since a single property
 value is capped at 9 KB.
 
+### Trading date vs. refresh time
+
+`date` / `roc_date` is the **trading date of the prices**. It legitimately stands
+still over weekends, holidays and typhoon closures, when MOA publishes nothing but
+`休市` placeholder rows — 2026-08-27 and 2026-08-28 were two such days island-wide.
+`generated_at` is **when the backend last crawled**, and that must keep moving.
+
+Reporting only the trading date is what made a normal market closure look like a
+broken app: the UI showed a date frozen two days back with no way to tell whether
+the markets were shut or the pipeline had died. The board therefore carries both,
+plus `stale`, and the frontend (`src/lib/utils/freshness.ts`) turns the pair into
+one of "今日行情尚未公布", "批發市場休市中" or "資料更新中".
+
 ---
 
 ## 3. API
@@ -106,6 +125,9 @@ GET {WEB_APP_URL}/exec
   "date": "2026-08-26",
   "roc_date": "115.08.26",
   "prev_date": "115.08.25",
+  "generated_at": "2026-08-28T00:31:07.412Z",
+  "age_ms": 84210,
+  "stale": false,
   "count": 94,
   "items": [
     {
@@ -132,6 +154,11 @@ GET {WEB_APP_URL}/exec
 `元/台斤`. `retail_estimated` is always `true` — see §4. Clients must treat the
 `retail_*` fields as optional, since a board cached by an older deploy lacks them.
 
+`date` is the trading date; `generated_at` is when the backend crawled. See
+"Trading date vs. refresh time" in §2 — clients must not present the trading date
+alone as "last updated". `stale: true` means the board is past its max age and a
+rebuild has been queued (`refresh_queued`); the stale board is still served.
+
 ### Search
 ```
 GET {WEB_APP_URL}/exec?action=search&query=高麗菜
@@ -144,6 +171,19 @@ GET {WEB_APP_URL}/exec?action=getTrend&cropName=甘藍&days=7
 → { "cropName": "甘藍", "days": 7, "trend": [23.1, 24.0, null, 24.4, ...] }
 ```
 (`null` = no market that day, e.g. a holiday.)
+
+### Refresh & diagnostics
+```
+GET {WEB_APP_URL}/exec?action=warm[&force=1]
+→ { "type": "warm", "queued": true, "message": "已排入背景更新，約一分鐘後生效", "board": { ... } }
+
+GET {WEB_APP_URL}/exec?action=diag
+→ { "type": "diag", "board": { "generated_at": ..., "stale": false },
+     "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null }
+```
+`warm` queues the crawl in a one-off trigger and answers at once — the crawl
+itself takes minutes and would blow the Web App response window. `diag` is how
+you tell "markets closed" from "refresh pipeline dead" without the GAS console.
 
 ---
 
@@ -227,9 +267,13 @@ npm test         # vitest — includes backendCode.test.ts, which loads
 ### Backend (Google Apps Script)
 Code lives in `backend/Code.gs`, deployed with `clasp` (`.clasp.json` sets
 `rootDir` to `backend/`).
-1. `clasp push` then deploy as a **Web App** (execute as: me; access: anyone).
-2. Run `installDailyTrigger()` once in the editor — it installs the refresh
-   trigger and warms the board so the first visitor never hits a cold crawl.
+1. `clasp push`, then deploy as a **Web App** (execute as: me; access: anyone).
+   `clasp push` only moves HEAD — the `/exec` URL serves a pinned version, so
+   redeploy the same deployment to publish code:
+   `clasp deploy -i <deploymentId> -d "<description>"`.
+2. Run `installDailyTrigger()` once in the editor — it installs the 4-hourly
+   refresh trigger and warms the board so the first visitor never hits a cold
+   crawl. Confirm with `?action=diag`: `triggers` must list `refreshBoardCache`.
 3. Put the Web App `/exec` URL in `frontend/.env` as `VITE_API_BASE_URL`.
 
 > The MOA API needs no key.
@@ -243,8 +287,10 @@ Code lives in `backend/Code.gs`, deployed with `clasp` (`.clasp.json` sets
   set **Settings → Pages → Source: GitHub Actions**. Live at
   `https://<user>.github.io/VeggieRadar/` (`vite.config.ts` `base` is `/VeggieRadar/`).
 - **Backend → Apps Script** via `.github/workflows/deploy-gas.yml` (optional):
-  set repo secrets `GAS_PROJECT_ID` + `GCP_SA_KEY` (or `CLASP_TOKEN`); otherwise
-  deploy manually with `clasp`. See `clasp_instructions.md`.
+  set repo secrets `GCP_SA_KEY` (or `CLASP_TOKEN`); otherwise deploy manually with
+  `clasp`. See `clasp_instructions.md`. The workflow pushes, **redeploys the pinned
+  `DEPLOYMENT_ID`** — without that step `/exec` keeps serving old code — and then
+  queues a board refresh via `?action=warm&force=1`.
 
 ---
 
