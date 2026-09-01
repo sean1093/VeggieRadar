@@ -24,9 +24,16 @@ when pricier, priced per catty (台斤).
   automatically, so a typical day shows ~90.
 - **Per-catty pricing.** Primary price is `元/台斤` (the market convention;
   1 catty = 600 g). The MOA source is `元/公斤`, converted on the client (×0.6).
-- **Wholesale is the fact; retail is an estimate.** The board's headline number
-  is the wholesale closing average. Below it, `市場約 35–55` is a *reference
-  band* for a traditional market, never a quoted price — see §4.
+- **Lead with the price you pay; keep the fact underneath.** The headline number
+  is the estimated traditional-market price (`約 44 元/台斤`) — that is what a
+  shopper transacts at. The measured wholesale closing average and the reference
+  band sit under it (`市場 35–55・批發 14.6`), and the drawer shows the markup
+  the estimate adds. The estimate is never presented as a quoted price — see §4.
+  Comparisons ranked for the shopper (「同類更划算的選擇」) use the same market
+  basis, because a crop that is cheaper at auction can be dearer at the stall.
+- **The change badge is wholesale.** `↓ 7.0%` tracks the wholesale average, the
+  only measured series, and is labelled `批發較昨日` in the drawer. The band is
+  rounded to NT$5, so it would read as frozen against small real moves.
 - **Colour as meaning.** Sage `↓ 便宜了` (cheaper), clay `↑ 變貴了` (pricier),
   grey `→ 持平` (flat), compared with the previous trading day. Arrows + text back
   up the colour so it never relies on colour alone.

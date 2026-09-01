@@ -121,7 +121,7 @@ function App() {
               價格以每台斤（600&nbsp;克）計。<span className="text-sage">↓ 便宜</span>・<span className="text-clay">↑ 變貴</span>
             </p>
             <p className="mt-1 text-xs text-stone">
-              「市場約」為傳統市場零售參考區間，以批發價加攤販常見加成推估，非實際報價。
+              大字為傳統市場零售推估（批發價加攤販常見加成），非實際報價；漲跌以批發價計。
             </p>
           </section>
         )}

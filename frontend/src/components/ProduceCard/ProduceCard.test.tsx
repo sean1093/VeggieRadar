@@ -18,34 +18,44 @@ const up: ProduceItem = {
 };
 
 describe('ProduceCard', () => {
-  it('shows the name and 台斤 price', () => {
+  it('leads with the estimated market price, not the wholesale price', () => {
     render(<ProduceCard item={down} onClick={vi.fn()} />);
     expect(screen.getByText('高麗菜')).toBeInTheDocument();
-    expect(screen.getByText('14.6')).toBeInTheDocument();
+    expect(screen.getByText('約 44')).toBeInTheDocument();
     expect(screen.getByText('元/台斤')).toBeInTheDocument();
   });
 
-  it('shows the retail reference band instead of the 元/公斤 line', () => {
+  it('demotes the band and the wholesale price to one supporting line', () => {
     render(<ProduceCard item={down} onClick={vi.fn()} />);
-    expect(screen.getByText('市場約 35–55')).toBeInTheDocument();
+    expect(screen.getByText('市場 35–55・批發 14.6')).toBeInTheDocument();
     expect(screen.queryByText(/元\/公斤/)).not.toBeInTheDocument();
   });
 
-  it('announces both wholesale and retail reference to screen readers', () => {
+  it('derives the headline from the band when retail_price is absent', () => {
+    const noMid: ProduceItem = { ...down };
+    delete noMid.retail_price;
+    render(<ProduceCard item={noMid} onClick={vi.fn()} />);
+    expect(screen.getByText('約 45')).toBeInTheDocument();
+  });
+
+  it('announces the market price first, then the wholesale price', () => {
     render(<ProduceCard item={down} onClick={vi.fn()} />);
     expect(
-      screen.getByRole('button', { name: '高麗菜，批發每台斤 14.6 元，便宜了，菜市場參考價每台斤 35 到 55 元' }),
+      screen.getByRole('button', {
+        name: '高麗菜，菜市場參考價每台斤約 44 元，區間 35 到 55 元，便宜了，批發每台斤 14.6 元',
+      }),
     ).toBeInTheDocument();
   });
 
-  it('falls back to 元/公斤 when a cached board has no retail fields', () => {
+  it('falls back to the wholesale headline when a cached board has no retail fields', () => {
     const legacy: ProduceItem = { ...down };
     delete legacy.retail_low;
     delete legacy.retail_price;
     delete legacy.retail_high;
     render(<ProduceCard item={legacy} onClick={vi.fn()} />);
+    expect(screen.getByText('14.6')).toBeInTheDocument();
     expect(screen.getByText('約 24 元/公斤')).toBeInTheDocument();
-    expect(screen.queryByText(/市場約/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/市場/)).not.toBeInTheDocument();
   });
 
   it('uses sage + 便宜了 when price falls', () => {
