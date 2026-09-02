@@ -51,6 +51,26 @@ describe('App (board-first)', () => {
     expect(within(list).getByText('高麗菜')).toBeInTheDocument();
     expect(within(list).queryByText('香蕉')).not.toBeInTheDocument();
   });
+  it('shows an honest empty state when a remote search finds nothing', async () => {
+    render(<App />);
+    await screen.findByText('高麗菜');
+    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '龍鬚菜' } });
+    fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
+    expect(await screen.findByText('查無此品項')).toBeInTheDocument();
+    expect(screen.getByText(/找不到「龍鬚菜」/)).toBeInTheDocument();
+  });
+
+  it('clears the search back to the full board', async () => {
+    render(<App />);
+    await screen.findByText('高麗菜');
+    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '番茄' } });
+    fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
+    await waitFor(() => expect(screen.queryByText('高麗菜')).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: '清除搜尋' }));
+    expect(await screen.findByText('高麗菜')).toBeInTheDocument();
+    expect(screen.getByText('今日菜價', { selector: 'h2' })).toBeInTheDocument();
+  });
   describe('划算優先 sort', () => {
     const listedNames = () =>
       Array.from(screen.getByTestId('produce-list').querySelectorAll('h3')).map((el) => el.textContent);
