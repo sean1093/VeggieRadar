@@ -168,5 +168,22 @@ describe('DetailDrawer', () => {
       );
       expect(screen.queryByText(/今日品種行情/)).not.toBeInTheDocument();
     });
+    it('discloses the folded remainder when shown rows cover ≤90% of volume', () => {
+      const sparse: ProduceItem = {
+        ...withRetail,
+        varieties: [
+          { name: '甲', catty_price: 20, share_percent: 40 },
+          { name: '乙', catty_price: 30, share_percent: 30 },
+        ],
+      };
+      render(<DetailDrawer isOpen onClose={() => {}} item={sparse} allProduceItems={mockAllProduceItems} />);
+      expect(screen.getByText('其餘品種合計約佔 30%')).toBeInTheDocument();
+    });
+
+    it('omits the remainder line when the rows essentially cover the volume', () => {
+      render(<DetailDrawer isOpen onClose={() => {}} item={bamboo} allProduceItems={mockAllProduceItems} />);
+      // 41 + 34 + 24 = 99% — no remainder worth disclosing.
+      expect(screen.queryByText(/其餘品種/)).not.toBeInTheDocument();
+    });
   });
 });
