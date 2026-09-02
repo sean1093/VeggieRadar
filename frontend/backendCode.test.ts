@@ -100,6 +100,9 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
     'readBoard', 'boardAgeMs', 'scheduleRefresh', 'dropTriggers', 'handleWarm',
     'handleDiag', 'BOARD_MAX_AGE_MS', 'REFRESH_ONCE_FN',
     'handleTrend', 'resolveTradeDates',
+    'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
+    'applyBaselines', 'backfillHistory', 'handleBackfill', 'buildBoard',
+    'BASELINE_WINDOW', 'BASELINE_MIN_DAYS',
   ];
   const factory = new Function(
     ...Object.keys(services),
@@ -559,5 +562,229 @@ describe('resolveTradeDates — probe caching', () => {
     const probesUsed = fetches.length;
     api.resolveTradeDates();
     expect(fetches.length).toBe(probesUsed * 2); // probed again, not served a cached failure
+  });
+});
+describe('median', () => {
+  it('handles odd, even and single-element arrays', () => {
+    const { api } = loadBackend();
+    expect(api.median([3, 1, 2])).toBe(2);
+    expect(api.median([4, 1, 3, 2])).toBe(2.5);
+    expect(api.median([5])).toBe(5);
+  });
+});
+
+describe('appendObservation — rolling per-item series', () => {
+  it('appends, sorts out-of-order dates, and replaces the same trading date', () => {
+    const { api } = loadBackend();
+    let series = api.appendObservation(undefined, rocDate(2), 10);
+    series = api.appendObservation(series, rocDate(3), 9); // arrives late, must sort in
+    series = api.appendObservation(series, rocDate(2), 12); // 4-hourly refresh revisits the day
+    expect(series).toEqual([
+      [rocDate(3), 9],
+      [rocDate(2), 12],
+    ]);
+  });
+
+  it('trims to the window, dropping the oldest entries', () => {
+    const { api } = loadBackend();
+    let series: [string, number][] | undefined;
+    const total = api.BASELINE_WINDOW + 5;
+    for (let i = 0; i < total; i++) {
+      series = api.appendObservation(series, rocDate(total - i), 10 + i);
+    }
+    expect(series).toHaveLength(api.BASELINE_WINDOW);
+    expect(series![0][0]).toBe(rocDate(api.BASELINE_WINDOW)); // 5 oldest gone
+    expect(series![series!.length - 1][0]).toBe(rocDate(1));
+  });
+});
+
+describe('updateHistory — refresh integration', () => {
+  it('records one observation per item per trading date, idempotently', () => {
+    const { api } = loadBackend();
+    api.updateHistory({ roc_date: rocDate(1), items: [{ name: '高麗菜', avg_price: 20 }] });
+    api.updateHistory({ roc_date: rocDate(1), items: [{ name: '高麗菜', avg_price: 21 }] });
+    expect(api.readHistory().items['高麗菜']).toEqual([[rocDate(1), 21]]);
+
+    api.updateHistory({ roc_date: rocDate(0), items: [{ name: '高麗菜', avg_price: 25 }] });
+    expect(api.readHistory().items['高麗菜']).toEqual([
+      [rocDate(1), 21],
+      [rocDate(0), 25],
+    ]);
+  });
+
+  it('prunes horizon-stale entries and items that left the board definition', () => {
+    const { api } = loadBackend();
+    api.writeHistory({
+      version: 1,
+      items: {
+        高麗菜: [[rocDate(60), 8], [rocDate(2), 20]],
+        已下架的菜: [[rocDate(2), 99]],
+      },
+    });
+    api.updateHistory({ roc_date: rocDate(1), items: [{ name: '高麗菜', avg_price: 22 }] });
+    const items = api.readHistory().items;
+    expect(items['高麗菜']).toEqual([
+      [rocDate(2), 20],
+      [rocDate(1), 22],
+    ]);
+    expect(items['已下架的菜']).toBeUndefined();
+  });
+
+  it('ignores an empty or dateless board — a failed crawl must not touch history', () => {
+    const { api } = loadBackend();
+    api.writeHistory({ version: 1, items: { 高麗菜: [[rocDate(2), 20]] } });
+    api.updateHistory({ roc_date: null, items: [{ name: '高麗菜', avg_price: 1 }] });
+    api.updateHistory({ roc_date: rocDate(1), items: [] });
+    expect(api.readHistory().items['高麗菜']).toEqual([[rocDate(2), 20]]);
+  });
+
+  it('round-trips a full-size history through multi-chunk properties', () => {
+    const { api, props } = loadBackend();
+    for (let d = api.BASELINE_WINDOW; d >= 1; d--) {
+      api.updateHistory({
+        roc_date: rocDate(d),
+        items: api.BOARD_ITEMS.map((def: { name: string }) => ({ name: def.name, avg_price: 20 + (d % 7) })),
+      });
+    }
+    expect(parseInt(props.get('veggie_history_chunks') ?? '0', 10)).toBeGreaterThan(1);
+    const history = api.readHistory();
+    expect(Object.keys(history.items)).toHaveLength(api.BOARD_ITEMS.length);
+    expect(history.items['高麗菜']).toHaveLength(api.BASELINE_WINDOW);
+  });
+
+  it('treats a corrupt store as empty instead of crashing the build', () => {
+    const { api, props } = loadBackend();
+    props.set('veggie_history_chunks', '1');
+    props.set('veggie_history_chunk_0', '{not json');
+    expect(api.readHistory()).toEqual({ version: 1, items: {} });
+  });
+});
+
+describe('applyBaselines', () => {
+  const flatSeries = (days: number, price: number): [string, number][] => {
+    const out: [string, number][] = [];
+    for (let i = days; i >= 1; i--) out.push([rocDate(i), price]);
+    return out;
+  };
+
+  it('publishes the median as 元/台斤 with a signed percent', () => {
+    const { api } = loadBackend();
+    const series = flatSeries(12, 18).map(
+      (entry, i): [string, number] => [entry[0], i < 6 ? 18 : 22], // median 20
+    );
+    const items = [{ name: '高麗菜', avg_price: 15 }] as Record<string, unknown>[];
+    api.applyBaselines(items, { version: 1, items: { 高麗菜: series } }, rocDate(0));
+    expect(items[0].baseline_price).toBe(12); // 20 元/公斤 × 0.6
+    expect(items[0].vs_baseline_percent).toBe(-25);
+  });
+
+  it("excludes today's own observation — a spike day must not vouch for itself", () => {
+    const { api } = loadBackend();
+    const series = flatSeries(11, 20);
+    series.push([rocDate(0), 1000]); // today's spike, already recorded
+    const items = [{ name: '高麗菜', avg_price: 15 }] as Record<string, unknown>[];
+    api.applyBaselines(items, { version: 1, items: { 高麗菜: series } }, rocDate(0));
+    expect(items[0].vs_baseline_percent).toBe(-25); // baseline stays 20
+  });
+
+  it('stays silent below the minimum-days threshold', () => {
+    const { api } = loadBackend();
+    const items = [{ name: '高麗菜', avg_price: 15 }] as Record<string, unknown>[];
+    api.applyBaselines(
+      items,
+      { version: 1, items: { 高麗菜: flatSeries(api.BASELINE_MIN_DAYS - 1, 20) } },
+      rocDate(0),
+    );
+    expect(items[0].baseline_price).toBeUndefined();
+    expect(items[0].vs_baseline_percent).toBeUndefined();
+  });
+
+  it('stays silent when every entry is past the calendar horizon', () => {
+    const { api } = loadBackend();
+    const stale: [string, number][] = [];
+    for (let i = 0; i < 12; i++) stale.push([rocDate(50 + i), 20]);
+    const items = [{ name: '高麗菜', avg_price: 15 }] as Record<string, unknown>[];
+    api.applyBaselines(items, { version: 1, items: { 高麗菜: stale } }, rocDate(0));
+    expect(items[0].baseline_price).toBeUndefined();
+  });
+
+  it('reports a positive percent when pricier than usual', () => {
+    const { api } = loadBackend();
+    const items = [{ name: '高麗菜', avg_price: 25 }] as Record<string, unknown>[];
+    api.applyBaselines(items, { version: 1, items: { 高麗菜: flatSeries(12, 20) } }, rocDate(0));
+    expect(items[0].vs_baseline_percent).toBe(25);
+  });
+});
+
+describe('backfillHistory — one-time seeding', () => {
+  it('crawls each root once per window with range queries; merges are idempotent', () => {
+    const { api, fetches } = loadBackend({
+      甘藍: [
+        trendRow(rocDate(1), '甘藍-初秋', 20, 60000),
+        trendRow(rocDate(1), '甘藍-初秋', 30, 20000, '台中'),
+        trendRow(rocDate(2), '甘藍-初秋', 10, 300000),
+        trendRow(rocDate(3), '休市', 0, 0), // closed-market placeholder
+        trendRow(rocDate(4), '甘藍-初秋', 99, 100), // below MIN_TRADE_VOLUME
+      ],
+    });
+    api.backfillHistory();
+
+    expect(fetches).toHaveLength(api.boardRoots().length * 2);
+    expect(fetches[0]).toContain(`Start_time=${rocDate(23)}`);
+    expect(fetches[0]).toContain(`End_time=${rocDate(12)}`);
+    expect(fetches[fetches.length - 1]).toContain(`Start_time=${rocDate(11)}`);
+    expect(fetches[fetches.length - 1]).toContain(`End_time=${rocDate(0)}`);
+
+    // Both windows returned identical rows; per-date merge must not duplicate.
+    expect(api.readHistory().items['高麗菜']).toEqual([
+      [rocDate(2), 10],
+      [rocDate(1), 22.5], // (20×60000 + 30×20000) / 80000
+    ]);
+  });
+
+  it('keeps shared-root items separated by variety filters', () => {
+    const { api } = loadBackend({
+      甜椒: [
+        trendRow(rocDate(1), '甜椒-青椒', 5, 1000),
+        trendRow(rocDate(1), '甜椒-彩色', 50, 1000),
+      ],
+    });
+    api.backfillHistory();
+    const items = api.readHistory().items;
+    expect(items['青椒']).toEqual([[rocDate(1), 5]]);
+    expect(items['甜椒']).toEqual([[rocDate(1), 50]]);
+  });
+});
+
+describe('handleBackfill — queueing', () => {
+  it('queues one background trigger, locks repeats, force jumps the lock', () => {
+    const { api, triggers } = loadBackend();
+    expect(api.handleBackfill({}).queued).toBe(true);
+    expect(triggers.some((t) => t.handler === 'backfillHistoryOnce')).toBe(true);
+    expect(api.handleBackfill({}).queued).toBe(false); // locked
+    expect(api.handleBackfill({ force: '1' }).queued).toBe(true);
+  });
+});
+
+describe('buildBoard — baseline join', () => {
+  it('ships baseline fields on built items when history suffices', () => {
+    const { api } = loadBackend({ 甘藍: [row('甘藍-初秋', 20, 60000)] });
+    const series: [string, number][] = [];
+    for (let i = 12; i >= 1; i--) series.push([rocDate(i), 25]);
+    api.writeHistory({ version: 1, items: { 高麗菜: series } });
+
+    const board = api.buildBoard();
+    const cabbage = board.items.find((it: { name: string }) => it.name === '高麗菜');
+    expect(cabbage.baseline_price).toBe(15); // 25 元/公斤 × 0.6
+    expect(cabbage.vs_baseline_percent).toBe(-20); // 20 vs 25
+  });
+
+  it('surfaces history coverage through diag', () => {
+    const { api } = loadBackend();
+    api.writeHistory({
+      version: 1,
+      items: { 高麗菜: [[rocDate(1), 20]], 番茄: [[rocDate(1), 30], [rocDate(2), 31]] },
+    });
+    expect(api.handleDiag().history).toEqual({ items: 2, min_days: 1, max_days: 2 });
   });
 });

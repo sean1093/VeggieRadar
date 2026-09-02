@@ -19,6 +19,12 @@ const ProduceCard: React.FC<ProduceCardProps> = ({ item, onClick, watched = fals
   // transacts at. The wholesale price stays visible as the measured anchor the
   // estimate — and the change badge — are derived from.
   const marketMid = marketPrice(item);
+  // "跟平常比" badge — only when meaningfully below the monthly norm. Pricier
+  // days get no badge: the daily-change column already covers that side, and a
+  // badge that scolds would just be noise. Wholesale basis, like the change
+  // column; the drawer explains the derivation.
+  const vsBaseline = item.vs_baseline_percent;
+  const cheapVsMonth = vsBaseline != null && vsBaseline <= -10;
 
   const open = () => onClick(item);
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -35,9 +41,10 @@ const ProduceCard: React.FC<ProduceCardProps> = ({ item, onClick, watched = fals
       onClick={open}
       onKeyDown={onKeyDown}
       aria-label={
-        marketMid != null
+        (marketMid != null
           ? `${item.name}，菜市場參考價每台斤約 ${marketMid} 元，區間 ${item.retail_low} 到 ${item.retail_high} 元，${label}，批發每台斤 ${item.catty_price.toFixed(1)} 元`
-          : `${item.name}，批發每台斤 ${item.catty_price.toFixed(1)} 元，${label}`
+          : `${item.name}，批發每台斤 ${item.catty_price.toFixed(1)} 元，${label}`) +
+        (cheapVsMonth ? `，比近一個月便宜 ${Math.round(Math.abs(vsBaseline))}%` : '')
       }
       className="group flex cursor-pointer items-center justify-between gap-3 px-5 py-4 transition-colors hover:bg-sage-soft/40 active:bg-sage-soft/60 focus:outline-none focus-visible:bg-sage-soft/40"
     >
@@ -60,7 +67,10 @@ const ProduceCard: React.FC<ProduceCardProps> = ({ item, onClick, watched = fals
         )}
         <div className="min-w-0">
           <h3 className="truncate text-lg font-medium tracking-tight text-ink">{item.name}</h3>
-          <p className="mt-0.5 text-xs text-stone">{item.category}</p>
+          <p className="mt-0.5 text-xs text-stone">
+            {item.category}
+            {cheapVsMonth && <span className="text-sage">・比近月便宜 {Math.round(Math.abs(vsBaseline))}%</span>}
+          </p>
         </div>
       </div>
 

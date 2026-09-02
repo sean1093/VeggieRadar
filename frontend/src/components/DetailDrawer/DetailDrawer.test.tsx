@@ -94,4 +94,45 @@ describe('DetailDrawer', () => {
     // We'll skip this test for now as it depends on the Dialog implementation
     expect(handleClose).not.toHaveBeenCalled();
   });
+  describe('baseline caption', () => {
+    it('explains the monthly median under the trend, wholesale basis', () => {
+      render(
+        <DetailDrawer
+          isOpen
+          onClose={() => {}}
+          item={{ ...withRetail, baseline_price: 18.1, vs_baseline_percent: -22.3 }}
+          allProduceItems={mockAllProduceItems}
+        />,
+      );
+      expect(screen.getByText(/近一個月批發中位約 18.1 元\/台斤/)).toBeInTheDocument();
+      expect(screen.getByText(/低 22%/)).toBeInTheDocument();
+    });
+
+    it('says 高 when pricier and 持平 at zero', () => {
+      const { unmount } = render(
+        <DetailDrawer
+          isOpen
+          onClose={() => {}}
+          item={{ ...withRetail, baseline_price: 18, vs_baseline_percent: 8.4 }}
+          allProduceItems={mockAllProduceItems}
+        />,
+      );
+      expect(screen.getByText(/高 8%/)).toBeInTheDocument();
+      unmount();
+      render(
+        <DetailDrawer
+          isOpen
+          onClose={() => {}}
+          item={{ ...withRetail, baseline_price: 18, vs_baseline_percent: 0 }}
+          allProduceItems={mockAllProduceItems}
+        />,
+      );
+      expect(screen.getByText(/持平/)).toBeInTheDocument();
+    });
+
+    it('omits the caption when the item has no baseline', () => {
+      render(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
+      expect(screen.queryByText(/近一個月批發中位/)).not.toBeInTheDocument();
+    });
+  });
 });

@@ -51,4 +51,43 @@ describe('App (board-first)', () => {
     expect(within(list).getByText('高麗菜')).toBeInTheDocument();
     expect(within(list).queryByText('香蕉')).not.toBeInTheDocument();
   });
+  describe('划算優先 sort', () => {
+    const listedNames = () =>
+      Array.from(screen.getByTestId('produce-list').querySelectorAll('h3')).map((el) => el.textContent);
+
+    it('orders by discount vs own baseline; items without one sink in curated order', async () => {
+      localStorage.clear();
+      render(<App />);
+      await screen.findByText('高麗菜');
+
+      fireEvent.click(screen.getByRole('button', { name: /排序/ }));
+
+      const names = listedNames();
+      expect(names.slice(0, 4)).toEqual(['白蘿蔔', '高麗菜', '大白菜', '小白菜']); // -25.1, -22.3, -2.5, +11.7
+      // Everything without a baseline keeps the curated category order below.
+      expect(names.indexOf('青江菜')).toBeGreaterThan(3);
+      expect(localStorage.getItem('veggieradar_sort_v1')).toBe('value');
+    });
+
+    it('restores the persisted choice on the next visit', async () => {
+      localStorage.clear();
+      localStorage.setItem('veggieradar_sort_v1', 'value');
+      render(<App />);
+      await screen.findByText('高麗菜');
+
+      expect(screen.getByRole('button', { name: /排序/ })).toHaveAttribute('aria-pressed', 'true');
+      expect(listedNames()[0]).toBe('白蘿蔔');
+    });
+
+    it('toggles back to the curated category order', async () => {
+      localStorage.clear();
+      localStorage.setItem('veggieradar_sort_v1', 'value');
+      render(<App />);
+      await screen.findByText('高麗菜');
+
+      fireEvent.click(screen.getByRole('button', { name: /排序/ }));
+      expect(listedNames()[0]).toBe('高麗菜'); // definition order restored
+      expect(localStorage.getItem('veggieradar_sort_v1')).toBe('category');
+    });
+  });
 });

@@ -90,4 +90,31 @@ describe('ProduceCard', () => {
     render(<ProduceCard item={down} onClick={vi.fn()} onToggleWatch={vi.fn()} watched />);
     expect(screen.getByRole('button', { name: /取消關注/ })).toHaveTextContent('★');
   });
+  describe('比近月便宜 badge', () => {
+    it('shows the badge when meaningfully below the monthly baseline', () => {
+      render(<ProduceCard item={{ ...down, baseline_price: 18.1, vs_baseline_percent: -22.3 }} onClick={vi.fn()} />);
+      expect(screen.getByText(/・比近月便宜 22%/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /比近一個月便宜 22%/ })).toBeInTheDocument();
+    });
+
+    it('shows the badge exactly at the -10% threshold', () => {
+      render(<ProduceCard item={{ ...down, baseline_price: 16, vs_baseline_percent: -10 }} onClick={vi.fn()} />);
+      expect(screen.getByText(/・比近月便宜 10%/)).toBeInTheDocument();
+    });
+
+    it('hides the badge for a shallow dip below the threshold', () => {
+      render(<ProduceCard item={{ ...down, baseline_price: 15, vs_baseline_percent: -9.9 }} onClick={vi.fn()} />);
+      expect(screen.queryByText(/比近月便宜/)).not.toBeInTheDocument();
+    });
+
+    it('never scolds a pricier-than-usual item — the change column covers that', () => {
+      render(<ProduceCard item={{ ...up, baseline_price: 30, vs_baseline_percent: 18 }} onClick={vi.fn()} />);
+      expect(screen.queryByText(/比近月/)).not.toBeInTheDocument();
+    });
+
+    it('degrades silently when a cached board has no baseline fields', () => {
+      render(<ProduceCard item={down} onClick={vi.fn()} />);
+      expect(screen.queryByText(/比近月/)).not.toBeInTheDocument();
+    });
+  });
 });

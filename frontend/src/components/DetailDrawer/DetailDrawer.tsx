@@ -134,6 +134,17 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
             ) : (
               <div className="py-6 text-center text-sm text-stone">暫無趨勢資料</div>
             )}
+            {item.baseline_price != null && item.vs_baseline_percent != null && (
+              <p className="mt-2 text-xs text-stone">
+                近一個月批發中位約 {item.baseline_price} 元/台斤，今日批發
+                {item.vs_baseline_percent < 0
+                  ? `低 ${Math.round(Math.abs(item.vs_baseline_percent))}%`
+                  : item.vs_baseline_percent > 0
+                    ? `高 ${Math.round(item.vs_baseline_percent)}%`
+                    : '持平'}
+                ；卡片徽章與「划算優先」排序以此為準。
+              </p>
+            )}
           </div>
 
           {/* Details */}
