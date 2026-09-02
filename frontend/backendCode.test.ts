@@ -32,6 +32,7 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
   const cache = new Map<string, string>();
   const triggers: { handler: string; kind: string }[] = [];
   const fetches: string[] = [];
+  const locks = { waits: 0, releases: 0 };
 
   const respond = (url: string) => {
     fetches.push(url);
@@ -63,6 +64,12 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
           void Object.entries(o).forEach(([k, v]) => props.set(k, v)),
         deleteProperty: (k: string) => void props.delete(k),
         getProperties: () => Object.fromEntries(props),
+      }),
+    },
+    LockService: {
+      getScriptLock: () => ({
+        waitLock: (_ms: number) => void (locks.waits += 1),
+        releaseLock: () => void (locks.releases += 1),
       }),
     },
     Logger: { log: (m: unknown) => void logs.push(String(m)) },
@@ -108,7 +115,7 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
     ...Object.keys(services),
     `${SOURCE}\nreturn { ${exported.join(', ')} };`,
   );
-  return { api: factory(...Object.values(services)), logs, props, cache, triggers, fetches };
+  return { api: factory(...Object.values(services)), logs, props, cache, triggers, fetches, locks };
 }
 
 const row = (CropName: string, Avg_Price: number, Trans_Quantity: number, MarketName = '台北一'): Row =>
@@ -717,7 +724,7 @@ describe('applyBaselines', () => {
 });
 
 describe('backfillHistory — one-time seeding', () => {
-  it('crawls each root once per window with range queries; merges are idempotent', () => {
+  it('crawls every root per window with range queries, retrying empty roots once', () => {
     const { api, fetches } = loadBackend({
       甘藍: [
         trendRow(rocDate(1), '甘藍-初秋', 20, 60000),
@@ -729,7 +736,10 @@ describe('backfillHistory — one-time seeding', () => {
     });
     api.backfillHistory();
 
-    expect(fetches).toHaveLength(api.boardRoots().length * 2);
+    // Only 甘藍 answered, so every other root is retried once per window:
+    // N first-pass + (N − 1) retries, for each of the two windows.
+    const n = api.boardRoots().length;
+    expect(fetches).toHaveLength(2 * (n + (n - 1)));
     expect(fetches[0]).toContain(`Start_time=${rocDate(23)}`);
     expect(fetches[0]).toContain(`End_time=${rocDate(12)}`);
     expect(fetches[fetches.length - 1]).toContain(`Start_time=${rocDate(11)}`);
@@ -754,6 +764,14 @@ describe('backfillHistory — one-time seeding', () => {
     expect(items['青椒']).toEqual([[rocDate(1), 5]]);
     expect(items['甜椒']).toEqual([[rocDate(1), 50]]);
   });
+  it('takes the script lock only for the merge, releasing it afterwards', () => {
+    const { api, locks } = loadBackend({
+      甘藍: [trendRow(rocDate(1), '甘藍-初秋', 20, 60000)],
+    });
+    api.backfillHistory();
+    expect(locks.waits).toBe(1);
+    expect(locks.releases).toBe(1);
+  });
 });
 
 describe('handleBackfill — queueing', () => {
@@ -763,6 +781,14 @@ describe('handleBackfill — queueing', () => {
     expect(triggers.some((t) => t.handler === 'backfillHistoryOnce')).toBe(true);
     expect(api.handleBackfill({}).queued).toBe(false); // locked
     expect(api.handleBackfill({ force: '1' }).queued).toBe(true);
+  });
+});
+describe('updateHistory — locking', () => {
+  it('serialises refresh-path history writes behind the script lock', () => {
+    const { api, locks } = loadBackend();
+    api.updateHistory({ roc_date: rocDate(1), items: [{ name: '高麗菜', avg_price: 20 }] });
+    expect(locks.waits).toBe(1);
+    expect(locks.releases).toBe(1);
   });
 });
 

@@ -9,6 +9,7 @@ import { fetchBoard, readCachedBoard, searchProduce } from './services/api';
 import { useWatchlist } from './hooks/useWatchlist';
 import { describeFreshness, type FreshnessNotice } from './lib/utils/freshness';
 import { isApiError, type BoardResponse, type ProduceItem } from './types/produce';
+import { byValueFirst } from './lib/utils/value-sort';
 import './App.css';
 
 function App() {
@@ -144,19 +145,15 @@ function App() {
     if (activeFilter === 'watch') items = items.filter((it) => isWatched(it.official_name));
     else if (activeFilter !== 'all') items = items.filter((it) => it.category === activeFilter);
     if (sortMode === 'value') {
-      // Stable sort; items without a baseline sink to the bottom in their
-      // original curated order rather than pretending to be ranked.
-      items = [...items].sort(
-        (a, b) =>
-          (a.vs_baseline_percent ?? Number.MAX_SAFE_INTEGER) -
-          (b.vs_baseline_percent ?? Number.MAX_SAFE_INTEGER),
-      );
+      // Stable sort; items without a finite baseline sink to the bottom in
+      // their original curated order rather than pretending to be ranked.
+      items = [...items].sort(byValueFirst);
     }
     return items;
   }, [baseItems, activeFilter, isWatched, sortMode]);
 
   const hasBaselines = useMemo(
-    () => baseItems.some((it) => it.vs_baseline_percent != null),
+    () => baseItems.some((it) => Number.isFinite(it.vs_baseline_percent)),
     [baseItems],
   );
 

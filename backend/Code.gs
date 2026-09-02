@@ -88,6 +88,7 @@ var BACKFILL_ONCE_FN = 'backfillHistoryOnce';
 var BACKFILL_LOCK_KEY = 'veggie_backfill_queued';
 var BACKFILL_LOCK_TTL = 60 * 60; // seconds; one queued backfill per hour
 var BACKFILL_WINDOW_DAYS = 12;   // per range request; high-volume roots stay under MOA's ~1000-row cap
+var HISTORY_LOCK_WAIT_MS = 30 * 1000; // serialises history writes across overlapping triggers
 var BACKFILL_WINDOWS = 2;        // 24 calendar days ≈ 20 trading days on day one; dailies top up the rest
 
 /**
@@ -655,6 +656,20 @@ function readHistory() {
 function writeHistory(history) {
   writeChunkedProp(HISTORY_PROP_PREFIX, HISTORY_PROP_COUNT, JSON.stringify(history));
 }
+/**
+ * Serialises history read-modify-write. The 4-hourly refresh and a queued
+ * backfill can genuinely overlap; without the lock, whichever writes last
+ * silently discards the other's observations.
+ */
+function withHistoryLock(fn) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(HISTORY_LOCK_WAIT_MS);
+  try {
+    return fn();
+  } finally {
+    lock.releaseLock();
+  }
+}
 
 /**
  * Records one (trading date, price) observation per board item. Idempotent
@@ -664,13 +679,22 @@ function writeHistory(history) {
  */
 function updateHistory(board) {
   if (!board || !board.roc_date || !board.items || !board.items.length) return;
-  var history = readHistory();
-  for (var i = 0; i < board.items.length; i++) {
-    var it = board.items[i];
-    history.items[it.name] = appendObservation(history.items[it.name], board.roc_date, it.avg_price);
+  try {
+    withHistoryLock(function () {
+      var history = readHistory();
+      for (var i = 0; i < board.items.length; i++) {
+        var it = board.items[i];
+        history.items[it.name] = appendObservation(history.items[it.name], board.roc_date, it.avg_price);
+      }
+      pruneHistory(history);
+      writeHistory(history);
+    });
+  } catch (err) {
+    // A missed cycle is benign — the same trading date is re-recorded by the
+    // next refresh — and a thrown lock timeout must not mask the successful
+    // board store in the refresh bookkeeping.
+    Logger.log('updateHistory skipped: ' + err);
   }
-  pruneHistory(history);
-  writeHistory(history);
 }
 
 /** Adds or replaces one dated observation, keeping the series sorted and trimmed. */
@@ -801,37 +825,48 @@ function backfillHistoryOnce() {
  */
 function backfillHistory() {
   var roots = boardRoots();
-  var history = readHistory();
   var today = new Date();
 
+  // Crawl every window BEFORE taking the lock — the fetches are the slow
+  // part, and the merge below only needs the lock for milliseconds.
+  var crawled = [];
   for (var w = BACKFILL_WINDOWS - 1; w >= 0; w--) {
     var end = new Date(today);
     end.setDate(today.getDate() - w * BACKFILL_WINDOW_DAYS);
     var start = new Date(end);
     start.setDate(end.getDate() - (BACKFILL_WINDOW_DAYS - 1));
-    var rowsByRoot = fetchAllRows(roots, dateToROC(start), dateToROC(end));
-
-    for (var i = 0; i < BOARD_ITEMS.length; i++) {
-      var def = BOARD_ITEMS[i];
-      var rows = selectRows(rowsByRoot[def.official], def);
-      var byDate = {};
-      for (var r = 0; r < rows.length; r++) {
-        var dateKey = rows[r].TransDate;
-        if (!dateKey) continue;
-        (byDate[dateKey] = byDate[dateKey] || []).push(rows[r]);
-      }
-      Object.keys(byDate).forEach(function (roc) {
-        var day = weightedAverage(byDate[roc]);
-        if (day.volume < MIN_TRADE_VOLUME || !(day.avg > 0)) return;
-        history.items[def.name] = appendObservation(history.items[def.name], roc, round1(day.avg));
-      });
-    }
+    // fetchRootRows retries empty roots once, so one throttled batch cannot
+    // silently strip a slice of roots from the one-time seed.
+    crawled.push(fetchRootRows(roots, dateToROC(start), dateToROC(end)));
   }
 
-  pruneHistory(history);
-  writeHistory(history);
-  Logger.log('Backfill complete: ' + Object.keys(history.items).length + ' items with history');
-  return historySummary();
+  withHistoryLock(function () {
+    var history = readHistory();
+    for (var c = 0; c < crawled.length; c++) {
+      var rowsByRoot = crawled[c];
+      for (var i = 0; i < BOARD_ITEMS.length; i++) {
+        var def = BOARD_ITEMS[i];
+        var rows = selectRows(rowsByRoot[def.official], def);
+        var byDate = {};
+        for (var r = 0; r < rows.length; r++) {
+          var dateKey = rows[r].TransDate;
+          if (!dateKey) continue;
+          (byDate[dateKey] = byDate[dateKey] || []).push(rows[r]);
+        }
+        Object.keys(byDate).forEach(function (roc) {
+          var day = weightedAverage(byDate[roc]);
+          if (day.volume < MIN_TRADE_VOLUME || !(day.avg > 0)) return;
+          history.items[def.name] = appendObservation(history.items[def.name], roc, round1(day.avg));
+        });
+      }
+    }
+    pruneHistory(history);
+    writeHistory(history);
+  });
+
+  var summary = historySummary();
+  Logger.log('Backfill complete: ' + summary.items + ' items with history');
+  return summary;
 }
 
 // --- Search ---
@@ -1005,15 +1040,16 @@ function fetchAllRows(cropNames, rocStart, rocEnd) {
 /**
  * Like `fetchAllRows`, but retries the roots that returned nothing once. With
  * ~100 roots a throttled batch would silently drop whole rows from the board;
- * genuinely out-of-season roots just stay empty.
+ * genuinely out-of-season roots just stay empty. Accepts an optional range
+ * end for the backfill path.
  */
-function fetchRootRows(roots, rocDate) {
-  var out = fetchAllRows(roots, rocDate);
+function fetchRootRows(roots, rocStart, rocEnd) {
+  var out = fetchAllRows(roots, rocStart, rocEnd);
   var misses = roots.filter(function (r) { return !out[r] || !out[r].length; });
   if (!misses.length) return out;
 
   Utilities.sleep(1500);
-  var retry = fetchAllRows(misses, rocDate);
+  var retry = fetchAllRows(misses, rocStart, rocEnd);
   for (var i = 0; i < misses.length; i++) {
     var root = misses[i];
     if (retry[root] && retry[root].length) out[root] = retry[root];
