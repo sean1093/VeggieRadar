@@ -123,6 +123,24 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
               </p>
             </div>
           )}
+          {/* Per-variety wholesale breakdown — present only when the blended
+              average hides meaningful spread (e.g. 綠竹筍 at 2.5× 麻竹筍). */}
+          {item.varieties && item.varieties.length > 0 && (
+            <div>
+              <p className="mb-2 text-xs text-stone">今日品種行情（批發・元/台斤）</p>
+              <div className="space-y-1">
+                {item.varieties.map((v) => (
+                  <div key={v.name} className="flex items-baseline justify-between text-sm">
+                    <span className="text-ink">{v.name}</span>
+                    <span className="tabular-nums text-ink">
+                      {v.catty_price.toFixed(1)}
+                      <span className="ml-2 text-xs text-stone">量 {v.share_percent}%</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* 7-day trend */}
           <div>

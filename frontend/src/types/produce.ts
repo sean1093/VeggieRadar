@@ -2,6 +2,12 @@
  * Type definitions for VeggieRadar produce data.
  * These match the GAS board/search API response format.
  */
+/** 單一品種的當日批發摘要（抽屜「今日品種行情」用）。 */
+export interface ProduceVariety {
+  name: string;           // 品種名，如「綠竹筍」；MOA 未標品種者為「一般」
+  catty_price: number;    // 元/台斤（該品種成交量加權平均）
+  share_percent: number;  // 佔該品項總成交量的百分比（小品種被摺疊時總和 < 100）
+}
 
 export interface ProduceItem {
   code: string;
@@ -26,6 +32,9 @@ export interface ProduceItem {
   // 便宜）。歷史不足（新品項、剛回產季、尚未回填）時後端不送這兩個欄位。
   baseline_price?: number;
   vs_baseline_percent?: number;
+  // 當日品種分解（批發）。只有 ≥2 個具意義品種（各佔量 ≥10%）時後端才送，
+  // 依成交量排序、至多 4 筆。混合均價偏離個別攤位時，抽屜用它拆解。
+  varieties?: ProduceVariety[];
 
   // Optional — only present in some responses / kept for the detail drawer.
   market?: string;
