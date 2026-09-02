@@ -135,4 +135,55 @@ describe('DetailDrawer', () => {
       expect(screen.queryByText(/近一個月批發中位/)).not.toBeInTheDocument();
     });
   });
+  describe('variety breakdown', () => {
+    const bamboo: ProduceItem = {
+      ...withRetail,
+      name: '竹筍',
+      varieties: [
+        { name: '烏殼綠', catty_price: 25.9, share_percent: 41 },
+        { name: '麻竹筍', catty_price: 23.2, share_percent: 34 },
+        { name: '綠竹筍', catty_price: 57.1, share_percent: 24 },
+      ],
+    };
+
+    it('lists per-variety wholesale prices with volume shares', () => {
+      render(<DetailDrawer isOpen onClose={() => {}} item={bamboo} allProduceItems={mockAllProduceItems} />);
+      expect(screen.getByText('今日品種行情（批發・元/台斤）')).toBeInTheDocument();
+      expect(screen.getByText('綠竹筍')).toBeInTheDocument();
+      expect(screen.getByText('57.1')).toBeInTheDocument();
+      expect(screen.getByText('量 24%')).toBeInTheDocument();
+      // Volume order, not price order: the first row is the market mainstream.
+      const rows = screen.getAllByText(/^量 \d+%$/).map((el) => el.textContent);
+      expect(rows).toEqual(['量 41%', '量 34%', '量 24%']);
+    });
+
+    it('renders nothing for single-variety items — old boards stay untouched', () => {
+      render(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
+      expect(screen.queryByText(/今日品種行情/)).not.toBeInTheDocument();
+    });
+
+    it('renders nothing for an empty varieties array', () => {
+      render(
+        <DetailDrawer isOpen onClose={() => {}} item={{ ...withRetail, varieties: [] }} allProduceItems={mockAllProduceItems} />,
+      );
+      expect(screen.queryByText(/今日品種行情/)).not.toBeInTheDocument();
+    });
+    it('discloses the folded remainder when shown rows cover ≤90% of volume', () => {
+      const sparse: ProduceItem = {
+        ...withRetail,
+        varieties: [
+          { name: '甲', catty_price: 20, share_percent: 40 },
+          { name: '乙', catty_price: 30, share_percent: 30 },
+        ],
+      };
+      render(<DetailDrawer isOpen onClose={() => {}} item={sparse} allProduceItems={mockAllProduceItems} />);
+      expect(screen.getByText('其餘品種合計約佔 30%')).toBeInTheDocument();
+    });
+
+    it('omits the remainder line when the rows essentially cover the volume', () => {
+      render(<DetailDrawer isOpen onClose={() => {}} item={bamboo} allProduceItems={mockAllProduceItems} />);
+      // 41 + 34 + 24 = 99% — no remainder worth disclosing.
+      expect(screen.queryByText(/其餘品種/)).not.toBeInTheDocument();
+    });
+  });
 });

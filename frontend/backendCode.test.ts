@@ -109,7 +109,7 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
     'handleTrend', 'resolveTradeDates',
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
     'applyBaselines', 'backfillHistory', 'handleBackfill', 'buildBoard',
-    'BASELINE_WINDOW', 'BASELINE_MIN_DAYS',
+    'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown',
   ];
   const factory = new Function(
     ...Object.keys(services),
@@ -812,5 +812,84 @@ describe('buildBoard — baseline join', () => {
       items: { 高麗菜: [[rocDate(1), 20]], 番茄: [[rocDate(1), 30], [rocDate(2), 31]] },
     });
     expect(api.handleDiag().history).toEqual({ items: 2, min_days: 1, max_days: 2 });
+  });
+});
+describe('varietyBreakdown — per-variety drawer summary', () => {
+  const vrow = (CropName: string, Avg_Price: number, Trans_Quantity: number, MarketName = '台北一'): Row =>
+    ({ CropName, Avg_Price, Trans_Quantity, MarketName, CropCode: 'V1' });
+
+  it('publishes qualified varieties by volume with catty prices and honest shares', () => {
+    const { api } = loadBackend();
+    const rows = [
+      vrow('竹筍-綠竹筍', 95.2, 9000),
+      vrow('竹筍-麻竹筍', 38.7, 13000),
+      vrow('竹筍-麻竹筍', 38.7, 0), // invalid row must not distort the group
+      vrow('竹筍-烏殼綠', 43.2, 15000),
+    ];
+    const out = api.varietyBreakdown(rows, 37000);
+    expect(out.map((v: { name: string }) => v.name)).toEqual(['烏殼綠', '麻竹筍', '綠竹筍']);
+    expect(out[0]).toEqual({ name: '烏殼綠', catty_price: 25.9, share_percent: 41 });
+    expect(out[2].catty_price).toBe(57.1); // 95.2 × 0.6
+  });
+
+  it('returns null for a single variety — the blended number already tells the story', () => {
+    const { api } = loadBackend();
+    expect(api.varietyBreakdown([vrow('甘藍-初秋', 20, 5000)], 5000)).toBeNull();
+  });
+
+  it('folds away sub-10% varieties, and nulls out when folding leaves fewer than two', () => {
+    const { api } = loadBackend();
+    const rows = [
+      vrow('甘藍-初秋', 20, 9500),
+      vrow('甘藍-紫色', 90, 400), // 4% share — noise for a shopper
+    ];
+    expect(api.varietyBreakdown(rows, 9900)).toBeNull();
+
+    const three = [
+      vrow('甘藍-初秋', 20, 6000),
+      vrow('甘藍-改良種', 15, 3500),
+      vrow('甘藍-紫色', 90, 500), // 5% — folded, others remain
+    ];
+    const out = api.varietyBreakdown(three, 10000);
+    expect(out.map((v: { name: string }) => v.name)).toEqual(['初秋', '改良種']);
+    expect(out[0].share_percent + out[1].share_percent).toBeLessThan(100); // folded slice stays visible as a gap
+  });
+
+  it('drops varieties below the absolute volume floor even at high share', () => {
+    const { api } = loadBackend();
+    const rows = [
+      vrow('過貓-一號', 100, 150), // 50% share but only 150 kg traded
+      vrow('過貓-二號', 80, 150),
+    ];
+    expect(api.varietyBreakdown(rows, 300)).toBeNull();
+  });
+
+  it('caps the list at four varieties by volume', () => {
+    const { api } = loadBackend();
+    const rows = ['甲', '乙', '丙', '丁', '戊'].map((v, i) => vrow(`葡萄-${v}`, 50, 3000 + i * 100));
+    const out = api.varietyBreakdown(rows, 15500 + 1000);
+    expect(out).toHaveLength(4);
+    expect(out[0].name).toBe('戊'); // largest volume first
+    expect(out.map((v: { name: string }) => v.name)).not.toContain('甲'); // smallest folded by the cap
+  });
+
+  it('labels unmarked rows 一般', () => {
+    const { api } = loadBackend();
+    const rows = [vrow('香蕉', 30, 5000), vrow('香蕉-芭蕉', 45, 3000)];
+    const out = api.varietyBreakdown(rows, 8000);
+    expect(out.map((v: { name: string }) => v.name)).toEqual(['一般', '芭蕉']);
+  });
+
+  it('rides on aggregateGroup only when a real breakdown exists', () => {
+    const { api } = loadBackend();
+    const def = { name: '竹筍', official: '竹筍', category: '根莖類' };
+    const multi = api.aggregateGroup(def, [
+      vrow('竹筍-綠竹筍', 95.2, 9000),
+      vrow('竹筍-麻竹筍', 38.7, 13000),
+    ], []);
+    expect(multi.varieties).toHaveLength(2);
+
+    const single = api.aggregateGroup(def, [vrow('竹筍-麻竹筍', 38.7, 13000)], []);
+    expect(single.varieties).toBeUndefined();
   });
 });

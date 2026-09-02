@@ -42,6 +42,11 @@
 var AGRICULTURE_API_URL = 'https://data.moa.gov.tw/api/v1/AgriProductsTransType/';
 var MIN_TRADE_VOLUME = 200;      // kg; filters out sparse trades for one item
 var PROBE_MIN_VOLUME = 50000;    // kg; a real island-wide trading day for the probe crop
+// Variety breakdown shown in the item drawer. Only varieties that matter are
+// published: at least two of them, each holding a meaningful slice of the
+// item's traded volume — otherwise the blended average already tells the story.
+var VARIETY_MIN_SHARE = 0.1;   // of the item's total traded volume
+var VARIETY_MAX_COUNT = 4;     // by volume; keeps the drawer calm
 var CATTY_PER_KG = 0.6;          // 1 catty = 0.6 kg
 var BOARD_CACHE_KEY = 'veggie_board_v2';
 var BOARD_CACHE_TTL = 6 * 60 * 60; // 6 hours
@@ -1186,7 +1191,7 @@ function aggregateGroup(def, todayRows, prevRows) {
   var cattyPrice = today.avg * CATTY_PER_KG;
   var retail = retailBand(cattyPrice, def.official, def.category);
 
-  return {
+  var card = {
     code: (todayRows[0] && todayRows[0].CropCode) || def.official,
     name: def.name,
     official_name: def.official,
@@ -1202,6 +1207,49 @@ function aggregateGroup(def, todayRows, prevRows) {
     unit: '公斤',
     markets_count: today.markets
   };
+
+  // A blended average can sit far from every stall when varieties diverge
+  // (綠竹筍 trades at 2.5× 麻竹筍). The drawer decomposes it when that happens.
+  var varieties = varietyBreakdown(todayRows, today.volume);
+  if (varieties) card.varieties = varieties;
+  return card;
+}
+
+/**
+ * Per-variety wholesale summary for one board item, or null when a breakdown
+ * would add nothing (fewer than two meaningful varieties). Shares are
+ * computed against the item's TOTAL traded volume, so they stay honest even
+ * when folded-away small varieties leave the shown rows summing below 100%.
+ */
+function varietyBreakdown(rows, totalVolume) {
+  if (!(totalVolume > 0)) return null;
+  var groups = {};
+  for (var i = 0; i < rows.length; i++) {
+    var name = rowVariety(rows[i].CropName) || '一般';
+    (groups[name] = groups[name] || []).push(rows[i]);
+  }
+  var names = Object.keys(groups);
+  if (names.length < 2) return null;
+
+  var qualified = [];
+  for (var j = 0; j < names.length; j++) {
+    var g = weightedAverage(groups[names[j]]);
+    if (g.volume < MIN_TRADE_VOLUME) continue;
+    var share = g.volume / totalVolume;
+    if (share < VARIETY_MIN_SHARE) continue;
+    qualified.push({
+      name: names[j],
+      catty_price: round1(g.avg * CATTY_PER_KG),
+      share_percent: Math.round(share * 100),
+      volume: g.volume
+    });
+  }
+  if (qualified.length < 2) return null;
+
+  qualified.sort(function (a, b) { return b.volume - a.volume; });
+  return qualified.slice(0, VARIETY_MAX_COUNT).map(function (v) {
+    return { name: v.name, catty_price: v.catty_price, share_percent: v.share_percent };
+  });
 }
 
 /**

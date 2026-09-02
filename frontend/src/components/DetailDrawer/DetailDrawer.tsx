@@ -41,6 +41,12 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
   // Estimated traditional-market price leads; the measured wholesale price and
   // the derivation move into the supporting block below it.
   const marketMid = marketPrice(item);
+  // Variety breakdown rows plus the share they cover. Sub-threshold varieties
+  // (and any capped beyond the top four) are folded away by the backend; when
+  // the visible rows cover ≤90% of traded volume, the remainder is disclosed
+  // instead of letting the list imply completeness.
+  const varieties = item.varieties ?? [];
+  const shownShare = varieties.reduce((sum, v) => sum + v.share_percent, 0);
 
   // Alternatives are ranked on the same basis as the headline — what the shopper
   // pays. Ranking on wholesale would recommend items that are cheaper at the
@@ -121,6 +127,27 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
                 菜市場價以批發價加上攤販常見加成推估（此品項約 +{Math.round(marketMid - item.catty_price)} 元/台斤），
                 非實際報價。實測落在 {item.retail_low}–{item.retail_high} 元的機率約八成，買到低於 {item.retail_low} 元就算便宜。
               </p>
+            </div>
+          )}
+          {/* Per-variety wholesale breakdown — present only when the blended
+              average hides meaningful spread (e.g. 綠竹筍 at 2.5× 麻竹筍). */}
+          {varieties.length > 0 && (
+            <div>
+              <p className="mb-2 text-xs text-stone">今日品種行情（批發・元/台斤）</p>
+              <div className="space-y-1">
+                {varieties.map((v) => (
+                  <div key={v.name} className="flex items-baseline justify-between gap-3 text-sm">
+                    <span className="min-w-0 break-words text-ink">{v.name}</span>
+                    <span className="shrink-0 whitespace-nowrap tabular-nums text-ink">
+                      {v.catty_price.toFixed(1)}
+                      <span className="ml-2 text-xs text-stone">量 {v.share_percent}%</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {shownShare <= 90 && (
+                <p className="mt-1 text-xs text-stone">其餘品種合計約佔 {100 - shownShare}%</p>
+              )}
             </div>
           )}
 
