@@ -27,10 +27,14 @@ import { MOCK_BOARD } from './mockBoard';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string | undefined;
 
-// Deadlines per action. The board gets the longest one because it is the only
-// request the whole UI blocks on; search and trend degrade gracefully.
+// Deadlines per action. The board blocks the whole UI but falls back to the
+// cached copy, so it fails reasonably fast. Search is user-initiated (higher
+// waiting tolerance) and its live-miss path measures 8-31 s in production —
+// a warm miss fits under 15 s, and a cold one that times out primes the
+// backend's trade-date cache so the offered retry succeeds. Trend degrades
+// silently, so it gets the short leash.
 const BOARD_TIMEOUT_MS = 12_000;
-const SEARCH_TIMEOUT_MS = 8_000;
+const SEARCH_TIMEOUT_MS = 15_000;
 const TREND_TIMEOUT_MS = 8_000;
 
 const BOARD_CACHE_KEY = 'veggieradar_last_board_v1';
