@@ -109,7 +109,7 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
     'handleTrend', 'resolveTradeDates',
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
     'applyBaselines', 'backfillHistory', 'handleBackfill', 'buildBoard',
-    'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown',
+    'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown', 'handleSearch',
   ];
   const factory = new Function(
     ...Object.keys(services),
@@ -891,5 +891,66 @@ describe('varietyBreakdown — per-variety drawer summary', () => {
 
     const single = api.aggregateGroup(def, [vrow('竹筍-麻竹筍', 38.7, 13000)], []);
     expect(single.varieties).toBeUndefined();
+  });
+});
+/**
+ * handleSearch was the largest untested behavioural surface: it serves from
+ * the cached board when possible and only then falls back to a live MOA
+ * query, whose substring matching must be re-grouped by root.
+ */
+describe('handleSearch', () => {
+  const board = () => ({
+    type: 'board',
+    date: '2026-09-02',
+    roc_date: rocDate(0),
+    generated_at: new Date().toISOString(),
+    count: 1,
+    items: [{ name: '高麗菜', official_name: '甘藍', category: '葉菜類', catty_price: 14 }],
+  });
+
+  it('serves board hits without any MOA traffic', () => {
+    const { api, fetches } = loadBackend();
+    api.storeBoard(board());
+    const res = api.handleSearch({ query: '高麗' });
+    expect(res.type).toBe('search');
+    expect(res.items[0].official_name).toBe('甘藍');
+    expect(fetches).toHaveLength(0);
+  });
+
+  it('falls back to a live query through the alias table on a board miss', () => {
+    const { api, fetches } = loadBackend({
+      甘藍: [row('甘藍-初秋', 20, 60000)], // feeds both the trade-date probe and the query
+    });
+    const res = api.handleSearch({ query: 'cabbage' });
+    expect(res.type).toBe('search');
+    expect(res.items[0].official_name).toBe('甘藍');
+    expect(res.items[0].category).toBe('葉菜類');
+    expect(fetches.length).toBeGreaterThan(0);
+  });
+
+  it('re-groups substring pollution by root and sorts by traded volume', () => {
+    const { api } = loadBackend({
+      甘藍: [row('甘藍-初秋', 20, 60000)],
+      蘿蔔: [
+        row('蘿蔔-白', 20, 9000),
+        row('胡蘿蔔-清洗', 30, 20000), // MOA substring match — must become its own item
+      ],
+    });
+    const res = api.handleSearch({ query: '蘿蔔' });
+    expect(res.items.map((it: { official_name: string }) => it.official_name)).toEqual(['胡蘿蔔', '蘿蔔']);
+    expect(res.items[0].trade_volume).toBeGreaterThan(res.items[1].trade_volume);
+  });
+
+  it('answers 查無此品項 with a suggestion when nothing trades', () => {
+    const { api } = loadBackend({ 甘藍: [row('甘藍-初秋', 20, 60000)] });
+    const res = api.handleSearch({ query: '龍鬚菜' });
+    expect(res.error).toBe('查無此品項');
+    expect(res.suggestion).toBeTruthy();
+  });
+
+  it('rejects an empty query without touching anything', () => {
+    const { api, fetches } = loadBackend();
+    expect(api.handleSearch({}).error).toBe('請輸入查詢關鍵字');
+    expect(fetches).toHaveLength(0);
   });
 });

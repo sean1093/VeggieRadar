@@ -90,6 +90,16 @@ describe('ProduceCard', () => {
     render(<ProduceCard item={down} onClick={vi.fn()} onToggleWatch={vi.fn()} watched />);
     expect(screen.getByRole('button', { name: /取消關注/ })).toHaveTextContent('★');
   });
+  it('opens with Enter and Space for keyboard users', () => {
+    const onClick = vi.fn();
+    render(<ProduceCard item={down} onClick={onClick} />);
+    const card = screen.getByRole('button', { name: /每台斤/ });
+    fireEvent.keyDown(card, { key: 'Enter' });
+    fireEvent.keyDown(card, { key: ' ' });
+    expect(onClick).toHaveBeenCalledTimes(2);
+    fireEvent.keyDown(card, { key: 'Escape' });
+    expect(onClick).toHaveBeenCalledTimes(2); // other keys must not trigger
+  });
   describe('比近月便宜 badge', () => {
     it('shows the badge when meaningfully below the monthly baseline', () => {
       render(<ProduceCard item={{ ...down, baseline_price: 18.1, vs_baseline_percent: -22.3 }} onClick={vi.fn()} />);

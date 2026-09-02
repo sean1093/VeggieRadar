@@ -163,3 +163,51 @@ describe('fetchProduceTrend — session memo', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
+describe('offline mock mode (no backend configured)', () => {
+  async function loadMockApi() {
+    vi.resetModules();
+    vi.stubEnv('VITE_API_BASE_URL', '');
+    // Dynamic import for the same reason as loadApi: the env is read at module scope.
+    return await import('./api');
+  }
+
+  it('serves the bundled board without any network and without caching', async () => {
+    const api = await loadMockApi();
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await api.fetchBoard();
+    expect(res).toMatchObject({ type: 'board' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(api.readCachedBoard()).toBeNull(); // offline dev needs no fallback cache
+  });
+
+  it('searches the bundled board and reports honest misses', async () => {
+    const api = await loadMockApi();
+    const hit = await api.searchProduce('高麗菜');
+    expect(hit).toMatchObject({ type: 'search' });
+    expect((hit as { count: number }).count).toBeGreaterThan(0);
+
+    const miss = await api.searchProduce('絕對不存在的菜');
+    expect(miss).toMatchObject({ error: '查無此品項' });
+  });
+});
+
+describe('fetchProduceTrend — memo eviction', () => {
+  it('evicts the oldest crop past the cap so memory stays bounded', async () => {
+    const api = await loadApi();
+    const fetchMock = vi.fn(async () => jsonBody({ trend: [1] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    for (let i = 0; i <= 50; i++) {
+      await api.fetchProduceTrend(`作物${i}`, 7); // 51 distinct crops; cap is 50
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(51);
+
+    await api.fetchProduceTrend('作物50', 7); // newest is still memoised
+    expect(fetchMock).toHaveBeenCalledTimes(51);
+
+    await api.fetchProduceTrend('作物0', 7); // oldest was evicted at insert #51
+    expect(fetchMock).toHaveBeenCalledTimes(52);
+  });
+});

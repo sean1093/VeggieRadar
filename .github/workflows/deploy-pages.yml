@@ -40,6 +40,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+      - name: Run tests
+        # Deploys must never outrun the suite — a red test blocks the publish.
+        run: npm run test:run
 
       - name: Build (embeds VITE_API_BASE_URL from frontend/.env)
         run: npm run build

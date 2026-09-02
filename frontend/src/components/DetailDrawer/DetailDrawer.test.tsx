@@ -185,5 +185,20 @@ describe('DetailDrawer', () => {
       // 41 + 34 + 24 = 99% — no remainder worth disclosing.
       expect(screen.queryByText(/其餘品種/)).not.toBeInTheDocument();
     });
+    it('toggles the watchlist from the drawer star', () => {
+      const onToggleWatch = vi.fn();
+      render(
+        <DetailDrawer
+          isOpen
+          onClose={() => {}}
+          item={withRetail}
+          allProduceItems={mockAllProduceItems}
+          watched={false}
+          onToggleWatch={onToggleWatch}
+        />,
+      );
+      screen.getByRole('button', { name: `關注 ${withRetail.name}` }).click();
+      expect(onToggleWatch).toHaveBeenCalledWith(withRetail);
+    });
   });
 });

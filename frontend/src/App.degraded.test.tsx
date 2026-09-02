@@ -99,3 +99,29 @@ describe('App — backend unreachable', () => {
     expect(screen.queryByText('查無此品項')).not.toBeInTheDocument();
   });
 });
+describe('App — recovery via the banner retry', () => {
+  it('clears the offline banner once the backend answers again', async () => {
+    localStorage.setItem('veggieradar_last_board_v1', JSON.stringify(CACHED_BOARD));
+    let backendUp = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        if (!backendUp) return Promise.reject(new TypeError('network down'));
+        return { ok: true, status: 200, text: async () => JSON.stringify(CACHED_BOARD) };
+      }),
+    );
+    const App = await loadApp();
+
+    render(<App />);
+    await waitFor(
+      () => expect(screen.getByText(/目前連不上伺服器/)).toBeInTheDocument(),
+      { timeout: 6000 },
+    );
+
+    backendUp = true;
+    fireEvent.click(screen.getByRole('button', { name: '重試' }));
+
+    await waitFor(() => expect(screen.queryByText(/目前連不上伺服器/)).not.toBeInTheDocument());
+    expect(screen.getByText('高麗菜')).toBeInTheDocument();
+  }, 10000);
+});

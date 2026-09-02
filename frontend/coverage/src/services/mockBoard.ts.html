@@ -1,0 +1,421 @@
+
+<!doctype html>
+<html lang="en">
+
+<head>
+    <title>Code coverage report for src/services/mockBoard.ts</title>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="../../prettify.css" />
+    <link rel="stylesheet" href="../../base.css" />
+    <link rel="shortcut icon" type="image/x-icon" href="../../favicon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style type='text/css'>
+        .coverage-summary .sorter {
+            background-image: url(../../sort-arrow-sprite.png);
+        }
+    </style>
+</head>
+    
+<body>
+<div class='wrapper'>
+    <div class='pad1'>
+        <h1><a href="../../index.html">All files</a> / <a href="index.html">src/services</a> mockBoard.ts</h1>
+        <div class='clearfix'>
+            
+            <div class='fl pad1y space-right2'>
+                <span class="strong">100% </span>
+                <span class="quiet">Statements</span>
+                <span class='fraction'>1/1</span>
+            </div>
+        
+            
+            <div class='fl pad1y space-right2'>
+                <span class="strong">100% </span>
+                <span class="quiet">Branches</span>
+                <span class='fraction'>0/0</span>
+            </div>
+        
+            
+            <div class='fl pad1y space-right2'>
+                <span class="strong">100% </span>
+                <span class="quiet">Functions</span>
+                <span class='fraction'>0/0</span>
+            </div>
+        
+            
+            <div class='fl pad1y space-right2'>
+                <span class="strong">100% </span>
+                <span class="quiet">Lines</span>
+                <span class='fraction'>1/1</span>
+            </div>
+        
+            
+        </div>
+        <p class="quiet">
+            Press <em>n</em> or <em>j</em> to go to the next uncovered block, <em>b</em>, <em>p</em> or <em>k</em> for the previous block.
+        </p>
+        <template id="filterTemplate">
+            <div class="quiet">
+                Filter:
+                <input type="search" id="fileSearch">
+            </div>
+        </template>
+    </div>
+    <div class='status-line high'></div>
+    <pre><table class="coverage">
+<tr><td class="line-count quiet"><a name='L1'></a><a href='#L1'>1</a>
+<a name='L2'></a><a href='#L2'>2</a>
+<a name='L3'></a><a href='#L3'>3</a>
+<a name='L4'></a><a href='#L4'>4</a>
+<a name='L5'></a><a href='#L5'>5</a>
+<a name='L6'></a><a href='#L6'>6</a>
+<a name='L7'></a><a href='#L7'>7</a>
+<a name='L8'></a><a href='#L8'>8</a>
+<a name='L9'></a><a href='#L9'>9</a>
+<a name='L10'></a><a href='#L10'>10</a>
+<a name='L11'></a><a href='#L11'>11</a>
+<a name='L12'></a><a href='#L12'>12</a>
+<a name='L13'></a><a href='#L13'>13</a>
+<a name='L14'></a><a href='#L14'>14</a>
+<a name='L15'></a><a href='#L15'>15</a>
+<a name='L16'></a><a href='#L16'>16</a>
+<a name='L17'></a><a href='#L17'>17</a>
+<a name='L18'></a><a href='#L18'>18</a>
+<a name='L19'></a><a href='#L19'>19</a>
+<a name='L20'></a><a href='#L20'>20</a>
+<a name='L21'></a><a href='#L21'>21</a>
+<a name='L22'></a><a href='#L22'>22</a>
+<a name='L23'></a><a href='#L23'>23</a>
+<a name='L24'></a><a href='#L24'>24</a>
+<a name='L25'></a><a href='#L25'>25</a>
+<a name='L26'></a><a href='#L26'>26</a>
+<a name='L27'></a><a href='#L27'>27</a>
+<a name='L28'></a><a href='#L28'>28</a>
+<a name='L29'></a><a href='#L29'>29</a>
+<a name='L30'></a><a href='#L30'>30</a>
+<a name='L31'></a><a href='#L31'>31</a>
+<a name='L32'></a><a href='#L32'>32</a>
+<a name='L33'></a><a href='#L33'>33</a>
+<a name='L34'></a><a href='#L34'>34</a>
+<a name='L35'></a><a href='#L35'>35</a>
+<a name='L36'></a><a href='#L36'>36</a>
+<a name='L37'></a><a href='#L37'>37</a>
+<a name='L38'></a><a href='#L38'>38</a>
+<a name='L39'></a><a href='#L39'>39</a>
+<a name='L40'></a><a href='#L40'>40</a>
+<a name='L41'></a><a href='#L41'>41</a>
+<a name='L42'></a><a href='#L42'>42</a>
+<a name='L43'></a><a href='#L43'>43</a>
+<a name='L44'></a><a href='#L44'>44</a>
+<a name='L45'></a><a href='#L45'>45</a>
+<a name='L46'></a><a href='#L46'>46</a>
+<a name='L47'></a><a href='#L47'>47</a>
+<a name='L48'></a><a href='#L48'>48</a>
+<a name='L49'></a><a href='#L49'>49</a>
+<a name='L50'></a><a href='#L50'>50</a>
+<a name='L51'></a><a href='#L51'>51</a>
+<a name='L52'></a><a href='#L52'>52</a>
+<a name='L53'></a><a href='#L53'>53</a>
+<a name='L54'></a><a href='#L54'>54</a>
+<a name='L55'></a><a href='#L55'>55</a>
+<a name='L56'></a><a href='#L56'>56</a>
+<a name='L57'></a><a href='#L57'>57</a>
+<a name='L58'></a><a href='#L58'>58</a>
+<a name='L59'></a><a href='#L59'>59</a>
+<a name='L60'></a><a href='#L60'>60</a>
+<a name='L61'></a><a href='#L61'>61</a>
+<a name='L62'></a><a href='#L62'>62</a>
+<a name='L63'></a><a href='#L63'>63</a>
+<a name='L64'></a><a href='#L64'>64</a>
+<a name='L65'></a><a href='#L65'>65</a>
+<a name='L66'></a><a href='#L66'>66</a>
+<a name='L67'></a><a href='#L67'>67</a>
+<a name='L68'></a><a href='#L68'>68</a>
+<a name='L69'></a><a href='#L69'>69</a>
+<a name='L70'></a><a href='#L70'>70</a>
+<a name='L71'></a><a href='#L71'>71</a>
+<a name='L72'></a><a href='#L72'>72</a>
+<a name='L73'></a><a href='#L73'>73</a>
+<a name='L74'></a><a href='#L74'>74</a>
+<a name='L75'></a><a href='#L75'>75</a>
+<a name='L76'></a><a href='#L76'>76</a>
+<a name='L77'></a><a href='#L77'>77</a>
+<a name='L78'></a><a href='#L78'>78</a>
+<a name='L79'></a><a href='#L79'>79</a>
+<a name='L80'></a><a href='#L80'>80</a>
+<a name='L81'></a><a href='#L81'>81</a>
+<a name='L82'></a><a href='#L82'>82</a>
+<a name='L83'></a><a href='#L83'>83</a>
+<a name='L84'></a><a href='#L84'>84</a>
+<a name='L85'></a><a href='#L85'>85</a>
+<a name='L86'></a><a href='#L86'>86</a>
+<a name='L87'></a><a href='#L87'>87</a>
+<a name='L88'></a><a href='#L88'>88</a>
+<a name='L89'></a><a href='#L89'>89</a>
+<a name='L90'></a><a href='#L90'>90</a>
+<a name='L91'></a><a href='#L91'>91</a>
+<a name='L92'></a><a href='#L92'>92</a>
+<a name='L93'></a><a href='#L93'>93</a>
+<a name='L94'></a><a href='#L94'>94</a>
+<a name='L95'></a><a href='#L95'>95</a>
+<a name='L96'></a><a href='#L96'>96</a>
+<a name='L97'></a><a href='#L97'>97</a>
+<a name='L98'></a><a href='#L98'>98</a>
+<a name='L99'></a><a href='#L99'>99</a>
+<a name='L100'></a><a href='#L100'>100</a>
+<a name='L101'></a><a href='#L101'>101</a>
+<a name='L102'></a><a href='#L102'>102</a>
+<a name='L103'></a><a href='#L103'>103</a>
+<a name='L104'></a><a href='#L104'>104</a>
+<a name='L105'></a><a href='#L105'>105</a>
+<a name='L106'></a><a href='#L106'>106</a>
+<a name='L107'></a><a href='#L107'>107</a>
+<a name='L108'></a><a href='#L108'>108</a>
+<a name='L109'></a><a href='#L109'>109</a>
+<a name='L110'></a><a href='#L110'>110</a>
+<a name='L111'></a><a href='#L111'>111</a>
+<a name='L112'></a><a href='#L112'>112</a>
+<a name='L113'></a><a href='#L113'>113</a></td><td class="line-coverage quiet"><span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-yes">17x</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span></td><td class="text"><pre class="prettyprint lang-js">/**
+ * Bundled sample board for local development when no backend URL is configured.
+ * Captured verbatim from the live MOA open-data API for 115.08.26 (2026-08-26)
+ * by running backend/Code.gs buildBoard(), so the offline UI matches production
+ * exactly — including the estimated retail band.
+ */
+import type { BoardResponse } from '../types/produce';
+&nbsp;
+export const MOCK_BOARD: BoardResponse = {
+  type: 'board',
+  date: '2026-08-26',
+  roc_date: '115.08.26',
+  prev_date: '115.08.25',
+  cached: true,
+  count: 94,
+  items: [
+    { code: 'LA1', name: '高麗菜', official_name: '甘藍', category: '葉菜類', avg_price: 23.4, catty_price: 14, retail_low: 35, retail_price: 43, retail_high: 55, retail_estimated: true, change_percent: -7, trade_volume: 640155, unit: '公斤', markets_count: 13, baseline_price: 18.1, vs_baseline_percent: -22.3, varieties: [{ name: '改良種', catty_price: 12, share_percent: 62 }, { name: '初秋', catty_price: 18.9, share_percent: 19 }] },
+    { code: 'LC90', name: '大白菜', official_name: '包心白菜', category: '葉菜類', avg_price: 32.6, catty_price: 19.5, retail_low: 35, retail_price: 44, retail_high: 55, retail_estimated: true, change_percent: -4.8, trade_volume: 68372, unit: '公斤', markets_count: 8, baseline_price: 20.1, vs_baseline_percent: -2.5 },
+    { code: 'LB1', name: '小白菜', official_name: '小白菜', category: '葉菜類', avg_price: 31.6, catty_price: 19, retail_low: 35, retail_price: 54, retail_high: 70, retail_estimated: true, change_percent: 12, trade_volume: 70333, unit: '公斤', markets_count: 10, baseline_price: 17, vs_baseline_percent: 11.7 },
+    { code: 'LD1', name: '青江菜', official_name: '青江白菜', category: '葉菜類', avg_price: 35.8, catty_price: 21.5, retail_low: 45, retail_price: 54, retail_high: 70, retail_estimated: true, change_percent: 12.4, trade_volume: 41962, unit: '公斤', markets_count: 10 },
+    { code: 'LF1', name: '空心菜', official_name: '蕹菜', category: '葉菜類', avg_price: 49.3, catty_price: 29.6, retail_low: 45, retail_price: 51, retail_high: 60, retail_estimated: true, change_percent: 14, trade_volume: 42943, unit: '公斤', markets_count: 11 },
+    { code: 'LO1', name: '地瓜葉', official_name: '甘薯葉', category: '葉菜類', avg_price: 39.4, catty_price: 23.7, retail_low: 40, retail_price: 59, retail_high: 75, retail_estimated: true, change_percent: 13.3, trade_volume: 49886, unit: '公斤', markets_count: 10 },
+    { code: 'LH2', name: '菠菜', official_name: '菠菜', category: '葉菜類', avg_price: 82.3, catty_price: 49.4, retail_low: 65, retail_price: 84, retail_high: 100, retail_estimated: true, change_percent: -52.9, trade_volume: 3998, unit: '公斤', markets_count: 7 },
+    { code: 'LI0', name: '萵苣', official_name: '萵苣菜', category: '葉菜類', avg_price: 38.2, catty_price: 22.9, retail_low: 40, retail_price: 58, retail_high: 75, retail_estimated: true, change_percent: -9.7, trade_volume: 114601, unit: '公斤', markets_count: 10 },
+    { code: 'LK2', name: '芥藍', official_name: '芥藍菜', category: '葉菜類', avg_price: 53.1, catty_price: 31.9, retail_low: 50, retail_price: 67, retail_high: 85, retail_estimated: true, change_percent: -4.3, trade_volume: 23245, unit: '公斤', markets_count: 9 },
+    { code: 'LM1', name: '莧菜', official_name: '莧菜', category: '葉菜類', avg_price: 39.2, catty_price: 23.5, retail_low: 40, retail_price: 59, retail_high: 75, retail_estimated: true, change_percent: 6.9, trade_volume: 34811, unit: '公斤', markets_count: 10 },
+    { code: 'LN1', name: '油菜', official_name: '油菜', category: '葉菜類', avg_price: 27.4, catty_price: 16.4, retail_low: 35, retail_price: 51, retail_high: 70, retail_estimated: true, change_percent: 26.6, trade_volume: 28737, unit: '公斤', markets_count: 11 },
+    { code: 'LJ4', name: '芥菜', official_name: '芥菜', category: '葉菜類', avg_price: 22.1, catty_price: 13.3, retail_low: 30, retail_price: 48, retail_high: 65, retail_estimated: true, change_percent: -5.1, trade_volume: 7990, unit: '公斤', markets_count: 9 },
+    { code: 'LE1', name: '皇宮菜', official_name: '皇宮菜', category: '葉菜類', avg_price: 49.4, catty_price: 29.7, retail_low: 45, retail_price: 65, retail_high: 80, retail_estimated: true, change_percent: 3.4, trade_volume: 5906, unit: '公斤', markets_count: 7 },
+    { code: 'SF1', name: '韭菜', official_name: '韭菜', category: '葉菜類', avg_price: 102.9, catty_price: 61.7, retail_low: 80, retail_price: 97, retail_high: 115, retail_estimated: true, change_percent: 13.3, trade_volume: 12444, unit: '公斤', markets_count: 10 },
+    { code: 'LG2', name: '芹菜', official_name: '芹菜', category: '葉菜類', avg_price: 57.6, catty_price: 34.6, retail_low: 50, retail_price: 70, retail_high: 85, retail_estimated: true, change_percent: -24.7, trade_volume: 22912, unit: '公斤', markets_count: 11 },
+    { code: 'LP1', name: '芫荽', official_name: '芫荽', category: '葉菜類', avg_price: 125.7, catty_price: 75.4, retail_low: 95, retail_price: 110, retail_high: 130, retail_estimated: true, change_percent: 10.8, trade_volume: 4837, unit: '公斤', markets_count: 8 },
+    { code: 'LX1', name: '過貓', official_name: '蕨菜', category: '葉菜類', avg_price: 102.3, catty_price: 61.4, retail_low: 80, retail_price: 96, retail_high: 115, retail_estimated: true, change_percent: -1.1, trade_volume: 1518, unit: '公斤', markets_count: 4 },
+    { code: 'SV1', name: '蘆筍', official_name: '蘆筍', category: '葉菜類', avg_price: 264.9, catty_price: 158.9, retail_low: 175, retail_price: 194, retail_high: 210, retail_estimated: true, change_percent: 11.1, trade_volume: 3497, unit: '公斤', markets_count: 7 },
+    { code: 'FB2', name: '白花椰菜', official_name: '花椰菜', category: '葉菜類', avg_price: 22.5, catty_price: 13.5, retail_low: 40, retail_price: 50, retail_high: 65, retail_estimated: true, change_percent: -2.2, trade_volume: 980, unit: '公斤', markets_count: 1 },
+    { code: 'FB1', name: '青花菜', official_name: '花椰菜', category: '葉菜類', avg_price: 39.5, catty_price: 23.7, retail_low: 50, retail_price: 60, retail_high: 75, retail_estimated: true, change_percent: -23.9, trade_volume: 26950, unit: '公斤', markets_count: 10 },
+    { code: 'SA9', name: '白蘿蔔', official_name: '蘿蔔', category: '根莖類', avg_price: 24.5, catty_price: 14.7, retail_low: 25, retail_price: 35, retail_high: 45, retail_estimated: true, change_percent: 5.1, trade_volume: 144678, unit: '公斤', markets_count: 10, baseline_price: 19.6, vs_baseline_percent: -25.1 },
+    { code: 'SB1', name: '紅蘿蔔', official_name: '胡蘿蔔', category: '根莖類', avg_price: 19.9, catty_price: 12, retail_low: 25, retail_price: 30, retail_high: 40, retail_estimated: true, change_percent: 9.9, trade_volume: 108643, unit: '公斤', markets_count: 11 },
+    { code: 'SD1', name: '洋蔥', official_name: '洋蔥', category: '根莖類', avg_price: 26.5, catty_price: 15.9, retail_low: 25, retail_price: 34, retail_high: 45, retail_estimated: true, change_percent: 5.2, trade_volume: 61006, unit: '公斤', markets_count: 11 },
+    { code: 'SC1', name: '馬鈴薯', official_name: '馬鈴薯', category: '根莖類', avg_price: 23.6, catty_price: 14.2, retail_low: 30, retail_price: 42, retail_high: 65, retail_estimated: true, change_percent: -3.5, trade_volume: 45213, unit: '公斤', markets_count: 10 },
+    { code: 'SO0', name: '地瓜', official_name: '甘薯', category: '根莖類', avg_price: 17.4, catty_price: 10.4, retail_low: 25, retail_price: 38, retail_high: 60, retail_estimated: true, change_percent: -2.8, trade_volume: 47065, unit: '公斤', markets_count: 10 },
+    { code: 'SJ2', name: '芋頭', official_name: '芋', category: '根莖類', avg_price: 22.7, catty_price: 13.6, retail_low: 30, retail_price: 42, retail_high: 65, retail_estimated: true, change_percent: -10.5, trade_volume: 33266, unit: '公斤', markets_count: 9 },
+    { code: 'SU1', name: '山藥', official_name: '薯蕷', category: '根莖類', avg_price: 94.5, catty_price: 56.7, retail_low: 75, retail_price: 85, retail_high: 105, retail_estimated: true, change_percent: 8.7, trade_volume: 4237, unit: '公斤', markets_count: 7 },
+    { code: 'SM9', name: '牛蒡', official_name: '牛蒡', category: '根莖類', avg_price: 39.3, catty_price: 23.6, retail_low: 40, retail_price: 52, retail_high: 75, retail_estimated: true, change_percent: -4.7, trade_volume: 760, unit: '公斤', markets_count: 4 },
+    { code: 'SH1', name: '竹筍', official_name: '竹筍', category: '根莖類', avg_price: 65.2, catty_price: 39.1, retail_low: 55, retail_price: 67, retail_high: 90, retail_estimated: true, change_percent: -0.7, trade_volume: 46948, unit: '公斤', markets_count: 11, varieties: [{ name: '烏殼綠', catty_price: 25.9, share_percent: 41 }, { name: '麻竹筍', catty_price: 23.2, share_percent: 34 }, { name: '綠竹筍', catty_price: 57.1, share_percent: 24 }] },
+    { code: 'SQ1', name: '茭白筍', official_name: '茭白筍', category: '根莖類', avg_price: 96.3, catty_price: 57.8, retail_low: 75, retail_price: 86, retail_high: 110, retail_estimated: true, change_percent: 7.5, trade_volume: 25794, unit: '公斤', markets_count: 10 },
+    { code: 'SN1', name: '蓮藕', official_name: '蓮藕', category: '根莖類', avg_price: 45.4, catty_price: 27.2, retail_low: 45, retail_price: 55, retail_high: 80, retail_estimated: true, change_percent: -0.1, trade_volume: 5129, unit: '公斤', markets_count: 7 },
+    { code: 'SL1', name: '豆薯', official_name: '豆薯', category: '根莖類', avg_price: 19.6, catty_price: 11.7, retail_low: 30, retail_price: 40, retail_high: 60, retail_estimated: true, change_percent: 3.9, trade_volume: 8665, unit: '公斤', markets_count: 8 },
+    { code: 'FJ3', name: '番茄', official_name: '番茄', category: '果菜類', avg_price: 72, catty_price: 43.2, retail_low: 90, retail_price: 113, retail_high: 135, retail_estimated: true, change_percent: -3.7, trade_volume: 101071, unit: '公斤', markets_count: 11 },
+    { code: '72', name: '小番茄', official_name: '小番茄', category: '果菜類', avg_price: 110.9, catty_price: 66.6, retail_low: 110, retail_price: 126, retail_high: 150, retail_estimated: true, change_percent: 0.5, trade_volume: 21830, unit: '公斤', markets_count: 8 },
+    { code: 'FI0', name: '茄子', official_name: '茄子', category: '果菜類', avg_price: 42.6, catty_price: 25.5, retail_low: 70, retail_price: 96, retail_high: 115, retail_estimated: true, change_percent: -1.9, trade_volume: 50822, unit: '公斤', markets_count: 13 },
+    { code: 'FK5', name: '青椒', official_name: '甜椒', category: '果菜類', avg_price: 40.8, catty_price: 24.5, retail_low: 70, retail_price: 94, retail_high: 115, retail_estimated: true, change_percent: 9.5, trade_volume: 30096, unit: '公斤', markets_count: 10 },
+    { code: 'FK0', name: '甜椒', official_name: '甜椒', category: '果菜類', avg_price: 70.5, catty_price: 42.3, retail_low: 90, retail_price: 112, retail_high: 135, retail_estimated: true, change_percent: -6.1, trade_volume: 23670, unit: '公斤', markets_count: 8 },
+    { code: 'FY5', name: '玉米', official_name: '玉米', category: '果菜類', avg_price: 35.1, catty_price: 21.1, retail_low: 65, retail_price: 91, retail_high: 110, retail_estimated: true, change_percent: 5, trade_volume: 67529, unit: '公斤', markets_count: 11 },
+    { code: 'FY4', name: '玉米筍', official_name: '玉米', category: '果菜類', avg_price: 45.2, catty_price: 27.1, retail_low: 75, retail_price: 97, retail_high: 120, retail_estimated: true, change_percent: 16, trade_volume: 24344, unit: '公斤', markets_count: 8 },
+    { code: 'FN1', name: '四季豆', official_name: '敏豆', category: '果菜類', avg_price: 128.4, catty_price: 77, retail_low: 125, retail_price: 147, retail_high: 170, retail_estimated: true, change_percent: 4.8, trade_volume: 15570, unit: '公斤', markets_count: 8 },
+    { code: 'FM2', name: '菜豆', official_name: '菜豆', category: '果菜類', avg_price: 71.7, catty_price: 43, retail_low: 90, retail_price: 113, retail_high: 135, retail_estimated: true, change_percent: 15.7, trade_volume: 7913, unit: '公斤', markets_count: 11 },
+    { code: 'FL9', name: '豌豆', official_name: '豌豆', category: '果菜類', avg_price: 186.4, catty_price: 111.9, retail_low: 155, retail_price: 182, retail_high: 200, retail_estimated: true, change_percent: 14.4, trade_volume: 3443, unit: '公斤', markets_count: 7 },
+    { code: 'FG0', name: '苦瓜', official_name: '苦瓜', category: '瓜果類', avg_price: 61.4, catty_price: 36.9, retail_low: 55, retail_price: 69, retail_high: 90, retail_estimated: true, change_percent: 13.1, trade_volume: 32613, unit: '公斤', markets_count: 12 },
+    { code: 'FF0', name: '絲瓜', official_name: '絲瓜', category: '瓜果類', avg_price: 47.9, catty_price: 28.8, retail_low: 45, retail_price: 56, retail_high: 70, retail_estimated: true, change_percent: 7.8, trade_volume: 64615, unit: '公斤', markets_count: 13 },
+    { code: 'FC1', name: '大黃瓜', official_name: '胡瓜', category: '瓜果類', avg_price: 28.5, catty_price: 17.1, retail_low: 35, retail_price: 45, retail_high: 55, retail_estimated: true, change_percent: 15.1, trade_volume: 43990, unit: '公斤', markets_count: 12 },
+    { code: 'FD0', name: '小黃瓜', official_name: '花胡瓜', category: '瓜果類', avg_price: 73.6, catty_price: 44.1, retail_low: 60, retail_price: 66, retail_high: 75, retail_estimated: true, change_percent: 20.2, trade_volume: 67714, unit: '公斤', markets_count: 12 },
+    { code: 'FE0', name: '冬瓜', official_name: '冬瓜', category: '瓜果類', avg_price: 22.9, catty_price: 13.7, retail_low: 35, retail_price: 46, retail_high: 65, retail_estimated: true, change_percent: 4.1, trade_volume: 40134, unit: '公斤', markets_count: 10 },
+    { code: 'FT11', name: '南瓜', official_name: '南瓜', category: '瓜果類', avg_price: 51.9, catty_price: 31.1, retail_low: 50, retail_price: 63, retail_high: 85, retail_estimated: true, change_percent: 6.9, trade_volume: 48614, unit: '公斤', markets_count: 8 },
+    { code: 'FH3', name: '蒲瓜', official_name: '扁蒲', category: '瓜果類', avg_price: 30.7, catty_price: 18.4, retail_low: 40, retail_price: 50, retail_high: 70, retail_estimated: true, change_percent: 38.1, trade_volume: 32053, unit: '公斤', markets_count: 10 },
+    { code: 'FU1', name: '佛手瓜', official_name: '隼人瓜', category: '瓜果類', avg_price: 35.1, catty_price: 21, retail_low: 40, retail_price: 53, retail_high: 75, retail_estimated: true, change_percent: -3, trade_volume: 17371, unit: '公斤', markets_count: 9 },
+    { code: 'SE1', name: '蔥', official_name: '青蔥', category: '辛香類', avg_price: 79.9, catty_price: 47.9, retail_low: 85, retail_price: 99, retail_high: 120, retail_estimated: true, change_percent: 21.5, trade_volume: 55708, unit: '公斤', markets_count: 11 },
+    { code: 'SE5', name: '紅蔥頭', official_name: '青蔥', category: '辛香類', avg_price: 84.6, catty_price: 50.8, retail_low: 85, retail_price: 102, retail_high: 120, retail_estimated: true, change_percent: -1.8, trade_volume: 788, unit: '公斤', markets_count: 5 },
+    { code: 'SP1', name: '薑', official_name: '薑', category: '辛香類', avg_price: 92.2, catty_price: 55.3, retail_low: 100, retail_price: 110, retail_high: 140, retail_estimated: true, change_percent: 6.5, trade_volume: 16717, unit: '公斤', markets_count: 8 },
+    { code: 'SG2', name: '大蒜', official_name: '大蒜', category: '辛香類', avg_price: 88.8, catty_price: 53.3, retail_low: 100, retail_price: 121, retail_high: 150, retail_estimated: true, change_percent: -6.9, trade_volume: 13140, unit: '公斤', markets_count: 9 },
+    { code: 'FV1', name: '辣椒', official_name: '辣椒', category: '辛香類', avg_price: 82.2, catty_price: 49.3, retail_low: 90, retail_price: 104, retail_high: 130, retail_estimated: true, change_percent: -0.3, trade_volume: 11268, unit: '公斤', markets_count: 8 },
+    { code: 'LP2', name: '九層塔', official_name: '九層塔', category: '辛香類', avg_price: 41.6, catty_price: 25, retail_low: 65, retail_price: 80, retail_high: 105, retail_estimated: true, change_percent: 15.6, trade_volume: 7252, unit: '公斤', markets_count: 8 },
+    { code: 'MD1', name: '香菇', official_name: '濕香菇', category: '菇類', avg_price: 145.2, catty_price: 87.1, retail_low: 125, retail_price: 147, retail_high: 175, retail_estimated: true, change_percent: -4.9, trade_volume: 2669, unit: '公斤', markets_count: 7 },
+    { code: 'ME1', name: '金針菇', official_name: '金絲菇', category: '菇類', avg_price: 34.4, catty_price: 20.6, retail_low: 60, retail_price: 81, retail_high: 110, retail_estimated: true, change_percent: 8, trade_volume: 8696, unit: '公斤', markets_count: 8 },
+    { code: 'MJ1', name: '杏鮑菇', official_name: '杏鮑菇', category: '菇類', avg_price: 69.9, catty_price: 41.9, retail_low: 80, retail_price: 102, retail_high: 130, retail_estimated: true, change_percent: 4.7, trade_volume: 14929, unit: '公斤', markets_count: 8 },
+    { code: 'MK1', name: '鴻喜菇', official_name: '鴻喜菇', category: '菇類', avg_price: 98.5, catty_price: 59.1, retail_low: 95, retail_price: 119, retail_high: 145, retail_estimated: true, change_percent: 0.3, trade_volume: 2388, unit: '公斤', markets_count: 6 },
+    { code: 'MA1', name: '洋菇', official_name: '洋菇', category: '菇類', avg_price: 170.4, catty_price: 102.2, retail_low: 140, retail_price: 162, retail_high: 190, retail_estimated: true, change_percent: 13.2, trade_volume: 1890, unit: '公斤', markets_count: 7 },
+    { code: 'MI1', name: '秀珍菇', official_name: '秀珍菇', category: '菇類', avg_price: 77, catty_price: 46.2, retail_low: 85, retail_price: 106, retail_high: 135, retail_estimated: true, change_percent: -6, trade_volume: 1016, unit: '公斤', markets_count: 5 },
+    { code: 'MC1', name: '木耳', official_name: '濕木耳', category: '菇類', avg_price: 63.8, catty_price: 38.3, retail_low: 75, retail_price: 98, retail_high: 125, retail_estimated: true, change_percent: 5.6, trade_volume: 4261, unit: '公斤', markets_count: 8 },
+    { code: 'A0', name: '香蕉', official_name: '香蕉', category: '水果', avg_price: 30.8, catty_price: 18.5, retail_low: 25, retail_price: 32, retail_high: 40, retail_estimated: true, change_percent: 1.1, trade_volume: 120782, unit: '公斤', markets_count: 12 },
+    { code: 'X3', name: '蘋果', official_name: '蘋果', category: '水果', avg_price: 79.9, catty_price: 47.9, retail_low: 60, retail_price: 80, retail_high: 110, retail_estimated: true, change_percent: 0.4, trade_volume: 147810, unit: '公斤', markets_count: 8 },
+    { code: 'I1', name: '木瓜', official_name: '木瓜', category: '水果', avg_price: 30.9, catty_price: 18.5, retail_low: 40, retail_price: 48, retail_high: 60, retail_estimated: true, change_percent: 4.9, trade_volume: 151585, unit: '公斤', markets_count: 11 },
+    { code: 'B2', name: '鳳梨', official_name: '鳳梨', category: '水果', avg_price: 34.9, catty_price: 21, retail_low: 30, retail_price: 34, retail_high: 40, retail_estimated: true, change_percent: -2.1, trade_volume: 101524, unit: '公斤', markets_count: 11 },
+    { code: 'T0', name: '西瓜', official_name: '西瓜', category: '水果', avg_price: 12.6, catty_price: 7.6, retail_low: 20, retail_price: 26, retail_high: 35, retail_estimated: true, change_percent: -1.8, trade_volume: 358995, unit: '公斤', markets_count: 11 },
+    { code: 'V0', name: '香瓜', official_name: '甜瓜', category: '水果', avg_price: 33.7, catty_price: 20.2, retail_low: 35, retail_price: 52, retail_high: 85, retail_estimated: true, change_percent: -5, trade_volume: 78423, unit: '公斤', markets_count: 11 },
+    { code: 'W1', name: '哈密瓜', official_name: '洋香瓜', category: '水果', avg_price: 70.8, catty_price: 42.5, retail_low: 55, retail_price: 75, retail_high: 105, retail_estimated: true, change_percent: 19.8, trade_volume: 54119, unit: '公斤', markets_count: 10 },
+    { code: 'P1', name: '芭樂', official_name: '番石榴', category: '水果', avg_price: 75.9, catty_price: 45.5, retail_low: 60, retail_price: 66, retail_high: 75, retail_estimated: true, change_percent: 2.1, trade_volume: 100659, unit: '公斤', markets_count: 11 },
+    { code: '811', name: '火龍果', official_name: '紅龍果', category: '水果', avg_price: 45.6, catty_price: 27.3, retail_low: 55, retail_price: 65, retail_high: 80, retail_estimated: true, change_percent: 2, trade_volume: 183266, unit: '公斤', markets_count: 11 },
+    { code: 'S0', name: '葡萄', official_name: '葡萄', category: '水果', avg_price: 147.6, catty_price: 88.5, retail_low: 105, retail_price: 121, retail_high: 155, retail_estimated: true, change_percent: 0.6, trade_volume: 84473, unit: '公斤', markets_count: 9 },
+    { code: 'R0', name: '芒果', official_name: '芒果', category: '水果', avg_price: 69.2, catty_price: 41.5, retail_low: 65, retail_price: 75, retail_high: 90, retail_estimated: true, change_percent: 3.3, trade_volume: 84825, unit: '公斤', markets_count: 10 },
+    { code: 'K3', name: '龍眼', official_name: '龍眼', category: '水果', avg_price: 55.2, catty_price: 33.1, retail_low: 50, retail_price: 65, retail_high: 100, retail_estimated: true, change_percent: 9.7, trade_volume: 181249, unit: '公斤', markets_count: 11 },
+    { code: 'O0', name: '梨', official_name: '梨', category: '水果', avg_price: 60.1, catty_price: 36.1, retail_low: 60, retail_price: 72, retail_high: 85, retail_estimated: true, change_percent: -1.9, trade_volume: 278733, unit: '公斤', markets_count: 12 },
+    { code: 'Y1', name: '桃子', official_name: '桃子', category: '水果', avg_price: 180.8, catty_price: 108.5, retail_low: 125, retail_price: 140, retail_high: 175, retail_estimated: true, change_percent: -27.6, trade_volume: 20550, unit: '公斤', markets_count: 8 },
+    { code: 'N9', name: '李子', official_name: '李', category: '水果', avg_price: 151.4, catty_price: 90.8, retail_low: 105, retail_price: 123, retail_high: 155, retail_estimated: true, change_percent: 4.2, trade_volume: 8962, unit: '公斤', markets_count: 5 },
+    { code: 'Z1', name: '柿子', official_name: '柿子', category: '水果', avg_price: 47.2, catty_price: 28.3, retail_low: 70, retail_price: 85, retail_high: 110, retail_estimated: true, change_percent: -15.7, trade_volume: 67164, unit: '公斤', markets_count: 9 },
+    { code: 'Q2', name: '蓮霧', official_name: '蓮霧', category: '水果', avg_price: 97.9, catty_price: 58.8, retail_low: 95, retail_price: 111, retail_high: 130, retail_estimated: true, change_percent: -1.6, trade_volume: 15037, unit: '公斤', markets_count: 7 },
+    { code: '31', name: '釋迦', official_name: '釋迦', category: '水果', avg_price: 64, catty_price: 38.4, retail_low: 55, retail_price: 70, retail_high: 105, retail_estimated: true, change_percent: -3.1, trade_volume: 22300, unit: '公斤', markets_count: 11 },
+    { code: 'M3', name: '楊桃', official_name: '楊桃', category: '水果', avg_price: 22.3, catty_price: 13.4, retail_low: 30, retail_price: 45, retail_high: 80, retail_estimated: true, change_percent: 18.8, trade_volume: 3291, unit: '公斤', markets_count: 6 },
+    { code: '50', name: '百香果', official_name: '百香果', category: '水果', avg_price: 88.3, catty_price: 53, retail_low: 65, retail_price: 85, retail_high: 115, retail_estimated: true, change_percent: 5.1, trade_volume: 32502, unit: '公斤', markets_count: 9 },
+    { code: 'F1', name: '檸檬', official_name: '雜柑', category: '水果', avg_price: 38.9, catty_price: 23.3, retail_low: 40, retail_price: 55, retail_high: 90, retail_estimated: true, change_percent: 30.1, trade_volume: 16341, unit: '公斤', markets_count: 10 },
+    { code: 'E9', name: '柳丁', official_name: '甜橙', category: '水果', avg_price: 55.6, catty_price: 33.3, retail_low: 50, retail_price: 65, retail_high: 100, retail_estimated: true, change_percent: -4.9, trade_volume: 26809, unit: '公斤', markets_count: 8 },
+    { code: 'H1', name: '柚子', official_name: '柚子', category: '水果', avg_price: 18.7, catty_price: 11.2, retail_low: 45, retail_price: 60, retail_high: 80, retail_estimated: true, change_percent: -15.4, trade_volume: 99382, unit: '公斤', markets_count: 11 },
+    { code: 'H49', name: '葡萄柚', official_name: '葡萄柚', category: '水果', avg_price: 45.1, catty_price: 27, retail_low: 40, retail_price: 59, retail_high: 90, retail_estimated: true, change_percent: 8.2, trade_volume: 1653, unit: '公斤', markets_count: 5 },
+    { code: 'G3', name: '酪梨', official_name: '酪梨', category: '水果', avg_price: 56, catty_price: 33.6, retail_low: 50, retail_price: 66, retail_high: 100, retail_estimated: true, change_percent: 3, trade_volume: 74454, unit: '公斤', markets_count: 11 },
+    { code: 'G49', name: '奇異果', official_name: '奇異果', category: '水果', avg_price: 114.6, catty_price: 68.8, retail_low: 85, retail_price: 101, retail_high: 135, retail_estimated: true, change_percent: 4.1, trade_volume: 83296, unit: '公斤', markets_count: 8 },
+    { code: '839', name: '櫻桃', official_name: '櫻桃', category: '水果', avg_price: 321.4, catty_price: 192.9, retail_low: 205, retail_price: 225, retail_high: 255, retail_estimated: true, change_percent: 1.4, trade_volume: 6811, unit: '公斤', markets_count: 6 },
+    { code: '469', name: '藍莓', official_name: '藍莓', category: '水果', avg_price: 247.1, catty_price: 148.2, retail_low: 165, retail_price: 180, retail_high: 215, retail_estimated: true, change_percent: 5.9, trade_volume: 11962, unit: '公斤', markets_count: 7 },
+    { code: '11', name: '椰子', official_name: '椰子', category: '水果', avg_price: 34.6, catty_price: 20.7, retail_low: 35, retail_price: 53, retail_high: 85, retail_estimated: true, change_percent: 14.4, trade_volume: 22642, unit: '公斤', markets_count: 8 },
+    { code: 'SX0', name: '豆芽', official_name: '芽菜類', category: '其他', avg_price: 19, catty_price: 11.4, retail_low: 30, retail_price: 46, retail_high: 65, retail_estimated: true, change_percent: -3.5, trade_volume: 28000, unit: '公斤', markets_count: 8 },
+    { code: 'LT2', name: '海菜', official_name: '海菜', category: '其他', avg_price: 136.9, catty_price: 82.1, retail_low: 100, retail_price: 117, retail_high: 135, retail_estimated: true, change_percent: 6.1, trade_volume: 5825, unit: '公斤', markets_count: 8 },
+  ],
+};
+&nbsp;</pre></td></tr></table></pre>
+
+                <div class='push'></div><!-- for sticky footer -->
+            </div><!-- /wrapper -->
+            <div class='footer quiet pad2 space-top1 center small'>
+                Code coverage generated by
+                <a href="https://istanbul.js.org/" target="_blank" rel="noopener noreferrer">istanbul</a>
+                at 2026-09-02T16:08:45.909Z
+            </div>
+        <script src="../../prettify.js"></script>
+        <script>
+            window.onload = function () {
+                prettyPrint();
+            };
+        </script>
+        <script src="../../sorter.js"></script>
+        <script src="../../block-navigation.js"></script>
+    </body>
+</html>
+    

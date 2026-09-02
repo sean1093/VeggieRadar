@@ -31,6 +31,13 @@ jobs:
 
       - name: Install clasp
         run: npm install -g @google/clasp
+      - name: Run backend regression tests
+        # backendCode.test.ts evaluates backend/Code.gs with stubbed GAS
+        # services; a red suite must block the clasp push below.
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run test:run
 
       - name: Authenticate clasp (Service Account)
         # RECOMMENDED: store the service-account JSON key as secret GCP_SA_KEY.
