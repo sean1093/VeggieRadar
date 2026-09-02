@@ -100,14 +100,19 @@ describe('App — backend unreachable', () => {
   });
 });
 describe('App — recovery via the banner retry', () => {
-  it('clears the offline banner once the backend answers again', async () => {
+  it('replaces the cached board with fresh data after a successful retry', async () => {
     localStorage.setItem('veggieradar_last_board_v1', JSON.stringify(CACHED_BOARD));
+    // The recovered board must be distinguishable from the cached one:
+    // `loadBoard` clears the banner synchronously on retry, so the banner
+    // vanishing alone would pass even if the retry failed. Only a successful
+    // fetch can put the new trading date on screen.
+    const RECOVERED_BOARD = { ...CACHED_BOARD, date: '2026-09-03', roc_date: '115.09.03' };
     let backendUp = false;
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
         if (!backendUp) return Promise.reject(new TypeError('network down'));
-        return { ok: true, status: 200, text: async () => JSON.stringify(CACHED_BOARD) };
+        return { ok: true, status: 200, text: async () => JSON.stringify(RECOVERED_BOARD) };
       }),
     );
     const App = await loadApp();
@@ -121,7 +126,8 @@ describe('App — recovery via the banner retry', () => {
     backendUp = true;
     fireEvent.click(screen.getByRole('button', { name: '重試' }));
 
-    await waitFor(() => expect(screen.queryByText(/目前連不上伺服器/)).not.toBeInTheDocument());
+    expect(await screen.findByText(/資料日期 2026-09-03/)).toBeInTheDocument();
+    expect(screen.queryByText(/目前連不上伺服器/)).not.toBeInTheDocument();
     expect(screen.getByText('高麗菜')).toBeInTheDocument();
   }, 10000);
 });
