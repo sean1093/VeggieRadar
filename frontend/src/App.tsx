@@ -5,10 +5,10 @@ import ProduceFilter from './components/ProduceFilter/ProduceFilter';
 import DetailDrawer from './components/DetailDrawer/DetailDrawer';
 import EmptyState from './components/EmptyState/EmptyState';
 import ErrorMessage from './components/ErrorMessage/ErrorMessage';
-import { fetchBoard, searchProduce } from './services/api';
+import { fetchBoard, readCachedBoard, searchProduce } from './services/api';
 import { useWatchlist } from './hooks/useWatchlist';
 import { describeFreshness, type FreshnessNotice } from './lib/utils/freshness';
-import { isApiError, type ProduceItem } from './types/produce';
+import { isApiError, type BoardResponse, type ProduceItem } from './types/produce';
 import './App.css';
 
 function App() {
@@ -17,6 +17,12 @@ function App() {
   const [freshness, setFreshness] = useState<FreshnessNotice>({ note: null, checkedAt: null });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Set when the backend is unreachable and the board on screen came from the
+  // localStorage fallback — old prices beat a blank page, but must say so.
+  const [connectionNote, setConnectionNote] = useState<string | null>(null);
+  // Transport-level search failure. Kept apart from empty results so a busy
+  // backend is never presented as 查無此品項.
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   const [query, setQuery] = useState('');
   const [remoteResults, setRemoteResults] = useState<ProduceItem[] | null>(null);
@@ -27,19 +33,34 @@ function App() {
   const { count: watchCount, isWatched, toggle } = useWatchlist();
   const toggleWatch = (item: ProduceItem) => toggle(item.official_name);
 
+  const applyBoard = (res: BoardResponse) => {
+    setBoard(res.items);
+    setBoardDate(res.date);
+    setFreshness(describeFreshness({ date: res.date, generatedAt: res.generated_at, stale: res.stale }));
+  };
+
   const loadBoard = () => {
-    setLoading(true);
+    // Paint the last good board immediately and refresh in the background, so
+    // a slow or over-quota backend never holds the UI on a skeleton.
+    const cached = readCachedBoard();
+    if (cached) {
+      applyBoard(cached);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     setError(null);
+    setConnectionNote(null);
     fetchBoard().then((res) => {
       if (isApiError(res)) {
-        setError(res.error);
-        setBoard([]);
-      } else {
-        setBoard(res.items);
-        if ('date' in res) setBoardDate(res.date);
-        if (res.type === 'board') {
-          setFreshness(describeFreshness({ date: res.date, generatedAt: res.generated_at, stale: res.stale }));
+        if (cached) {
+          setConnectionNote('目前連不上伺服器，顯示上次成功載入的行情');
+        } else {
+          setError(res.error);
+          setBoard([]);
         }
+      } else if (res.type === 'board') {
+        applyBoard(res);
       }
       setLoading(false);
     });
@@ -53,6 +74,7 @@ function App() {
     const q = raw.trim();
     setQuery(q);
     setRemoteResults(null);
+    setSearchError(null);
     setActiveFilter('all');
     if (!q) return;
 
@@ -64,13 +86,19 @@ function App() {
 
     setSearching(true);
     const res = await searchProduce(q);
-    setRemoteResults(isApiError(res) ? [] : res.items);
+    if (isApiError(res)) {
+      if (res.transient) setSearchError(res.error);
+      setRemoteResults([]);
+    } else {
+      setRemoteResults(res.items);
+    }
     setSearching(false);
   };
 
   const clearSearch = () => {
     setQuery('');
     setRemoteResults(null);
+    setSearchError(null);
   };
 
   const baseItems = useMemo<ProduceItem[]>(() => {
@@ -117,6 +145,14 @@ function App() {
               </p>
             )}
             {freshness.note && <p className="mt-1 text-xs text-clay">{freshness.note}</p>}
+            {connectionNote && (
+              <p className="mt-1 text-xs text-clay">
+                {connectionNote}
+                <button onClick={loadBoard} className="ml-2 underline underline-offset-2">
+                  重試
+                </button>
+              </p>
+            )}
             <p className="mt-1 text-xs text-stone">
               價格以每台斤（600&nbsp;克）計。<span className="text-sage">↓ 便宜</span>・<span className="text-clay">↑ 變貴</span>
             </p>
@@ -146,12 +182,15 @@ function App() {
                 onToggleWatch={toggleWatch}
               />
             )}
+            {!busy && searchError && (
+              <ErrorMessage error={searchError} query={query} onRetry={() => handleSearch(query)} />
+            )}
 
-            {!busy && visibleItems.length === 0 && activeFilter === 'watch' && (
+            {!busy && !searchError && visibleItems.length === 0 && activeFilter === 'watch' && (
               <EmptyState message="還沒有關注的品項" suggestion="點卡片左側的 ☆ 加入關注，方便每天追蹤。" />
             )}
 
-            {!busy && visibleItems.length === 0 && activeFilter !== 'watch' && (
+            {!busy && !searchError && visibleItems.length === 0 && activeFilter !== 'watch' && (
               <EmptyState
                 message="查無此品項"
                 suggestion={query ? `找不到「${query}」，試試：高麗菜、番茄、蔥。` : '目前沒有菜價資料。'}

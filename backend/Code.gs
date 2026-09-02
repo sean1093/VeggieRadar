@@ -14,7 +14,8 @@
  *     than `BOARD_MAX_AGE_MS` schedules a background rebuild on the spot, so a
  *     dead trigger self-heals instead of freezing the app on an old date.
  *   - `doGet?action=search&query=<name>` filters the board / falls back to a live query.
- *   - `doGet?action=getTrend&cropName=<name>&days=7` returns a price trend.
+ *   - `doGet?action=getTrend&cropName=<name>&days=7` returns a price trend,
+ *     served from a shared cache and crawled with ONE range query.
  *   - `doGet?action=warm` queues a rebuild and returns immediately.
  *   - `doGet?action=diag` reports board freshness and trigger state.
  *
@@ -45,6 +46,15 @@ var BOARD_CACHE_KEY = 'veggie_board_v2';
 var BOARD_CACHE_TTL = 6 * 60 * 60; // 6 hours
 var MAX_LOOKBACK_DAYS = 8;       // walk back to the latest day that has data
 var FETCH_BATCH = 13;            // concurrent UrlFetchApp requests; a 70+ burst trips MOA's per-IP limit
+// Trend serving. One drawer open used to cost 7 sequential MOA fetches plus
+// 480 ms of sleeps; a range query and a short shared cache make it at most
+// 1 fetch per crop per hour across ALL users, keeping the URLFetch daily quota
+// and the 30-simultaneous-execution cap far away as traffic grows.
+var TREND_CACHE_PREFIX = 'veggie_trend_';
+var TREND_CACHE_TTL = 60 * 60;   // seconds; bounds staleness once closing prices publish
+var TREND_MAX_DAYS = 14;         // MOA caps one response near 1000 rows; 14 days stays under it
+var TRADE_DATES_CACHE_KEY = 'veggie_trade_dates';
+var TRADE_DATES_TTL = 60 * 60;   // seconds; saves up to 16 probe fetches per search miss
 
 // Durable board storage. ScriptProperties caps a single value at 9 KB and the
 // board is ~25 KB, so it is written as numbered chunks.
@@ -381,7 +391,7 @@ function boardAgeMs(board) {
  * called from the time-driven trigger / manual setup, never from doGet.
  */
 function buildBoard() {
-  var dates = resolveTradeDates();
+  var dates = resolveTradeDates(true);
   if (!dates.latest) {
     return {
       type: 'board',
@@ -641,54 +651,79 @@ function handleSearch(params) {
 
 // --- Trend ---
 
+/**
+ * Price trend for the drawer. ONE range query replaces the previous
+ * fetch-per-day loop, and the payload is cached for every user, so trend load
+ * no longer scales with traffic. Response shape is unchanged: oldest → newest,
+ * `null` on non-trading days — including today until closing prices publish.
+ */
 function handleTrend(params) {
   var cropName = params.cropName;
-  var days = parseInt(params.days || '7', 10);
   if (!cropName) return { error: '請提供 cropName 參數', message: '?action=getTrend&cropName=甘藍&days=7' };
+  var days = parseInt(params.days || '7', 10);
+  if (isNaN(days) || days < 1) days = 7;
+  if (days > TREND_MAX_DAYS) days = TREND_MAX_DAYS;
 
   var term = SEARCH_ALIASES[cropName] || cropName;
   var root = rowRoot(term);
-  var trend = [];
   var today = new Date();
-  for (var i = days - 1; i >= 0; i--) {
-    var d = new Date(today);
-    d.setDate(today.getDate() - i);
-    var rows = tradedRows(fetchCrop(term, dateToROC(d))).filter(function (r) {
-      return rowRoot(r.CropName) === root;
-    });
-    if (rows.length) {
-      trend.push(round1(weightedAverage(rows).avg));
-    } else {
-      trend.push(null); // no market that day (e.g. weekend/holiday/closed)
-    }
-    Utilities.sleep(80);
+
+  var cache = CacheService.getScriptCache();
+  var cacheKey = TREND_CACHE_PREFIX + root + '_' + days + '_' + dateToROC(today);
+  var hit = cache.get(cacheKey);
+  if (hit) return JSON.parse(hit);
+
+  var start = new Date(today);
+  start.setDate(today.getDate() - (days - 1));
+  var rows = tradedRows(fetchCrop(term, dateToROC(start), dateToROC(today))).filter(function (r) {
+    return rowRoot(r.CropName) === root;
+  });
+
+  // Group rows by trading date, then walk the calendar so closed days stay null.
+  var byDate = {};
+  for (var i = 0; i < rows.length; i++) {
+    var dateKey = rows[i].TransDate;
+    (byDate[dateKey] = byDate[dateKey] || []).push(rows[i]);
   }
-  return { cropName: cropName, days: days, trend: trend };
+
+  var trend = [];
+  for (var offset = days - 1; offset >= 0; offset--) {
+    var d = new Date(today);
+    d.setDate(today.getDate() - offset);
+    var dayRows = byDate[dateToROC(d)];
+    trend.push(dayRows ? round1(weightedAverage(dayRows).avg) : null);
+  }
+
+  var payload = { cropName: cropName, days: days, trend: trend };
+  cache.put(cacheKey, JSON.stringify(payload), TREND_CACHE_TTL);
+  return payload;
 }
 
 // --- MOA API access ---
 
 /**
- * Fetches all rows for a crop-name term on a given ROC date. MOA matches the
- * term anywhere inside `CropName`, so the result is a superset of the wanted
- * root — callers must filter with `selectRows` / `rowRoot`.
+ * Fetches all rows for a crop-name term on a ROC date, or across a closed
+ * date range when `rocEnd` is given. MOA matches the term anywhere inside
+ * `CropName`, so the result is a superset of the wanted root — callers must
+ * filter with `selectRows` / `rowRoot`.
  */
-function fetchCrop(cropName, rocDate) {
-  if (!cropName || !rocDate) return [];
+function fetchCrop(cropName, rocStart, rocEnd) {
+  if (!cropName || !rocStart) return [];
   try {
-    var resp = UrlFetchApp.fetch(cropUrl(cropName, rocDate), { muteHttpExceptions: true });
+    var resp = UrlFetchApp.fetch(cropUrl(cropName, rocStart, rocEnd), { muteHttpExceptions: true });
     return parseRows(resp);
   } catch (err) {
-    Logger.log('fetchCrop error (' + cropName + ' ' + rocDate + '): ' + err);
+    Logger.log('fetchCrop error (' + cropName + ' ' + rocStart + '): ' + err);
     return [];
   }
 }
 
-function cropUrl(cropName, rocDate) {
+/** Single-date URL when `rocEnd` is omitted; a closed range otherwise. */
+function cropUrl(cropName, rocStart, rocEnd) {
   return AGRICULTURE_API_URL + '?' + [
     'CropName=' + encodeURIComponent(cropName),
-    'Start_time=' + encodeURIComponent(rocDate),
-    'End_time=' + encodeURIComponent(rocDate)
+    'Start_time=' + encodeURIComponent(rocStart),
+    'End_time=' + encodeURIComponent(rocEnd || rocStart)
   ].join('&');
 }
 
@@ -748,8 +783,20 @@ function fetchRootRows(roots, rocDate) {
   return out;
 }
 
-/** Finds the latest ROC date with real trades and the previous such date. */
-function resolveTradeDates() {
+/**
+ * Finds the latest ROC date with real trades and the previous such date.
+ * Probing costs up to 16 fetches, so the result is shared through the cache
+ * for an hour — that is what keeps a burst of search misses cheap. The board
+ * build passes `fresh`: its correctness must never ride on a stale probe, and
+ * its fresh answer re-primes the cache for the search path.
+ */
+function resolveTradeDates(fresh) {
+  var cache = CacheService.getScriptCache();
+  if (!fresh) {
+    var hit = cache.get(TRADE_DATES_CACHE_KEY);
+    if (hit) return JSON.parse(hit);
+  }
+
   var probe = '甘藍'; // cabbage: year-round, all markets, high volume — the most reliable probe
   var today = new Date();
   var latest = null;
@@ -761,7 +808,7 @@ function resolveTradeDates() {
     var roc = dateToROC(d);
     if (isTradingDate(probe, roc)) latest = roc;
   }
-  if (!latest) return { latest: null, prev: null };
+  if (!latest) return { latest: null, prev: null }; // never cache a failed probe
 
   var latestDate = rocToDate(latest);
   for (var j = 1; j <= MAX_LOOKBACK_DAYS && !prev; j++) {
@@ -770,7 +817,10 @@ function resolveTradeDates() {
     var proc = dateToROC(pd);
     if (isTradingDate(probe, proc)) prev = proc;
   }
-  return { latest: latest, prev: prev };
+
+  var dates = { latest: latest, prev: prev };
+  cache.put(TRADE_DATES_CACHE_KEY, JSON.stringify(dates), TRADE_DATES_TTL);
+  return dates;
 }
 
 /**

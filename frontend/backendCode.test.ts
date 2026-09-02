@@ -20,6 +20,7 @@ type Row = {
   MarketName?: string;
   Avg_Price: number;
   Trans_Quantity: number;
+  TransDate?: string;
 };
 
 const SOURCE = readFileSync(resolve(__dirname, '../backend/Code.gs'), 'utf8');
@@ -30,8 +31,10 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
   const props = new Map<string, string>();
   const cache = new Map<string, string>();
   const triggers: { handler: string; kind: string }[] = [];
+  const fetches: string[] = [];
 
   const respond = (url: string) => {
+    fetches.push(url);
     const hit = Object.keys(responses).find((key) => url.includes(encodeURIComponent(key)));
     const rows = hit ? responses[hit] : [];
     return {
@@ -96,12 +99,13 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
     'RETAIL_MARKUP_ROOT', 'RETAIL_MARKUP_CATEGORY', 'storeBoard', 'readDurableBoard',
     'readBoard', 'boardAgeMs', 'scheduleRefresh', 'dropTriggers', 'handleWarm',
     'handleDiag', 'BOARD_MAX_AGE_MS', 'REFRESH_ONCE_FN',
+    'handleTrend', 'resolveTradeDates',
   ];
   const factory = new Function(
     ...Object.keys(services),
     `${SOURCE}\nreturn { ${exported.join(', ')} };`,
   );
-  return { api: factory(...Object.values(services)), logs, props, cache, triggers };
+  return { api: factory(...Object.values(services)), logs, props, cache, triggers, fetches };
 }
 
 const row = (CropName: string, Avg_Price: number, Trans_Quantity: number, MarketName = '台北一'): Row =>
@@ -442,5 +446,118 @@ describe('refresh scheduling', () => {
     expect(diag.last_refresh_ok).toContain('115.08.26');
     expect(diag.last_refresh_fail).toBeNull();
     expect(diag.board_items_configured).toBe(api.BOARD_ITEMS.length);
+  });
+});
+/** ROC-calendar date string for `daysAgo` days before today (local time). */
+const rocDate = (daysAgo: number): string => {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear() - 1911}.${pad(d.getMonth() + 1)}.${pad(d.getDate())}`;
+};
+
+const trendRow = (
+  TransDate: string,
+  CropName: string,
+  Avg_Price: number,
+  Trans_Quantity: number,
+  MarketName = '台北一',
+): Row => ({ CropName, Avg_Price, Trans_Quantity, MarketName, CropCode: 'X1', TransDate });
+
+/**
+ * The trend used to crawl one MOA request per calendar day (7 fetches + sleeps
+ * per drawer open). It must now cost ONE range request, keep the same response
+ * shape, and be served from the shared cache so trend load stops scaling with
+ * user traffic — that is what protects the URLFetch daily quota and the
+ * 30-simultaneous-execution cap.
+ */
+describe('handleTrend — cached range query', () => {
+  it('crawls the whole window with one range fetch, weights by volume, nulls closed days', () => {
+    const { api, fetches } = loadBackend({
+      蘿蔔: [
+        trendRow(rocDate(1), '蘿蔔-白', 10, 1000),
+        trendRow(rocDate(1), '蘿蔔-白', 20, 3000, '台中'),
+        trendRow(rocDate(3), '蘿蔔-白', 30, 500),
+        trendRow(rocDate(2), '休市', 0, 0),
+        // Substring pollution: querying 蘿蔔 also returns 胡蘿蔔 — must not
+        // leak into the 蘿蔔 trend.
+        trendRow(rocDate(1), '胡蘿蔔-清洗', 99, 50000),
+      ],
+    });
+
+    const res = api.handleTrend({ cropName: '蘿蔔', days: '7' });
+
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0]).toContain(`Start_time=${rocDate(6)}`);
+    expect(fetches[0]).toContain(`End_time=${rocDate(0)}`);
+    expect(res.trend).toHaveLength(7);
+    expect(res.trend[5]).toBe(17.5); // (10×1000 + 20×3000) / 4000, yesterday
+    expect(res.trend[3]).toBe(30); // three days ago
+    expect(res.trend[6]).toBeNull(); // today: closing prices not published
+    expect(res.trend[4]).toBeNull(); // 休市 placeholder day stays null
+  });
+
+  it('serves repeat requests from the cache without touching MOA again', () => {
+    const { api, fetches } = loadBackend({
+      蘿蔔: [trendRow(rocDate(1), '蘿蔔-白', 10, 1000)],
+    });
+
+    const first = api.handleTrend({ cropName: '蘿蔔', days: '7' });
+    const second = api.handleTrend({ cropName: '蘿蔔', days: '7' });
+
+    expect(fetches).toHaveLength(1);
+    expect(second).toEqual(first);
+  });
+
+  it('resolves colloquial names through the alias table', () => {
+    const { api, fetches } = loadBackend({ 甘藍: [] });
+    api.handleTrend({ cropName: '高麗菜', days: '7' });
+    expect(fetches[0]).toContain(encodeURIComponent('甘藍'));
+  });
+
+  it('clamps the window to the MOA row cap and floors bad input', () => {
+    const { api, fetches } = loadBackend({ 甘藍: [] });
+    expect(api.handleTrend({ cropName: '甘藍', days: '90' }).days).toBe(14);
+    expect(fetches[0]).toContain(`Start_time=${rocDate(13)}`);
+    expect(api.handleTrend({ cropName: '甘藍', days: 'abc' }).days).toBe(7);
+  });
+});
+
+/**
+ * A search miss used to spend up to 16 probe fetches inside resolveTradeDates
+ * on every request. The probe answer barely moves, so it is shared through the
+ * cache — but the board build must always probe fresh: a board built on a
+ * stale trading date is the one failure users would actually see.
+ */
+describe('resolveTradeDates — probe caching', () => {
+  const probeDay = (): Row[] => [row('甘藍-初秋', 20, 60000)]; // ≥ PROBE_MIN_VOLUME
+
+  it('caches a successful probe for the search path', () => {
+    const { api, fetches } = loadBackend({ 甘藍: probeDay() });
+
+    const first = api.resolveTradeDates();
+    expect(first.latest).toBe(rocDate(0));
+    expect(first.prev).toBe(rocDate(1));
+    const probesUsed = fetches.length;
+
+    const second = api.resolveTradeDates();
+    expect(second).toEqual(first);
+    expect(fetches).toHaveLength(probesUsed); // no new MOA traffic
+  });
+
+  it('bypasses the cache when the board build asks for a fresh probe', () => {
+    const { api, fetches } = loadBackend({ 甘藍: probeDay() });
+    api.resolveTradeDates();
+    const probesUsed = fetches.length;
+    api.resolveTradeDates(true);
+    expect(fetches.length).toBeGreaterThan(probesUsed);
+  });
+
+  it('never caches a failed probe, so recovery is immediate', () => {
+    const { api, fetches } = loadBackend({}); // MOA down / all 休市
+    expect(api.resolveTradeDates().latest).toBeNull();
+    const probesUsed = fetches.length;
+    api.resolveTradeDates();
+    expect(fetches.length).toBe(probesUsed * 2); // probed again, not served a cached failure
   });
 });

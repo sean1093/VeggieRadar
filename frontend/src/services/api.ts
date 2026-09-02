@@ -7,34 +7,112 @@
  * Set `VITE_API_BASE_URL` to your deployed GAS Web App URL. When it is unset
  * (local dev / offline), the app falls back to bundled sample data so the UI
  * is still fully explorable.
+ *
+ * Degraded-mode contract (GAS has hard quotas — 30 simultaneous executions,
+ * a daily URLFetch budget — and fails in awkward ways when it hits them):
+ *
+ *   - Every request carries a deadline. Over-capacity GAS queues requests;
+ *     without a deadline a queued call holds the loading skeleton for 60 s+.
+ *   - Platform errors arrive as HTML pages, not JSON from `doGet`. Those are
+ *     normalised into friendly errors; the raw body goes to the console only.
+ *   - The last good board is persisted to localStorage. When the backend is
+ *     unreachable the app serves that instead of a blank page — old prices
+ *     beat no prices for a shopper standing at a stall.
+ *   - Search transport failures are marked `transient` so the UI can say
+ *     "busy, retry" instead of lying with 查無此品項.
  */
 
-import type { ApiResponse, BoardResponse, SearchResponse } from '../types/produce';
+import { isApiError, type ApiResponse, type BoardResponse, type SearchResponse } from '../types/produce';
 import { MOCK_BOARD } from './mockBoard';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string | undefined;
 
-async function callApi(params: Record<string, string>): Promise<ApiResponse> {
+// Deadlines per action. The board gets the longest one because it is the only
+// request the whole UI blocks on; search and trend degrade gracefully.
+const BOARD_TIMEOUT_MS = 12_000;
+const SEARCH_TIMEOUT_MS = 8_000;
+const TREND_TIMEOUT_MS = 8_000;
+
+const BOARD_CACHE_KEY = 'veggieradar_last_board_v1';
+
+/**
+ * Fetches one backend action with a deadline and a JSON guarantee.
+ * Throws on HTTP errors, timeouts and non-JSON bodies — callers turn those
+ * into cached fallbacks or friendly messages.
+ */
+async function fetchJson(params: Record<string, string>, timeoutMs: number): Promise<unknown> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const qs = new URLSearchParams(params).toString();
+    const response = await fetch(`${API_BASE_URL}?${qs}`, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      // GAS over-capacity/limit errors are platform HTML pages that never went
+      // through doGet's JSON error handling. Keep the evidence in the console,
+      // never in the UI.
+      console.warn('VeggieRadar: non-JSON backend response', response.status, text.slice(0, 200));
+      throw new Error('backend returned non-JSON');
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function callApi(params: Record<string, string>, timeoutMs: number): Promise<ApiResponse> {
   if (!API_BASE_URL) {
     return mockResponse(params);
   }
-  const qs = new URLSearchParams(params).toString();
-  const response = await fetch(`${API_BASE_URL}?${qs}`);
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
+  return (await fetchJson(params, timeoutMs)) as ApiResponse;
+}
+
+/**
+ * Last board that loaded successfully, or null. Only meaningful when a real
+ * backend is configured — offline dev already has the bundled board.
+ */
+export function readCachedBoard(): BoardResponse | null {
+  if (!API_BASE_URL) return null;
+  try {
+    const raw = localStorage.getItem(BOARD_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as BoardResponse;
+    if (!parsed || parsed.type !== 'board' || !Array.isArray(parsed.items) || parsed.items.length === 0) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
   }
-  return (await response.json()) as ApiResponse;
+}
+
+function writeCachedBoard(board: BoardResponse): void {
+  if (!API_BASE_URL) return;
+  try {
+    localStorage.setItem(BOARD_CACHE_KEY, JSON.stringify(board));
+  } catch {
+    // Private mode / storage quota — the cache is best-effort.
+  }
 }
 
 /**
  * Loads the daily price board (default view). GAS web apps can return a
  * transient 404 on a cold start, so retry a couple of times before failing.
+ * Every good board is persisted for offline/over-quota fallback.
  */
 export async function fetchBoard(): Promise<ApiResponse> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await callApi({ action: 'board' });
+      const res = await callApi({ action: 'board' }, BOARD_TIMEOUT_MS);
+      if (!isApiError(res) && res.type === 'board' && res.items.length > 0) {
+        writeCachedBoard(res);
+      }
+      return res;
     } catch (error) {
       lastError = error;
       const { promise, resolve } = Promise.withResolvers<void>();
@@ -42,7 +120,7 @@ export async function fetchBoard(): Promise<ApiResponse> {
       await promise;
     }
   }
-  return { error: '無法載入今日菜價，請稍後再試', message: String(lastError) };
+  return { error: '無法載入今日菜價，請稍後再試', message: String(lastError), transient: true };
 }
 
 /** Searches produce by (colloquial) name. */
@@ -52,22 +130,43 @@ export async function searchProduce(query: string): Promise<ApiResponse> {
     return { type: 'search', query, error: '請輸入查詢關鍵字' };
   }
   try {
-    return await callApi({ action: 'search', query: trimmed });
+    return await callApi({ action: 'search', query: trimmed }, SEARCH_TIMEOUT_MS);
   } catch (error) {
-    return { error: '系統錯誤，請稍後再試', message: String(error), query: trimmed };
+    // Transport failure — NOT "no such produce". `transient` keeps the UI from
+    // presenting a busy backend as an empty search result.
+    return { error: '服務忙碌中，請稍後再試', message: String(error), query: trimmed, transient: true };
   }
 }
+
+// One trend per crop barely moves within a session, and each miss costs a GAS
+// execution. Successful trends are memoised; failures are not, so a closed
+// drawer can retry on reopen.
+const trendCache = new Map<string, number[]>();
+const TREND_CACHE_MAX = 50;
 
 /** Fetches the N-day price trend for a crop (drawer only). */
 export async function fetchProduceTrend(cropName: string, days: number): Promise<number[]> {
   const trimmed = cropName.trim();
   if (!trimmed || !API_BASE_URL) return [];
+  const key = `${trimmed}:${days}`;
+  const cached = trendCache.get(key);
+  if (cached) return cached;
   try {
-    const qs = new URLSearchParams({ action: 'getTrend', cropName: trimmed, days: String(days) }).toString();
-    const response = await fetch(`${API_BASE_URL}?${qs}`);
-    if (!response.ok) return [];
-    const data = await response.json();
-    return Array.isArray(data.trend) ? data.trend.filter((n: unknown): n is number => typeof n === 'number') : [];
+    const data = (await fetchJson(
+      { action: 'getTrend', cropName: trimmed, days: String(days) },
+      TREND_TIMEOUT_MS,
+    )) as { trend?: unknown };
+    const trend = Array.isArray(data.trend)
+      ? data.trend.filter((n: unknown): n is number => typeof n === 'number')
+      : [];
+    if (trend.length) {
+      if (trendCache.size >= TREND_CACHE_MAX) {
+        const oldest = trendCache.keys().next().value;
+        if (oldest !== undefined) trendCache.delete(oldest);
+      }
+      trendCache.set(key, trend);
+    }
+    return trend;
   } catch {
     return [];
   }

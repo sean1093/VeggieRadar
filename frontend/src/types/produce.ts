@@ -63,6 +63,13 @@ export interface ApiErrorResponse {
   message?: string;
   suggestion?: string;
   items?: ProduceItem[];
+  /**
+   * True when the failure is transport-level (timeout, GAS over capacity,
+   * non-JSON platform error page) rather than a definitive answer such as
+   * 查無此品項. The UI must offer these as "busy, retry" — never as an empty
+   * search result.
+   */
+  transient?: boolean;
 }
 
 export type ApiResponse = BoardResponse | SearchResponse | ApiErrorResponse;
