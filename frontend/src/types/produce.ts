@@ -21,6 +21,11 @@ export interface ProduceItem {
   retail_price?: number;
   retail_high?: number;
   retail_estimated?: boolean;
+  // 「跟平常比」基準（批發基準）：近 28 個交易日的中位數。baseline_price 為
+  // 元/台斤；vs_baseline_percent 為今日批發價相對中位數的百分比（負值 = 比平常
+  // 便宜）。歷史不足（新品項、剛回產季、尚未回填）時後端不送這兩個欄位。
+  baseline_price?: number;
+  vs_baseline_percent?: number;
 
   // Optional — only present in some responses / kept for the detail drawer.
   market?: string;

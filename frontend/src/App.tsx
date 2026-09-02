@@ -9,6 +9,7 @@ import { fetchBoard, readCachedBoard, searchProduce } from './services/api';
 import { useWatchlist } from './hooks/useWatchlist';
 import { describeFreshness, type FreshnessNotice } from './lib/utils/freshness';
 import { isApiError, type BoardResponse, type ProduceItem } from './types/produce';
+import { byValueFirst } from './lib/utils/value-sort';
 import './App.css';
 
 function App() {
@@ -23,6 +24,25 @@ function App() {
   // Transport-level search failure. Kept apart from empty results so a busy
   // backend is never presented as 查無此品項.
   const [searchError, setSearchError] = useState<string | null>(null);
+  // Board order. 'category' is the curated definition order; 'value' puts the
+  // items furthest below their own monthly baseline first — the "just show me
+  // what is worth buying" mode for standing at the market. Persisted so the
+  // choice survives the daily revisit.
+  const [sortMode, setSortMode] = useState<'category' | 'value'>(() => {
+    try {
+      return localStorage.getItem('veggieradar_sort_v1') === 'value' ? 'value' : 'category';
+    } catch {
+      return 'category';
+    }
+  });
+  const changeSort = (mode: 'category' | 'value') => {
+    setSortMode(mode);
+    try {
+      localStorage.setItem('veggieradar_sort_v1', mode);
+    } catch {
+      // Private mode — keep the in-memory choice.
+    }
+  };
 
   const [query, setQuery] = useState('');
   const [remoteResults, setRemoteResults] = useState<ProduceItem[] | null>(null);
@@ -121,10 +141,21 @@ function App() {
   }, [baseItems, watchCount]);
 
   const visibleItems = useMemo(() => {
-    if (activeFilter === 'watch') return baseItems.filter((it) => isWatched(it.official_name));
-    if (activeFilter === 'all') return baseItems;
-    return baseItems.filter((it) => it.category === activeFilter);
-  }, [baseItems, activeFilter, isWatched]);
+    let items = baseItems;
+    if (activeFilter === 'watch') items = items.filter((it) => isWatched(it.official_name));
+    else if (activeFilter !== 'all') items = items.filter((it) => it.category === activeFilter);
+    if (sortMode === 'value') {
+      // Stable sort; items without a finite baseline sink to the bottom in
+      // their original curated order rather than pretending to be ranked.
+      items = [...items].sort(byValueFirst);
+    }
+    return items;
+  }, [baseItems, activeFilter, isWatched, sortMode]);
+
+  const hasBaselines = useMemo(
+    () => baseItems.some((it) => Number.isFinite(it.vs_baseline_percent)),
+    [baseItems],
+  );
 
   const busy = loading || searching;
 
@@ -169,6 +200,18 @@ function App() {
             {filterOptions.length > 1 && (
               <div className="pb-5">
                 <ProduceFilter options={filterOptions} activeFilter={activeFilter} onFilterChange={setActiveFilter} />
+                {hasBaselines && (
+                  <div className="mx-auto flex max-w-2xl justify-end pt-2">
+                    <button
+                      onClick={() => changeSort(sortMode === 'value' ? 'category' : 'value')}
+                      aria-pressed={sortMode === 'value'}
+                      className="text-xs text-stone transition-colors hover:text-ink"
+                    >
+                      排序：
+                      {sortMode === 'value' ? <span className="font-medium text-sage">划算優先</span> : '分類'}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 

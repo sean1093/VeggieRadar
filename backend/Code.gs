@@ -17,6 +17,7 @@
  *   - `doGet?action=getTrend&cropName=<name>&days=7` returns a price trend,
  *     served from a shared cache and crawled with ONE range query.
  *   - `doGet?action=warm` queues a rebuild and returns immediately.
+ *   - `doGet?action=backfill` queues a one-time history seed for baselines.
  *   - `doGet?action=diag` reports board freshness and trigger state.
  *
  * Data source: Taiwan MOA wholesale market transactions (open data, no key required).
@@ -73,6 +74,22 @@ var REFRESH_ONCE_FN = 'refreshBoardCacheOnce';
 var REFRESH_CRON_FN = 'refreshBoardCache';
 var LAST_OK_PROP = 'veggie_last_refresh_ok';
 var LAST_FAIL_PROP = 'veggie_last_refresh_fail';
+// Per-item wholesale price history, appended by the 4-hourly refresh (zero
+// extra MOA traffic) and seeded once through `?action=backfill`. It powers
+// the "vs the usual price" baseline: the median of up to BASELINE_WINDOW
+// recent trading days. The calendar horizon keeps a crop returning from
+// months out of season from being judged against stale prices.
+var HISTORY_PROP_PREFIX = 'veggie_history_chunk_';
+var HISTORY_PROP_COUNT = 'veggie_history_chunks';
+var BASELINE_WINDOW = 28;        // trading days kept per item
+var BASELINE_MIN_DAYS = 10;      // fewer observations → no baseline published
+var BASELINE_HORIZON_DAYS = 45;  // calendar days; older entries are pruned
+var BACKFILL_ONCE_FN = 'backfillHistoryOnce';
+var BACKFILL_LOCK_KEY = 'veggie_backfill_queued';
+var BACKFILL_LOCK_TTL = 60 * 60; // seconds; one queued backfill per hour
+var BACKFILL_WINDOW_DAYS = 12;   // per range request; high-volume roots stay under MOA's ~1000-row cap
+var HISTORY_LOCK_WAIT_MS = 30 * 1000; // serialises history writes across overlapping triggers
+var BACKFILL_WINDOWS = 2;        // 24 calendar days ≈ 20 trading days on day one; dailies top up the rest
 
 /**
  * Board items: the produce people actually buy.
@@ -327,6 +344,8 @@ function doGet(e) {
       payload = handleSearch(params);
     } else if (action === 'warm') {
       payload = handleWarm(params);
+    } else if (action === 'backfill') {
+      payload = handleBackfill(params);
     } else if (action === 'diag') {
       payload = handleDiag();
     } else {
@@ -414,6 +433,7 @@ function buildBoard() {
     var card = aggregateGroup(def, todayRows, selectRows(prev[def.official], def));
     if (card) items.push(card);
   }
+  applyBaselines(items, readHistory(), dates.latest);
 
   return {
     type: 'board',
@@ -447,44 +467,56 @@ function boardRoots() {
 function storeBoard(payload) {
   var json = JSON.stringify(payload);
   CacheService.getScriptCache().put(BOARD_CACHE_KEY, json, BOARD_CACHE_TTL);
-  try {
-    var props = PropertiesService.getScriptProperties();
-    var chunks = Math.ceil(json.length / PROP_CHUNK_SIZE);
-    var write = {};
-    for (var i = 0; i < chunks; i++) {
-      write[BOARD_PROP_PREFIX + i] = json.substring(i * PROP_CHUNK_SIZE, (i + 1) * PROP_CHUNK_SIZE);
-    }
-    write[BOARD_PROP_COUNT] = String(chunks);
-    props.setProperties(write);
-
-    // Drop chunks left over from a previously larger board.
-    var existing = props.getProperties();
-    for (var key in existing) {
-      if (key.indexOf(BOARD_PROP_PREFIX) !== 0) continue;
-      var idx = parseInt(key.substring(BOARD_PROP_PREFIX.length), 10);
-      if (!isNaN(idx) && idx >= chunks) props.deleteProperty(key);
-    }
-  } catch (err) {
-    Logger.log('storeBoard property error: ' + err);
-  }
+  writeChunkedProp(BOARD_PROP_PREFIX, BOARD_PROP_COUNT, json);
 }
 
 /** Reassembles the chunked durable board, or null when absent/incomplete. */
 function readDurableBoard() {
+  return readChunkedProp(BOARD_PROP_PREFIX, BOARD_PROP_COUNT);
+}
+
+/**
+ * Writes one JSON string across numbered ScriptProperties chunks (a single
+ * value caps at 9 KB), then deletes chunks left over from a larger write so
+ * a shrinking payload cannot leak quota.
+ */
+function writeChunkedProp(prefix, countKey, json) {
   try {
     var props = PropertiesService.getScriptProperties();
-    var all = props.getProperties();
-    var chunks = parseInt(all[BOARD_PROP_COUNT] || '0', 10);
+    var chunks = Math.ceil(json.length / PROP_CHUNK_SIZE) || 1;
+    var write = {};
+    for (var i = 0; i < chunks; i++) {
+      write[prefix + i] = json.substring(i * PROP_CHUNK_SIZE, (i + 1) * PROP_CHUNK_SIZE);
+    }
+    write[countKey] = String(chunks);
+    props.setProperties(write);
+
+    var existing = props.getProperties();
+    for (var key in existing) {
+      if (key.indexOf(prefix) !== 0) continue;
+      var idx = parseInt(key.substring(prefix.length), 10);
+      if (!isNaN(idx) && idx >= chunks) props.deleteProperty(key);
+    }
+  } catch (err) {
+    Logger.log('writeChunkedProp error (' + prefix + '): ' + err);
+  }
+}
+
+/** Reads a chunked JSON string back, or null when absent or torn. */
+function readChunkedProp(prefix, countKey) {
+  try {
+    var all = PropertiesService.getScriptProperties().getProperties();
+    var chunks = parseInt(all[countKey] || '0', 10);
     if (!chunks) return null;
     var parts = [];
     for (var i = 0; i < chunks; i++) {
-      var part = all[BOARD_PROP_PREFIX + i];
+      var part = all[prefix + i];
       if (part == null) return null; // torn write — treat as missing
       parts.push(part);
     }
     return parts.join('');
   } catch (err) {
-    Logger.log('readDurableBoard error: ' + err);
+    Logger.log('readChunkedProp error (' + prefix + '): ' + err);
     return null;
   }
 }
@@ -499,6 +531,7 @@ function refreshBoardCache() {
   var props = PropertiesService.getScriptProperties();
   if (board.items && board.items.length) {
     storeBoard(board);
+    updateHistory(board);
     props.setProperty(LAST_OK_PROP, board.generated_at + ' ' + board.roc_date + ' ' + board.count + ' items');
   } else {
     props.setProperty(LAST_FAIL_PROP, new Date().toISOString() + ' ' + (board.error || 'empty board'));
@@ -577,7 +610,8 @@ function handleDiag() {
     triggers: handlers,
     refresh_queued: !!CacheService.getScriptCache().get(REFRESH_LOCK_KEY),
     last_refresh_ok: props[LAST_OK_PROP] || null,
-    last_refresh_fail: props[LAST_FAIL_PROP] || null
+    last_refresh_fail: props[LAST_FAIL_PROP] || null,
+    history: historySummary(),
   };
 }
 
@@ -595,6 +629,244 @@ function boardSummary() {
     stale: age === null || age > BOARD_MAX_AGE_MS,
     count: board.count || 0
   };
+}
+// --- Price history & baseline ---
+//
+// Store shape (chunked into ScriptProperties):
+//   { version: 1, items: { '<display name>': [['115.08.05', 23.4], ...] } }
+// Prices are 元/公斤 wholesale averages — the same measured series as the
+// board's `avg_price`. Entries are keyed per BOARD ITEM, not per MOA root,
+// because two items can share one root with different variety filters
+// (青椒/甜椒, 玉米/玉米筍, 蔥/紅蔥頭, 白花椰菜/青花菜).
+
+/** Parsed history store, or an empty one when absent/torn/corrupt. */
+function readHistory() {
+  var json = readChunkedProp(HISTORY_PROP_PREFIX, HISTORY_PROP_COUNT);
+  if (json) {
+    try {
+      var parsed = JSON.parse(json);
+      if (parsed && parsed.items) return parsed;
+    } catch (err) {
+      Logger.log('readHistory parse error: ' + err);
+    }
+  }
+  return { version: 1, items: {} };
+}
+
+function writeHistory(history) {
+  writeChunkedProp(HISTORY_PROP_PREFIX, HISTORY_PROP_COUNT, JSON.stringify(history));
+}
+/**
+ * Serialises history read-modify-write. The 4-hourly refresh and a queued
+ * backfill can genuinely overlap; without the lock, whichever writes last
+ * silently discards the other's observations.
+ */
+function withHistoryLock(fn) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(HISTORY_LOCK_WAIT_MS);
+  try {
+    return fn();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Records one (trading date, price) observation per board item. Idempotent
+ * per date: the 4-hourly refresh revisits the same trading day and must
+ * replace, not duplicate. Trimming rides on every write — a rolling window
+ * needs no separate cleanup job that could silently die.
+ */
+function updateHistory(board) {
+  if (!board || !board.roc_date || !board.items || !board.items.length) return;
+  try {
+    withHistoryLock(function () {
+      var history = readHistory();
+      for (var i = 0; i < board.items.length; i++) {
+        var it = board.items[i];
+        history.items[it.name] = appendObservation(history.items[it.name], board.roc_date, it.avg_price);
+      }
+      pruneHistory(history);
+      writeHistory(history);
+    });
+  } catch (err) {
+    // A missed cycle is benign — the same trading date is re-recorded by the
+    // next refresh — and a thrown lock timeout must not mask the successful
+    // board store in the refresh bookkeeping.
+    Logger.log('updateHistory skipped: ' + err);
+  }
+}
+
+/** Adds or replaces one dated observation, keeping the series sorted and trimmed. */
+function appendObservation(series, rocDate, price) {
+  var out = (series || []).filter(function (entry) { return entry[0] !== rocDate; });
+  out.push([rocDate, price]);
+  out.sort(function (a, b) { return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0; });
+  return out.slice(-BASELINE_WINDOW);
+}
+
+/**
+ * Drops entries past the calendar horizon and whole items that left
+ * BOARD_ITEMS, so the store stays bounded by construction (~50 KB worst case
+ * against the 500 KB properties quota).
+ */
+function pruneHistory(history) {
+  var cutoff = rocDateDaysAgo(BASELINE_HORIZON_DAYS);
+  var known = {};
+  for (var i = 0; i < BOARD_ITEMS.length; i++) known[BOARD_ITEMS[i].name] = true;
+  Object.keys(history.items).forEach(function (name) {
+    if (!known[name]) {
+      delete history.items[name];
+      return;
+    }
+    var kept = history.items[name].filter(function (entry) { return entry[0] >= cutoff; });
+    if (kept.length) {
+      history.items[name] = kept;
+    } else {
+      delete history.items[name];
+    }
+  });
+}
+
+/**
+ * ROC date string `days` calendar days before today. Lexicographic comparison
+ * of these strings is safe while the ROC year has 3 digits (until 2910).
+ */
+function rocDateDaysAgo(days) {
+  var d = new Date();
+  d.setDate(d.getDate() - days);
+  return dateToROC(d);
+}
+
+/** Median of a non-empty numeric array. */
+function median(values) {
+  var sorted = values.slice().sort(function (a, b) { return a - b; });
+  var mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * Attaches `baseline_price` (元/台斤) and `vs_baseline_percent` to items with
+ * enough recent history. Today's own observation is excluded — the baseline
+ * means "the usual price", and a spike day must not vouch for itself. Items
+ * short on history simply carry no baseline fields: the frontend treats them
+ * as optional, so a cold store degrades to the pre-feature UI.
+ */
+function applyBaselines(items, history, todayRoc) {
+  var cutoff = rocDateDaysAgo(BASELINE_HORIZON_DAYS);
+  for (var i = 0; i < items.length; i++) {
+    var series = history.items[items[i].name] || [];
+    var prices = [];
+    for (var j = 0; j < series.length; j++) {
+      if (series[j][0] === todayRoc || series[j][0] < cutoff) continue;
+      prices.push(series[j][1]);
+    }
+    if (prices.length < BASELINE_MIN_DAYS) continue;
+    var base = median(prices);
+    if (!(base > 0)) continue;
+    items[i].baseline_price = round1(base * CATTY_PER_KG);
+    items[i].vs_baseline_percent = round1(((items[i].avg_price - base) / base) * 100);
+  }
+}
+
+/** Cheap history overview for diag/backfill responses. */
+function historySummary() {
+  var history = readHistory();
+  var names = Object.keys(history.items);
+  var minLen = null;
+  var maxLen = null;
+  for (var i = 0; i < names.length; i++) {
+    var len = history.items[names[i]].length;
+    if (minLen === null || len < minLen) minLen = len;
+    if (maxLen === null || len > maxLen) maxLen = len;
+  }
+  return { items: names.length, min_days: minLen, max_days: maxLen };
+}
+
+// --- History backfill (one-time seeding) ---
+
+/**
+ * `?action=backfill` — queues the historical crawl in a one-off trigger and
+ * answers at once, exactly like `warm`: the crawl takes minutes and must
+ * never run inside the Web App response window. `force=1` jumps the lock.
+ */
+function handleBackfill(params) {
+  var cache = CacheService.getScriptCache();
+  if (params && params.force) cache.remove(BACKFILL_LOCK_KEY);
+  if (cache.get(BACKFILL_LOCK_KEY)) {
+    return { type: 'backfill', queued: false, message: '已有回填排程進行中', history: historySummary() };
+  }
+  cache.put(BACKFILL_LOCK_KEY, '1', BACKFILL_LOCK_TTL);
+  try {
+    dropTriggers(BACKFILL_ONCE_FN);
+    ScriptApp.newTrigger(BACKFILL_ONCE_FN).timeBased().after(1000).create();
+    return { type: 'backfill', queued: true, message: '已排入背景回填，約數分鐘後生效', history: historySummary() };
+  } catch (err) {
+    Logger.log('handleBackfill error: ' + err);
+    cache.remove(BACKFILL_LOCK_KEY);
+    return { type: 'backfill', queued: false, message: String(err && err.message || err), history: historySummary() };
+  }
+}
+
+/** One-off trigger target; the lock keeps repeat taps cheap for its full TTL. */
+function backfillHistoryOnce() {
+  try {
+    backfillHistory();
+  } finally {
+    dropTriggers(BACKFILL_ONCE_FN);
+  }
+}
+
+/**
+ * Seeds the history with BACKFILL_WINDOWS × BACKFILL_WINDOW_DAYS calendar
+ * days of range queries. Merging is per-date idempotent, so re-running is
+ * safe and only fills gaps — a throttled window costs coverage, not
+ * correctness, and the 4-hourly refresh keeps topping the window up.
+ */
+function backfillHistory() {
+  var roots = boardRoots();
+  var today = new Date();
+
+  // Crawl every window BEFORE taking the lock — the fetches are the slow
+  // part, and the merge below only needs the lock for milliseconds.
+  var crawled = [];
+  for (var w = BACKFILL_WINDOWS - 1; w >= 0; w--) {
+    var end = new Date(today);
+    end.setDate(today.getDate() - w * BACKFILL_WINDOW_DAYS);
+    var start = new Date(end);
+    start.setDate(end.getDate() - (BACKFILL_WINDOW_DAYS - 1));
+    // fetchRootRows retries empty roots once, so one throttled batch cannot
+    // silently strip a slice of roots from the one-time seed.
+    crawled.push(fetchRootRows(roots, dateToROC(start), dateToROC(end)));
+  }
+
+  withHistoryLock(function () {
+    var history = readHistory();
+    for (var c = 0; c < crawled.length; c++) {
+      var rowsByRoot = crawled[c];
+      for (var i = 0; i < BOARD_ITEMS.length; i++) {
+        var def = BOARD_ITEMS[i];
+        var rows = selectRows(rowsByRoot[def.official], def);
+        var byDate = {};
+        for (var r = 0; r < rows.length; r++) {
+          var dateKey = rows[r].TransDate;
+          if (!dateKey) continue;
+          (byDate[dateKey] = byDate[dateKey] || []).push(rows[r]);
+        }
+        Object.keys(byDate).forEach(function (roc) {
+          var day = weightedAverage(byDate[roc]);
+          if (day.volume < MIN_TRADE_VOLUME || !(day.avg > 0)) return;
+          history.items[def.name] = appendObservation(history.items[def.name], roc, round1(day.avg));
+        });
+      }
+    }
+    pruneHistory(history);
+    writeHistory(history);
+  });
+
+  var summary = historySummary();
+  Logger.log('Backfill complete: ' + summary.items + ' items with history');
+  return summary;
 }
 
 // --- Search ---
@@ -739,17 +1011,18 @@ function parseRows(resp) {
 }
 
 /**
- * Fetches rows for many root names on one ROC date, in small concurrent
- * batches. A single 70+ request burst trips MOA's per-IP limit and comes back
- * empty, so concurrency is capped and each batch pauses briefly.
+ * Fetches rows for many root names, in small concurrent batches — on one ROC
+ * date, or across a closed range when `rocEnd` is given (backfill). A single
+ * 70+ request burst trips MOA's per-IP limit and comes back empty, so
+ * concurrency is capped and each batch pauses briefly.
  * @returns {Object} map of root → rows[]
  */
-function fetchAllRows(cropNames, rocDate) {
+function fetchAllRows(cropNames, rocStart, rocEnd) {
   var out = {};
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
     var requests = slice.map(function (name) {
-      return { url: cropUrl(name, rocDate), muteHttpExceptions: true };
+      return { url: cropUrl(name, rocStart, rocEnd), muteHttpExceptions: true };
     });
     try {
       var responses = UrlFetchApp.fetchAll(requests);
@@ -757,7 +1030,7 @@ function fetchAllRows(cropNames, rocDate) {
         out[slice[i]] = parseRows(responses[i]);
       }
     } catch (err) {
-      Logger.log('fetchAllRows batch error (' + rocDate + '): ' + err);
+      Logger.log('fetchAllRows batch error (' + rocStart + '): ' + err);
     }
     if (start + FETCH_BATCH < cropNames.length) Utilities.sleep(120);
   }
@@ -767,15 +1040,16 @@ function fetchAllRows(cropNames, rocDate) {
 /**
  * Like `fetchAllRows`, but retries the roots that returned nothing once. With
  * ~100 roots a throttled batch would silently drop whole rows from the board;
- * genuinely out-of-season roots just stay empty.
+ * genuinely out-of-season roots just stay empty. Accepts an optional range
+ * end for the backfill path.
  */
-function fetchRootRows(roots, rocDate) {
-  var out = fetchAllRows(roots, rocDate);
+function fetchRootRows(roots, rocStart, rocEnd) {
+  var out = fetchAllRows(roots, rocStart, rocEnd);
   var misses = roots.filter(function (r) { return !out[r] || !out[r].length; });
   if (!misses.length) return out;
 
   Utilities.sleep(1500);
-  var retry = fetchAllRows(misses, rocDate);
+  var retry = fetchAllRows(misses, rocStart, rocEnd);
   for (var i = 0; i < misses.length; i++) {
     var root = misses[i];
     if (retry[root] && retry[root].length) out[root] = retry[root];
