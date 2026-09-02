@@ -6,6 +6,10 @@ while standing in front of it. Open the app and immediately see a calm,
 MUJI-inspired board of the produce people buy most — green when cheaper, clay
 when pricier, priced per catty (台斤).
 
+Three questions the board answers without typing: what does this cost today, is
+that cheap *for this crop* (against its own recent norm), and which variety am I
+actually being quoted when one crop trades at two very different prices.
+
 - **Audience:** shoppers at traditional markets and home cooks, primarily on phones.
 - **Experience:** board-first and mobile-first. No typing required — the common
   produce board loads instantly; search is secondary.
@@ -40,6 +44,20 @@ when pricier, priced per catty (台斤).
 - **Honest freshness.** A caption shows the data date and that it is the wholesale
   closing average — wholesale prices publish after market close, so the latest day
   with real trades is shown.
+- **"Cheaper than yesterday" and "cheap for this crop" are different questions.**
+  `↓ 7.0%` compares with the previous trading day. The sage badge
+  「比近月便宜 23%」 compares today's wholesale price with the median of that
+  crop's own last 28 trading days, and 「划算優先」 sorts the board by it so the
+  day's real bargains sit on top. Only the discount side gets a badge — the
+  change column already covers the pricier side. See §5.
+- **A blended average can match no stall.** When varieties inside one crop
+  diverge (綠竹筍 at 2.5× 麻竹筍), the drawer decomposes the wholesale number
+  per variety instead of pretending the average is a price. See §5.
+- **Degrade honestly, never blankly.** The last good board is kept in
+  localStorage: when the backend is unreachable the app serves those prices with
+  「目前連不上伺服器」 plus a retry, because stale prices beat a blank page in
+  front of a stall. A busy backend during search says 「服務忙碌中」 — never
+  「查無此品項」, which would be a lie about the produce rather than about us.
 - **MUJI aesthetic.** Paper background, ink text, hairline dividers, generous
   whitespace, restrained type. No loud colour, no heavy shadows.
 
@@ -48,18 +66,22 @@ when pricier, priced per catty (台斤).
 ## 2. Architecture
 
 ```
-MOA open-data API ──▶ GAS daily cache (board) ──▶ Frontend board (GitHub Pages)
-   (live queries)         (CacheService +            Header search is secondary
-                           durable ScriptProperties)
+MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ Frontend (GitHub Pages)
+  (single-date and       board   → CacheService + chunked     paints the cached
+   range queries)                  ScriptProperties           board first, then
+                         history → chunked ScriptProperties   revalidates
+                                   (28 trading days → baseline)
 ```
 
 - **Data source:** Taiwan MOA "Agricultural Products Wholesale Market Transactions"
   open data, no API key. `https://data.moa.gov.tw/api/v1/AgriProductsTransType/`
   (ROC-calendar dates, e.g. `115.08.26`; prices in `元/公斤`).
 - **Backend (`backend/Code.gs`):**
-  - `refreshBoardCache()` — run by a time-driven trigger; crawls the board items
-    with `UrlFetchApp.fetchAll` (concurrent, batched at 13) and stores the board
-    in `CacheService` plus durable `ScriptProperties`.
+  - `refreshBoardCache()` — run by a 4-hourly time-driven trigger; crawls the
+    board items with `UrlFetchApp.fetchAll` (concurrent, batched at 13), stores
+    the board in `CacheService` plus durable `ScriptProperties`, and appends the
+    day's price to the per-item history behind the baseline (§5) — no extra MOA
+    requests for it.
   - `doGet` (default) — serves the stored board instantly. **It never crawls
     synchronously** (a cold crawl exceeds the Web App response window and 404s).
     A board past `BOARD_MAX_AGE_MS` (4 h) is still served, but the request also
@@ -67,17 +89,29 @@ MOA open-data API ──▶ GAS daily cache (board) ──▶ Frontend board (Gi
     freezing the app on an old date.
   - `doGet?action=search&query=<name>` — filters the board, falling back to a live
     query. Accepts Chinese and common English/colloquial terms via an alias table.
-  - `doGet?action=getTrend&cropName=<name>&days=7` — price trend for the drawer.
+    The trading-date probe is cached for an hour, so a burst of misses no longer
+    re-probes up to 16 dates each.
+  - `doGet?action=getTrend&cropName=<name>&days=7` — **one** MOA range query
+    (`days` clamped to 14), cached per crop per day and shared by every visitor,
+    so drawer traffic stops scaling with users.
   - `doGet?action=warm` — queues a rebuild and returns immediately (`force=1`
     jumps the once-per-15-minutes lock). The crawl takes minutes, so it runs in a
     one-off trigger rather than on the request.
-  - `doGet?action=diag` — board freshness, installed triggers and the last refresh
-    outcome, so a stalled pipeline is diagnosable without the GAS console.
+  - `doGet?action=backfill` — one-time seeding of the price history via range
+    queries (`force=1` jumps a one-hour lock); also a one-off trigger, same
+    reason.
+  - `doGet?action=diag` — board freshness, installed triggers, the last refresh
+    outcome and history coverage, so a stalled pipeline is diagnosable without
+    the GAS console.
   - Prices are volume-weighted averages across markets; items below 200 kg traded
     are filtered; the latest day with real trades is found automatically.
 - **Frontend (`frontend/`):** React + Vite + TypeScript + Tailwind + shadcn/ui.
-  Loads the board on mount; when `VITE_API_BASE_URL` is unset it uses a bundled
-  sample board so the UI runs fully offline.
+  Paints the cached board immediately and revalidates in the background, so a
+  revisit renders in ~250 ms instead of waiting out the ~2 s GAS round trip.
+  Every request carries a deadline (board 12 s, search 15 s, trend 8 s) because
+  an over-quota Apps Script *queues* requests rather than failing fast, and a
+  queued request would otherwise hold the loading skeleton for a minute. With
+  `VITE_API_BASE_URL` unset it uses a bundled sample board and runs fully offline.
 
 ### Two MOA quirks the backend has to defend against
 
@@ -101,9 +135,27 @@ locks them down.
 
 Two further robustness measures: `fetchRootRows()` retries roots that came back
 empty once, because a throttled 13-request batch used to drop a whole slice of
-the board (including 高麗菜) without any error; and `storeBoard()` splits the
-~24 KB board across numbered `ScriptProperties` chunks, since a single property
-value is capped at 9 KB.
+the board (including 高麗菜) without any error; and `writeChunkedProp()` splits
+the ~34 KB board — and the price history — across numbered `ScriptProperties`
+chunks, since a single property value is capped at 9 KB.
+
+### GAS quotas are the real scaling limit
+
+Two Apps Script limits bite long before anything else: **30 simultaneous
+executions** per account and the daily `UrlFetchApp` budget. The board is a
+cache read, so it was never the risk — the per-user actions were:
+
+| Path | Before | Now |
+| --- | --- | --- |
+| Trend (one drawer open) | 7 sequential fetches + 480 ms of sleeps, 5–10 s holding an execution slot | 1 range query, then a shared cache: ~1 crawl per crop per hour for *all* users (1.3 s warm) |
+| Search miss | up to 16 probe fetches plus the queries | probe cached 1 h → 7.8 s warm instead of ~31 s |
+| Board | served from cache | unchanged, plus the client-side localStorage fallback |
+
+History writes (`updateHistory`, `backfillHistory`) run inside a `LockService`
+critical section: the 4-hourly refresh and a queued backfill genuinely can
+overlap, and a read-modify-write race would silently drop observations. The
+backfill crawls every window *before* taking the lock, so the critical section
+lasts milliseconds.
 
 ### Trading date vs. refresh time
 
@@ -129,10 +181,10 @@ GET {WEB_APP_URL}/exec
 ```json
 {
   "type": "board",
-  "date": "2026-08-26",
-  "roc_date": "115.08.26",
-  "prev_date": "115.08.25",
-  "generated_at": "2026-08-28T00:31:07.412Z",
+  "date": "2026-09-02",
+  "roc_date": "115.09.02",
+  "prev_date": "115.09.01",
+  "generated_at": "2026-09-02T16:05:08.087Z",
   "age_ms": 84210,
   "stale": false,
   "count": 94,
@@ -142,14 +194,20 @@ GET {WEB_APP_URL}/exec
       "name": "高麗菜",
       "official_name": "甘藍",
       "category": "葉菜類",
-      "avg_price": 23.4,
-      "catty_price": 14,
+      "avg_price": 22.1,
+      "catty_price": 13.3,
       "retail_low": 35,
-      "retail_price": 43,
+      "retail_price": 42,
       "retail_high": 55,
       "retail_estimated": true,
-      "change_percent": -7,
-      "trade_volume": 640155,
+      "change_percent": -13.5,
+      "baseline_price": 16.3,
+      "vs_baseline_percent": -18.5,
+      "varieties": [
+        { "name": "改良種", "catty_price": 12, "share_percent": 62 },
+        { "name": "初秋", "catty_price": 18.9, "share_percent": 19 }
+      ],
+      "trade_volume": 570700,
       "unit": "公斤",
       "markets_count": 13
     }
@@ -157,9 +215,19 @@ GET {WEB_APP_URL}/exec
   "cached": true
 }
 ```
-`avg_price` is `元/公斤`; `catty_price` and all three `retail_*` fields are
-`元/台斤`. `retail_estimated` is always `true` — see §4. Clients must treat the
-`retail_*` fields as optional, since a board cached by an older deploy lacks them.
+`avg_price` is `元/公斤`. `catty_price`, the three `retail_*` fields,
+`baseline_price` and `varieties[].catty_price` are `元/台斤`.
+`retail_estimated` is always `true` — see §4.
+
+**Every derived field is optional and clients must treat it as such**: an older
+deploy's cached board lacks them, and the backend omits them whenever the data
+does not justify publishing.
+
+| Field(s) | Omitted when |
+| --- | --- |
+| `retail_*` | the cached board predates the retail band |
+| `baseline_price`, `vs_baseline_percent` | fewer than 10 in-horizon observations for that crop (§5) |
+| `varieties` | fewer than 2 varieties clear the share and volume thresholds (§5) |
 
 `date` is the trading date; `generated_at` is when the backend crawled. See
 "Trading date vs. refresh time" in §2 — clients must not present the trading date
@@ -171,26 +239,39 @@ rebuild has been queued (`refresh_queued`); the stale board is still served.
 GET {WEB_APP_URL}/exec?action=search&query=高麗菜
 ```
 Same `items` shape with `type: "search"`; no match returns `{ "error": "查無此品項" }`.
+A board hit answers with **zero** MOA traffic; only a genuine miss falls through
+to a live query.
 
 ### Trend
 ```
 GET {WEB_APP_URL}/exec?action=getTrend&cropName=甘藍&days=7
 → { "cropName": "甘藍", "days": 7, "trend": [23.1, 24.0, null, 24.4, ...] }
 ```
-(`null` = no market that day, e.g. a holiday.)
+Oldest → newest, `元/公斤`; `null` = no market that day (holiday, or today before
+the closing prices publish). `days` is clamped to **14**: one MOA response caps
+near 1000 rows, and 14 days of a high-volume crop stays under it. The payload is
+cached for an hour per crop and shared across visitors, so repeat opens cost no
+MOA traffic.
 
-### Refresh & diagnostics
+### Refresh, backfill & diagnostics
 ```
 GET {WEB_APP_URL}/exec?action=warm[&force=1]
 → { "type": "warm", "queued": true, "message": "已排入背景更新，約一分鐘後生效", "board": { ... } }
 
+GET {WEB_APP_URL}/exec?action=backfill[&force=1]
+→ { "type": "backfill", "queued": true, "message": "已排入背景回填，約數分鐘後生效",
+     "history": { "items": 97, "min_days": 1, "max_days": 24 } }
+
 GET {WEB_APP_URL}/exec?action=diag
 → { "type": "diag", "board": { "generated_at": ..., "stale": false },
-     "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null }
+     "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null,
+     "history": { "items": 97, "min_days": 1, "max_days": 24 } }
 ```
-`warm` queues the crawl in a one-off trigger and answers at once — the crawl
-itself takes minutes and would blow the Web App response window. `diag` is how
-you tell "markets closed" from "refresh pipeline dead" without the GAS console.
+`warm` and `backfill` both queue their crawl in a one-off trigger and answer at
+once — the crawls take minutes and would blow the Web App response window.
+`backfill` is idempotent per trading date, so re-running only fills gaps. `diag`
+is how you tell "markets closed" from "refresh pipeline dead" without the GAS
+console, and how you confirm history coverage after a backfill.
 
 ---
 
@@ -251,7 +332,68 @@ network call and no new failure mode.
 
 ---
 
-## 5. Local development
+## 5. Relative-price signals
+
+An absolute price answers "what does this cost". Shoppers also ask "is that
+cheap?" and "cheap for *which* variety?" — neither of which the blended daily
+average can answer.
+
+### Cheap against its own norm (`vs_baseline_percent`)
+
+Comparing crops with each other is meaningless (香菇 at NT$60/catty is not
+"expensive" beside 高麗菜 at NT$15). Each crop is therefore compared with
+itself: the **median of its own last 28 trading days**, wholesale basis.
+
+- **Median, not mean** — a typhoon spike must not redefine "normal".
+- **Today is excluded** from its own baseline: a spike day cannot vouch for itself.
+- **A 45-calendar-day horizon** sits on top of the 28-day window, so a crop
+  returning from months out of season is never judged against last season.
+- **Fewer than 10 in-horizon observations → nothing is published**, and the UI
+  drops the badge rather than ranking on thin data.
+
+Why 28 trading days and not two weeks or a whole season: a 14-day window gets
+swallowed by the very disruption it should flag — a typhoon rally runs 2–6 weeks
+(roughly the leafy-green replant cycle), so the baseline climbs with the price
+and then reports "cheaper" at NT$60 when normal is NT$30. A 90-day window
+answers a question nobody asks at a market: it drags a whole season's structural
+shift into today's comparison, so an entire early winter reads as "cheap". The
+28-day window also captures the in-season signal the user actually wanted —
+entering peak supply *is* the moment a crop drops below its own recent norm.
+
+**The history costs no extra MOA traffic.** Each refresh already computes every
+item's price, so it appends `(trading date, 元/公斤)` to a chunked-
+`ScriptProperties` store. Trimming rides on every write (window, horizon, and
+items no longer on the board), so the store is bounded by construction at
+~17 KB against the 500 KB properties quota — there is deliberately no separate
+cleanup job that could silently die. `?action=backfill` seeds ~20 trading days
+once via range queries; the dailies top it up from there.
+
+### Which variety is it (`varieties`)
+
+MOA rows are `<root>-<variety>`, and the spread inside one crop can dwarf the
+day's move. On 2026-09-02: 綠竹筍 at NT$57.1/catty against 麻竹筍 at NT$23.2
+(2.5×), 愛文 mango at NT$58.5 against 凱特 at NT$23.8 (2.5×). The board's
+blended 竹筍 number matched neither stall.
+
+The drawer decomposes it, published only when a breakdown adds something:
+**≥2 varieties, each holding ≥10% of the item's traded volume** and clearing the
+absolute volume floor, volume-sorted (so the market mainstream reads first) and
+capped at 4 rows; unlabelled rows group as 一般. Shares are computed against the
+item's *total* volume, so folded-away varieties leave an honest gap — and when
+the shown rows cover ≤90%, the drawer states how much the remainder holds.
+
+Wholesale basis only. The retail markups (§4) are calibrated per root crop;
+estimating a band per variety would stack an estimate on an estimate, so the
+drawer gives the relative truth (「綠竹筍 is 2.5× 麻竹筍」) and leaves the money
+conversion to the root-level band.
+
+This also exposes a pre-existing subtlety honestly: a seasonal rotation in the
+variety mix moves the blended average even when no single variety moved. The
+breakdown lets a shopper see through such a day.
+
+---
+
+## 6. Local development
 
 ### Frontend
 ```bash
@@ -266,10 +408,16 @@ VITE_API_BASE_URL=<your GAS Web App /exec URL>
 ```
 
 ```bash
-npm run build    # tsc typecheck + vite build
-npm test         # vitest — includes backendCode.test.ts, which loads
-                 # ../backend/Code.gs with stubbed GAS services
+npm run build          # tsc typecheck + vite build
+npm run test:run       # vitest once — includes backendCode.test.ts, which loads
+                       # ../backend/Code.gs with stubbed GAS services
+npm test               # vitest in watch mode
+npm run test:coverage  # v8 coverage report
 ```
+163 tests at ~97% statement / ~90% branch coverage. `vitest.config.ts` pins
+`TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
+time and would otherwise pass only on machines in that zone (a UTC CI runner
+caught exactly that).
 
 ### Backend (Google Apps Script)
 Code lives in `backend/Code.gs`, deployed with `clasp` (`.clasp.json` sets
@@ -281,29 +429,44 @@ Code lives in `backend/Code.gs`, deployed with `clasp` (`.clasp.json` sets
 2. Run `installDailyTrigger()` once in the editor — it installs the 4-hourly
    refresh trigger and warms the board so the first visitor never hits a cold
    crawl. Confirm with `?action=diag`: `triggers` must list `refreshBoardCache`.
-3. Put the Web App `/exec` URL in `frontend/.env` as `VITE_API_BASE_URL`.
+3. Hit `?action=backfill` once to seed the baseline history (the crawl takes a
+   few minutes), then confirm `diag.history.items` is non-zero. Until it is, the
+   board simply ships without baseline fields and the UI hides the badge and the
+   划算優先 sort.
+4. Put the Web App `/exec` URL in `frontend/.env` as `VITE_API_BASE_URL`.
 
 > The MOA API needs no key.
 
 ---
 
-## 6. Deployment
+## 7. Deployment
 
+- **CI** via `.github/workflows/ci.yml`: every pull request runs the suite plus
+  a typecheck/build. Pushes are gated inside the deploy workflows themselves
+  (both run the suite before publishing), so a red test blocks either surface
+  without duplicating the run.
 - **Frontend → GitHub Pages** via `.github/workflows/deploy-pages.yml`: pushing to
-  the default branch builds `frontend/` and publishes to Pages. In the repo,
-  set **Settings → Pages → Source: GitHub Actions**. Live at
+  the default branch runs the tests, builds `frontend/` and publishes to Pages. In
+  the repo, set **Settings → Pages → Source: GitHub Actions**. Live at
   `https://<user>.github.io/VeggieRadar/` (`vite.config.ts` `base` is `/VeggieRadar/`).
 - **Backend → Apps Script** via `.github/workflows/deploy-gas.yml` (optional):
   set repo secrets `GCP_SA_KEY` (or `CLASP_TOKEN`); otherwise deploy manually with
-  `clasp`. See `clasp_instructions.md`. The workflow pushes, **redeploys the pinned
-  `DEPLOYMENT_ID`** — without that step `/exec` keeps serving old code — and then
-  queues a board refresh via `?action=warm&force=1`.
+  `clasp`. See `clasp_instructions.md`. The workflow runs the backend regression
+  tests, pushes, **redeploys the pinned `DEPLOYMENT_ID`** — without that step
+  `/exec` keeps serving old code — and then queues a board refresh via
+  `?action=warm&force=1`.
+
+> Both deploy workflows need Node 22+: the suite uses `Promise.withResolvers`.
 
 ---
 
-## 7. Roadmap
+## 8. Roadmap
 
-- Longer historical trends and best-time-to-buy hints.
+- Per-variety baselines. Today's baseline is blended across varieties (blend vs.
+  blend is self-consistent, and the median resists mix rotation), while the
+  variety breakdown is same-day only.
+- A rules-based 「今日推薦」 strip on top of the board — deliberately deferred
+  until the 划算優先 sort proves the demand.
 - Recalibrate the retail markups periodically against the Taichung daily feed;
   the current constants were fitted on data through 2026-08.
 - Per-region retail bands (the calibration feeds are Taichung + Taipei only).
