@@ -148,21 +148,52 @@ describe('DetailDrawer', () => {
       ...withRetail,
       name: '竹筍',
       varieties: [
-        { name: '烏殼綠', catty_price: 25.9, share_percent: 41 },
-        { name: '麻竹筍', catty_price: 23.2, share_percent: 34 },
-        { name: '綠竹筍', catty_price: 57.1, share_percent: 24 },
+        { name: '烏殼綠', catty_price: 25.9, retail_price: 54, share_percent: 41 },
+        { name: '麻竹筍', catty_price: 23.2, retail_price: 51, share_percent: 34 },
+        { name: '綠竹筍', catty_price: 57.1, retail_price: 85, share_percent: 24 },
       ],
     };
 
-    it('lists per-variety wholesale prices with volume shares', () => {
+    it('leads each variety with the market estimate a shopper is actually quoted', () => {
       render(<DetailDrawer isOpen onClose={() => {}} item={bamboo} allProduceItems={mockAllProduceItems} />);
-      expect(screen.getByText('今日品種行情（批發・元/台斤）')).toBeInTheDocument();
+      expect(screen.getByText('今日品種行情（推估菜市場價・元/台斤）')).toBeInTheDocument();
       expect(screen.getByText('綠竹筍')).toBeInTheDocument();
-      expect(screen.getByText('57.1')).toBeInTheDocument();
-      expect(screen.getByText('量 24%')).toBeInTheDocument();
-      // Volume order, not price order: the first row is the market mainstream.
-      const rows = screen.getAllByText(/^量 \d+%$/).map((el) => el.textContent);
-      expect(rows).toEqual(['量 41%', '量 34%', '量 24%']);
+      expect(screen.getByText('約 85')).toBeInTheDocument();
+      // Wholesale stays as the measured support, exactly like the card.
+      expect(screen.getByText('批發 57.1・量 24%')).toBeInTheDocument();
+    });
+
+    it('marks the mainstream variety and keeps volume order', () => {
+      render(<DetailDrawer isOpen onClose={() => {}} item={bamboo} allProduceItems={mockAllProduceItems} />);
+      expect(screen.getByText('主流')).toBeInTheDocument();
+      const shares = screen.getAllByText(/批發 [\d.]+・量 \d+%/).map((el) => el.textContent);
+      expect(shares).toEqual(['批發 25.9・量 41%', '批發 23.2・量 34%', '批發 57.1・量 24%']);
+    });
+
+    it('states the relationship as approximate and over ALL varieties', () => {
+      render(<DetailDrawer isOpen onClose={() => {}} item={bamboo} allProduceItems={mockAllProduceItems} />);
+      // "約等於" and "全部品種", not an exact identity over the listed rows:
+      // each row and share is rounded independently, and rows can omit volume.
+      expect(screen.getByText(/約等於全部品種依成交量加權的平均/)).toBeInTheDocument();
+    });
+
+    it('inherits the root-level markup uncertainty instead of implying its own', () => {
+      render(<DetailDrawer isOpen onClose={() => {}} item={bamboo} allProduceItems={mockAllProduceItems} />);
+      expect(screen.getByText(/沿用同一套「根作物」加成，誤差與上方區間相同/)).toBeInTheDocument();
+    });
+
+    it('falls back to wholesale-only rows for a board cached before retail per variety', () => {
+      const legacy: ProduceItem = {
+        ...withRetail,
+        varieties: [
+          { name: '甲', catty_price: 20, share_percent: 55 },
+          { name: '乙', catty_price: 30, share_percent: 40 },
+        ],
+      };
+      render(<DetailDrawer isOpen onClose={() => {}} item={legacy} allProduceItems={mockAllProduceItems} />);
+      expect(screen.getByText('批發・量 55%')).toBeInTheDocument();
+      // With no estimate to lead with, the measured wholesale takes the slot.
+      expect(screen.getByText('20.0')).toBeInTheDocument();
     });
 
     it('renders nothing for single-variety items — old boards stay untouched', () => {
@@ -176,22 +207,36 @@ describe('DetailDrawer', () => {
       );
       expect(screen.queryByText(/今日品種行情/)).not.toBeInTheDocument();
     });
-    it('discloses the folded remainder when shown rows cover ≤90% of volume', () => {
+
+    it('discloses any omitted volume, however small', () => {
       const sparse: ProduceItem = {
         ...withRetail,
         varieties: [
-          { name: '甲', catty_price: 20, share_percent: 40 },
-          { name: '乙', catty_price: 30, share_percent: 30 },
+          { name: '甲', catty_price: 20, retail_price: 45, share_percent: 40 },
+          { name: '乙', catty_price: 30, retail_price: 58, share_percent: 30 },
         ],
       };
       render(<DetailDrawer isOpen onClose={() => {}} item={sparse} allProduceItems={mockAllProduceItems} />);
-      expect(screen.getByText('其餘品種合計約佔 30%')).toBeInTheDocument();
+      expect(screen.getByText(/未列出的品種合計約佔 30%/)).toBeInTheDocument();
     });
 
-    it('omits the remainder line when the rows essentially cover the volume', () => {
+    it('discloses even a 1% remainder, since the rows claim to average the whole', () => {
+      // 41 + 34 + 24 = 99%. A 「大致完整」 threshold used to hide this, which
+      // let the weighted-average sentence describe rows that omitted volume.
       render(<DetailDrawer isOpen onClose={() => {}} item={bamboo} allProduceItems={mockAllProduceItems} />);
-      // 41 + 34 + 24 = 99% — no remainder worth disclosing.
-      expect(screen.queryByText(/其餘品種/)).not.toBeInTheDocument();
+      expect(screen.getByText(/未列出的品種合計約佔 1%/)).toBeInTheDocument();
+    });
+
+    it('omits the remainder only when the rows truly cover everything', () => {
+      const complete: ProduceItem = {
+        ...withRetail,
+        varieties: [
+          { name: '甲', catty_price: 20, retail_price: 45, share_percent: 60 },
+          { name: '乙', catty_price: 30, retail_price: 58, share_percent: 40 },
+        ],
+      };
+      render(<DetailDrawer isOpen onClose={() => {}} item={complete} allProduceItems={mockAllProduceItems} />);
+      expect(screen.queryByText(/未列出的品種/)).not.toBeInTheDocument();
     });
     it('toggles the watchlist from the drawer star', () => {
       const onToggleWatch = vi.fn();

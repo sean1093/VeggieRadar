@@ -249,8 +249,8 @@ GET {WEB_APP_URL}/exec
       "baseline_price": 16.3,
       "vs_baseline_percent": -18.5,
       "varieties": [
-        { "name": "改良種", "catty_price": 12, "share_percent": 62 },
-        { "name": "初秋", "catty_price": 18.9, "share_percent": 19 }
+        { "name": "改良種", "catty_price": 12, "retail_price": 41, "share_percent": 62 },
+        { "name": "初秋", "catty_price": 18.9, "retail_price": 48, "share_percent": 19 }
       ],
       "trade_volume": 570700,
       "unit": "公斤",
@@ -261,7 +261,8 @@ GET {WEB_APP_URL}/exec
 }
 ```
 `avg_price` is `元/公斤`. `catty_price`, the three `retail_*` fields,
-`baseline_price` and `varieties[].catty_price` are `元/台斤`.
+`baseline_price` and both `varieties[].catty_price` / `varieties[].retail_price`
+are `元/台斤`.
 `retail_estimated` is always `true` — see §4.
 
 **Every derived field is optional and clients must treat it as such**: an older
@@ -428,13 +429,41 @@ The drawer decomposes it, published only when a breakdown adds something:
 **≥2 varieties, each holding ≥10% of the item's traded volume** and clearing the
 absolute volume floor, volume-sorted (so the market mainstream reads first) and
 capped at 4 rows; unlabelled rows group as 一般. Shares are computed against the
-item's *total* volume, so folded-away varieties leave an honest gap — and when
-the shown rows cover ≤90%, the drawer states how much the remainder holds.
+item's *total* volume, so folded-away varieties leave an honest gap — and the
+drawer discloses that remainder whenever it is nonzero, not merely when it is
+large. A "roughly complete" threshold used to hide gaps of 1–9%, which let the
+weighted-average sentence below describe rows that quietly omitted volume.
 
-Wholesale basis only. The retail markups (§4) are calibrated per root crop;
-estimating a band per variety would stack an estimate on an estimate, so the
-drawer gives the relative truth (「綠竹筍 is 2.5× 麻竹筍」) and leaves the money
-conversion to the root-level band.
+Each row carries **both** bases, exactly like the card: the estimated market
+price leads and the measured wholesale price supports it. Publishing wholesale
+alone made the section unusable — a shopper is quoted retail, so a
+wholesale-only row cannot be compared with anything at the stall, and it
+silently disagreed with the card's retail headline.
+
+Applying the root markup to a variety works precisely *because* the markup is
+additive and constant per crop:
+
+```
+retail_variety = wholesale_variety + markup(root)
+retail_blend   = wholesale_blend   + markup(root) = Σ(share × retail_variety)
+```
+
+The markup's error is identical for both, while the variety row uses a more
+precise wholesale input — so for the variety in front of the shopper it is
+*more* accurate than the headline. The identity also makes the card's headline
+the volume-weighted average of the rows, which `mockBoard.test.ts` holds the
+bundled demo to. Verified in the UI: a 竹筍 card reading 約 61 against rows of
+54 / 51 / 85 at shares 41 / 34 / 25 — a weighted average of 60.7.
+
+Two limits are stated in the drawer rather than papered over:
+
+- **Approximate, not exact.** Each row price and each share is rounded
+  independently of the headline, so the drawer says 約等於, not 等於.
+- **Root-level uncertainty.** §4's markups are fitted on paired *root-crop*
+  observations. 綠竹筍 and 麻竹筍 may genuinely carry different stall margins;
+  nothing measures that. A variety row therefore inherits the root's error band
+  rather than earning its own, and the drawer says so — showing a single 約 N
+  per row without that sentence would claim precision the model lacks.
 
 This also exposes a pre-existing subtlety honestly: a seasonal rotation in the
 variety mix moves the blended average even when no single variety moved. The
