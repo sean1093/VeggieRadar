@@ -312,14 +312,15 @@ describe('retailBand', () => {
     expect(both).toEqual([]);
   });
 
-  it('only publishes a per-crop band that is tighter than the fallback it replaces', () => {
-    // A wider band would be less informative than the category default, which
-    // is the whole reason 竹筍, 蘆筍, 菠菜, 芹菜, 萵苣菜 and 李 are excluded.
+  it('only publishes a per-crop band strictly tighter than the fallback it replaces', () => {
+    // Equal width would be no more informative than the category default, so
+    // the rule is `<`, not `<=` — that is what excludes 豌豆 and 洋香瓜, whose
+    // fitted spread came out exactly as wide as their category band.
     for (const [root, band] of Object.entries(api.RETAIL_BAND_ROOT) as [string, number[]][]) {
       const def = api.BOARD_ITEMS.find((d: { official: string }) => d.official === root);
       expect(def, `${root} must be a board crop`).toBeDefined();
       const cat = api.RETAIL_MARKUP_CATEGORY[def.category];
-      expect(band[2] - band[0], `${root} band wider than ${def.category}`).toBeLessThanOrEqual(cat[2] - cat[0]);
+      expect(band[2] - band[0], `${root} band not tighter than ${def.category}`).toBeLessThan(cat[2] - cat[0]);
       expect(band[0]).toBeGreaterThan(0);
       expect(band[0]).toBeLessThan(band[1]);
       expect(band[1]).toBeLessThan(band[2]);

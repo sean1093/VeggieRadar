@@ -360,12 +360,12 @@ Three tiers, most specific first:
 | Tier | Table | Crops | Band |
 | --- | --- | --- | --- |
 | 1 | `RETAIL_MARKUP_ROOT` | 30 | fitted midpoint, band `× 0.75 … × 1.35` |
-| 2 | `RETAIL_BAND_ROOT` | 24 | fitted `[p10, median, p90]` of the crop's own markup distribution |
+| 2 | `RETAIL_BAND_ROOT` | 21 | fitted `[p10, median, p90]` of the crop's own markup distribution |
 | 3 | `RETAIL_MARKUP_CATEGORY` | the rest | one hand-tuned band per category |
 
 Everything is rounded outward to NT$5, because stalls price in round numbers and
 implying single-digit precision on an estimate would be dishonest. Board items
-on the coarse tier-3 fallback dropped from **72 of 104 to 47**.
+on the coarse tier-3 fallback dropped from **72 of 104 to 50**.
 
 ### Calibration and accuracy
 
@@ -382,30 +382,46 @@ found none: Kaohsiung, Tainan and New Taipei publish no retail produce series,
 and data.gov.tw's dataset search API is broken (405/404).
 
 **Tier 2 exists because the Taipei feed was under-used.** Only one of its 18
-monthly snapshots had ever been joined. Using all 18, plus the Taichung daily
-rows, produced paired observations for 64 crops — but simply extending tier 1's
-rule to them made things *worse*, which is why the tables differ:
+monthly snapshots had ever been joined. Using all 18 gives paired observations
+for 64 crops — but the obvious next step, extending tier 1's rule to them, made
+accuracy *worse*, which is why the two tables have different shapes.
 
-| Rule, on the crops tier 2 now covers | Band coverage | Median abs. error |
+Held-out accuracy on the crops tier 2 covers (most recent 20% of each crop's
+observations, fitted on the older 80% — 20 crops, 59 observations):
+
+| Rule | Band coverage | Median abs. error |
 | --- | --- | --- |
-| Category fallback (previous behaviour) | 77.1% | **18.8%** |
+| Category fallback (previous behaviour) | 79.7% | **17.3%** |
 | Per-crop midpoint with tier 1's `× 0.75 … × 1.35` band | 51.9% | 17.0% |
-| Per-crop `[p10, median, p90]` (**shipped**) | 74.3% | **7.6%** |
+| Per-crop `[p10, median, p90]` (**shipped**) | **81.4%** | **6.8%** |
 
-Evaluated on a time-based holdout — the most recent 20% of each crop's
-observations, fitted on the older 80%. The midpoint's error drops by 60%; band
-coverage is within noise of the fallback while the band itself is *narrower*, by
-construction: **a crop is only listed when its own band is tighter than the
-category band it replaces.** That rule excludes 竹筍, 蘆筍, 菠菜, 芹菜, 萵苣菜
-and 李, whose markup spread is genuinely huge — usually because one MOA root
-covers varieties that trade far apart (綠竹筍 vs 麻竹筍, §5). 雜柑 and 甜橙 are
-excluded for a mapping mismatch: the retail feeds list one specific citrus while
-the MOA root spans many, which yields a negative p10.
+The midpoint's error falls by 61% and coverage improves slightly, so the
+drawer's 「機率約八成」 stays true for these crops too. Three constraints decide
+what is listed, each of them the result of a measurement that contradicted the
+obvious guess:
 
-The **tier-1 numbers are deliberately untouched.** They were fitted on a window
-that overlaps this holdout, so any comparison flatters them — there is no
-evidence a refit would be better, and replacing working constants on a
-contaminated measurement would be a guess dressed as an improvement.
+1. **Quantiles, not a multiple of the midpoint.** Tier 1's fixed band applied
+   here *lost* coverage against the fallback it was meant to beat — the spread
+   is not proportional to the markup.
+2. **Taipei-derived crops only.** A crop with daily Taichung coverage has enough
+   observations for a tier-1-style fit and belongs in that pipeline. An earlier
+   cut mixed both sources and produced a flattering blended figure that hid a
+   coverage collapse on the Taichung side — 雜柑, 甜橙 and 海梨柑 are excluded
+   for this reason.
+3. **The band must be strictly tighter than the category band it replaces**,
+   or the per-crop number is less informative than the default. This excludes
+   竹筍, 蘆筍, 菠菜, 芹菜, 萵苣菜 and 李 — spread genuinely huge, usually because
+   one MOA root spans varieties trading far apart (綠竹筍 vs 麻竹筍, §5) — and
+   豌豆, 洋香瓜, whose fitted spread came out *exactly* as wide as their category.
+
+龍眼 and 枇杷 are absent for a duller reason: 5 observations each, below the 8
+this needs. Their seasons are too short.
+
+The **tier-1 numbers are deliberately untouched.** The pipeline reproduces them
+to a median of NT$2 — a useful check that the join, units and dates line up —
+but they were fitted on a window that overlaps this holdout, so any comparison
+flatters them. Replacing working constants on a contaminated measurement would
+be a guess dressed as an improvement.
 
 That residual error is why the UI shows a range rather than a single number, and
 why the drawer says 「非實際報價」. Both feeds are used *offline* to derive the
