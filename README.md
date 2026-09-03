@@ -173,11 +173,25 @@ emailed to the maintainer instead, each once per 24 h incident window:
 | **Silence** | Served board older than 12 h | A deleted or broken trigger produces *no* failures to count. Nothing is running to notice, so the serving path raises this one |
 
 A recovering refresh closes the incident with one 「已恢復正常」 mail, so an
-alert always has a matching all-clear. `sendAlert` / `clearAlert` swallow every
-error by design: alerting sits on both the refresh and the serving path, and a
-mail quota failure must never be able to take the board down with it. `diag`
-reports `alert.failure_streak` / `alert.incident_open` / `alert.last_sent` —
-never the address, since `diag` is public.
+alert always has a matching all-clear — and the mail is sent **before** the
+state is cleared, because clearing first would close the incident even when the
+send failed and strand the reader on a "still broken" impression.
+
+Every one of those decisions is a read-modify-write on shared state, so they
+all run inside one script-lock section (`withAlertLock`). Without it, Apps
+Script's 30 simultaneous executions could turn a single incident into 30 mails
+against a ~100/day quota. The lock uses `tryLock`, not `waitLock`: losing the
+race means another execution is already deciding, which is the desired outcome.
+History writes use `waitLock` instead — there a skipped turn would lose an
+observation.
+
+Alerting swallows every error by design: it sits on both the refresh and the
+serving path, and no mail-quota, properties or lock failure may take the board
+down with it. `diag` reports `alert.failure_streak` / `alert.incident_open` /
+`alert.last_sent` — never the address, since `diag` is public. The
+`?action=alerttest` limiter is a durable timestamp rather than a cache key,
+since cache eviction would otherwise re-open a public, unauthenticated endpoint
+immediately.
 
 `MailApp` needs the `script.send_mail` scope, now declared explicitly in
 `appsscript.json`. Changing scopes requires the deploying owner to re-consent,

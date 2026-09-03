@@ -32,9 +32,10 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
   const cache = new Map<string, string>();
   const triggers: { handler: string; kind: string }[] = [];
   const fetches: string[] = [];
-  const locks = { waits: 0, releases: 0 };
+  const locks = { waits: 0, tries: 0, releases: 0, contended: false };
   const mails: { to: string; subject: string; body: string }[] = [];
   let mailThrows = false;
+  let brokenPropKey: string | null = null;
 
   const respond = (url: string) => {
     fetches.push(url);
@@ -61,7 +62,10 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
     PropertiesService: {
       getScriptProperties: () => ({
         getProperty: (k: string) => props.get(k) ?? null,
-        setProperty: (k: string, v: string) => void props.set(k, v),
+        setProperty: (k: string, v: string) => {
+          if (k === brokenPropKey) throw new Error('properties service unavailable');
+          props.set(k, v);
+        },
         setProperties: (o: Record<string, string>) =>
           void Object.entries(o).forEach(([k, v]) => props.set(k, v)),
         deleteProperty: (k: string) => void props.delete(k),
@@ -71,6 +75,10 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
     LockService: {
       getScriptLock: () => ({
         waitLock: (_ms: number) => void (locks.waits += 1),
+        tryLock: (_ms: number) => {
+          locks.tries += 1;
+          return !locks.contended;
+        },
         releaseLock: () => void (locks.releases += 1),
       }),
     },
@@ -118,9 +126,9 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
     'applyBaselines', 'backfillHistory', 'handleBackfill', 'buildBoard',
     'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown', 'handleSearch',
-    'sendAlert', 'clearAlert', 'handleAlertTest', 'ALERT_EMAIL', 'ALERT_FAILURE_STREAK',
-    'ALERT_SILENCE_MS', 'ALERT_COOLDOWN_MS', 'REFRESH_INTERVAL_HOURS', 'installDailyTrigger',
-    'refreshBoardCache',
+    'sendAlert', 'recordRefreshOutcome', 'withAlertLock', 'handleAlertTest',
+    'ALERT_EMAIL', 'ALERT_FAILURE_STREAK', 'ALERT_SILENCE_MS', 'ALERT_COOLDOWN_MS',
+    'REFRESH_INTERVAL_HOURS', 'installDailyTrigger', 'refreshBoardCache',
   ];
   const factory = new Function(
     ...Object.keys(services),
@@ -130,6 +138,9 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
     api: factory(...Object.values(services)),
     logs, props, cache, triggers, fetches, locks, mails,
     breakMail: () => { mailThrows = true; },
+    fixMail: () => { mailThrows = false; },
+    breakProp: (key: string) => { brokenPropKey = key; },
+    contendLock: () => { locks.contended = true; },
   };
 }
 
@@ -1032,7 +1043,7 @@ describe('failure alerting', () => {
     for (let i = 0; i < api.ALERT_FAILURE_STREAK; i++) {
       expect(() => api.refreshBoardCache()).not.toThrow();
     }
-    expect(logs.some((l) => l.includes('sendAlert failed'))).toBe(true);
+    expect(logs.some((l) => l.includes('alert bookkeeping failed'))).toBe(true);
   });
 
   it('never lets a mail failure break board serving', () => {
@@ -1136,5 +1147,87 @@ describe('refresh cadence vs staleness threshold', () => {
   it('alerts on silence only well after self-heal has had its chance', () => {
     const { api } = loadBackend();
     expect(api.ALERT_SILENCE_MS).toBeGreaterThan(api.BOARD_MAX_AGE_MS);
+  });
+});
+/**
+ * Concurrency and failure regressions from review. Every alert decision is a
+ * read-modify-write on shared state, and Apps Script allows 30 simultaneous
+ * executions against a ~100 mail/day quota — so "one incident, one mail" has
+ * to survive a burst, and no alerting failure may reach the board.
+ */
+describe('alerting under contention and failure', () => {
+  const goodRows = { 甘藍: [row('甘藍-初秋', 20, 60000)] };
+
+  it('takes and releases the lock for every decision', () => {
+    const { api, locks } = loadBackend();
+    api.refreshBoardCache();
+    expect(locks.tries).toBe(1);
+    expect(locks.releases).toBeGreaterThanOrEqual(1);
+  });
+
+  it('skips the decision entirely when another execution owns the lock', () => {
+    const { api, contendLock, mails, props } = loadBackend();
+    contendLock();
+    for (let i = 0; i < api.ALERT_FAILURE_STREAK + 2; i++) {
+      expect(() => api.refreshBoardCache()).not.toThrow();
+    }
+    expect(mails).toHaveLength(0);
+    // Nothing was written either, so an uncontended run still counts cleanly.
+    expect(props.has('veggie_alert_streak')).toBe(false);
+  });
+
+  it('keeps the silence alert to one mail across a burst of visitors', () => {
+    const { api, mails } = loadBackend();
+    api.storeBoard({
+      type: 'board', date: '2026-08-26', roc_date: '115.08.26', count: 1,
+      items: [{ code: 'C1', name: '高麗菜' }],
+      generated_at: new Date(Date.now() - api.ALERT_SILENCE_MS - 60_000).toISOString(),
+    });
+    for (let i = 0; i < 30; i++) api.readBoard();
+    expect(mails).toHaveLength(1);
+  });
+
+  it('leaves the incident open when the recovery mail fails, and retries later', () => {
+    const { api, props, mails, breakMail, fixMail } = loadBackend(goodRows);
+    props.set('veggie_alert_active', '1');
+    props.set('veggie_alert_sent_at', new Date().toISOString());
+
+    breakMail();
+    api.refreshBoardCache();
+    expect(mails).toHaveLength(0);
+    // Clearing state before a successful send would strand the reader on a
+    // stale "still broken" impression forever.
+    expect(props.get('veggie_alert_active')).toBe('1');
+
+    fixMail();
+    api.refreshBoardCache();
+    expect(mails.map((m) => m.subject)).toEqual(['[VeggieRadar] 已恢復正常']);
+    expect(props.has('veggie_alert_active')).toBe(false);
+  });
+
+  it('never lets alert bookkeeping failure break a healthy refresh', () => {
+    const { api, breakProp, logs } = loadBackend(goodRows);
+    breakProp('veggie_alert_streak');
+    const board = api.refreshBoardCache();
+    expect(board.count).toBeGreaterThan(0); // the board still shipped
+    expect(logs.some((l) => l.includes('alert bookkeeping failed'))).toBe(true);
+  });
+
+  it('keeps the probe limiter durable across cache eviction', () => {
+    const { api, cache, mails } = loadBackend();
+    expect(api.handleAlertTest().sent).toBe(true);
+    cache.clear(); // CacheService entries can vanish at any time
+    const second = api.handleAlertTest();
+    expect(second.sent).toBe(false);
+    expect(second.message).toContain('一小時內');
+    expect(mails).toHaveLength(1);
+  });
+
+  it('reports busy rather than sending when the probe loses the lock', () => {
+    const { api, contendLock, mails } = loadBackend();
+    contendLock();
+    const res = api.handleAlertTest();
+    expect(res.sent).toBe(false);
+    expect(mails).toHaveLength(0);
   });
 });
