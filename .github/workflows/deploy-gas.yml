@@ -36,7 +36,7 @@ jobs:
       - name: Install clasp
         run: npm install -g @google/clasp
       - name: Run backend regression tests
-        # backendCode.test.ts evaluates backend/Code.gs with stubbed GAS
+        # backendCode.test.ts evaluates every backend/*.gs with stubbed GAS
         # services; a red suite must block the clasp push below.
         working-directory: frontend
         run: |

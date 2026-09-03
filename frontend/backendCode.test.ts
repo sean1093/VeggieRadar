@@ -1,5 +1,5 @@
 /**
- * Regression tests for backend/Code.gs.
+ * Regression tests for the Apps Script backend (`backend/*.gs`).
  *
  * `frontend/` owns the only test runner in the repo, so the Apps Script source
  * is loaded here and evaluated with stubbed GAS services. These lock down the
@@ -11,7 +11,7 @@
  *     `CropName: "休市"` rows with zero price/quantity.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 type Row = {
@@ -23,9 +23,18 @@ type Row = {
   TransDate?: string;
 };
 
-const SOURCE = readFileSync(resolve(__dirname, '../backend/Code.gs'), 'utf8');
+// Apps Script concatenates every .gs file into ONE global scope, so the tests
+// compose them the same way, in the order `.clasp.json` pins for pushes.
+// Reading the manifest instead of hardcoding a list means a new backend file is
+// covered automatically rather than silently untested.
+const BACKEND_DIR = resolve(__dirname, '../backend');
+const PUSH_ORDER: string[] = JSON.parse(
+  readFileSync(resolve(__dirname, '../.clasp.json'), 'utf8'),
+).filePushOrder;
+const GS_FILES = readdirSync(BACKEND_DIR).filter((f) => f.endsWith('.gs'));
+const SOURCE = PUSH_ORDER.map((p) => readFileSync(resolve(__dirname, '..', p), 'utf8')).join('\n');
 
-/** Loads Code.gs with stubbed GAS globals. `responses` maps URL → rows. */
+/** Loads the backend with stubbed GAS globals. `responses` maps URL → rows. */
 function loadBackend(responses: Record<string, Row[]> = {}) {
   const logs: string[] = [];
   const props = new Map<string, string>();
@@ -1296,5 +1305,25 @@ describe('alerting under contention and failure', () => {
     expect(res.message).toContain('另一個執行');
     expect(res.error).toBeUndefined(); // contention is not a channel failure
     expect(mails).toHaveLength(0);
+  });
+});
+/**
+ * The backend is split across several .gs files that Apps Script merges into one
+ * global scope. `filePushOrder` is the only place that ordering is written down,
+ * and it is also what these tests read to compose the source — so a file missing
+ * from it would be pushed in arbitrary order AND silently untested.
+ */
+describe('backend file layout', () => {
+  it('pins every .gs file in filePushOrder', () => {
+    const pinned = PUSH_ORDER.map((p) => p.replace(/^backend\//, '')).sort();
+    expect(pinned).toEqual([...GS_FILES].sort());
+  });
+
+  it('keeps every declaration reachable from one merged scope', () => {
+    // The split must be a pure move: the same globals, exactly once each.
+    const declarations = [...SOURCE.matchAll(/^(?:function (\w+)|var (\w+))/gm)].map((m) => m[1] ?? m[2]);
+    expect(new Set(declarations).size).toBe(declarations.length);
+    expect(declarations).toContain('doGet');
+    expect(declarations).toContain('BOARD_ITEMS');
   });
 });
