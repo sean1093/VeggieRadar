@@ -117,6 +117,11 @@ MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ Frontend (G
   an over-quota Apps Script *queues* requests rather than failing fast, and a
   queued request would otherwise hold the loading skeleton for a minute. With
   `VITE_API_BASE_URL` unset it uses a bundled sample board and runs fully offline.
+  **recharts is code-split**: it was roughly half the initial JS while serving
+  one element inside the detail drawer, so the board — which most visits never
+  leave — no longer pays for it (initial JS 560 → 274 kB, gzip 174 → 88 kB).
+  The drawer warms the chunk on open, in parallel with the trend request, so
+  the split costs no perceived latency.
 
 ### Two MOA quirks the backend has to defend against
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -6,10 +6,17 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import ProduceTrendChart from '../ProduceTrendChart/ProduceTrendChart';
 import type { ProduceItem } from '../../types/produce';
 import { fetchProduceTrend } from '../../services/api';
 import { marketPrice } from '../../lib/utils/market-price';
+
+// recharts is ~40% of the bundle and is used by exactly one element inside
+// this drawer, so it must not sit in the initial download for a board-first
+// app that most visits never open a drawer on. `loadChart` is shared with the
+// open effect below, which warms the chunk while the trend request is in
+// flight — so the split costs no perceived latency.
+const loadChart = () => import('../ProduceTrendChart/ProduceTrendChart');
+const ProduceTrendChart = lazy(loadChart);
 
 interface DetailDrawerProps {
   isOpen: boolean;
@@ -29,6 +36,7 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
       setTrendData([]);
       return;
     }
+    void loadChart(); // overlap the chunk download with the ~1.3 s trend fetch
     setTrendLoading(true);
     fetchProduceTrend(item.official_name, 7)
       .then(setTrendData)
@@ -157,7 +165,11 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
             {trendLoading ? (
               <div className="py-6 text-center text-sm text-stone">載入中…</div>
             ) : trendData.length ? (
-              <ProduceTrendChart trend={trendData} />
+              // Same placeholder as the fetch state, so a cold chunk is
+              // indistinguishable from a slow trend request.
+              <Suspense fallback={<div className="py-6 text-center text-sm text-stone">載入中…</div>}>
+                <ProduceTrendChart trend={trendData} />
+              </Suspense>
             ) : (
               <div className="py-6 text-center text-sm text-stone">暫無趨勢資料</div>
             )}
