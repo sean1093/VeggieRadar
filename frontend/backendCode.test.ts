@@ -843,8 +843,10 @@ describe('buildBoard — baseline join', () => {
 describe('varietyBreakdown — per-variety drawer summary', () => {
   const vrow = (CropName: string, Avg_Price: number, Trans_Quantity: number, MarketName = '台北一'): Row =>
     ({ CropName, Avg_Price, Trans_Quantity, MarketName, CropCode: 'V1' });
+  const bamboo = { name: '竹筍', official: '竹筍', category: '根莖類' };
+  const cabbage = { name: '高麗菜', official: '甘藍', category: '葉菜類' };
 
-  it('publishes qualified varieties by volume with catty prices and honest shares', () => {
+  it('publishes qualified varieties by volume with both bases and honest shares', () => {
     const { api } = loadBackend();
     const rows = [
       vrow('竹筍-綠竹筍', 95.2, 9000),
@@ -852,15 +854,41 @@ describe('varietyBreakdown — per-variety drawer summary', () => {
       vrow('竹筍-麻竹筍', 38.7, 0), // invalid row must not distort the group
       vrow('竹筍-烏殼綠', 43.2, 15000),
     ];
-    const out = api.varietyBreakdown(rows, 37000);
+    const out = api.varietyBreakdown(bamboo, rows, 37000);
     expect(out.map((v: { name: string }) => v.name)).toEqual(['烏殼綠', '麻竹筍', '綠竹筍']);
-    expect(out[0]).toEqual({ name: '烏殼綠', catty_price: 25.9, share_percent: 41 });
+    expect(out[0].catty_price).toBe(25.9);
+    expect(out[0].share_percent).toBe(41);
     expect(out[2].catty_price).toBe(57.1); // 95.2 × 0.6
+  });
+
+  it('estimates each variety with the same markup the card uses', () => {
+    const { api } = loadBackend();
+    const rows = [vrow('竹筍-綠竹筍', 95.2, 9000), vrow('竹筍-麻竹筍', 38.7, 13000)];
+    const out = api.varietyBreakdown(bamboo, rows, 22000);
+
+    // A wholesale-only row cannot be compared with a stall quote, so each row
+    // carries the retail estimate too — same table, same rounding as the card.
+    for (const v of out) {
+      expect(v.retail_price).toBe(api.retailBand(v.catty_price, bamboo.official, bamboo.category).mid);
+      expect(v.retail_price).toBeGreaterThan(v.catty_price);
+    }
+  });
+
+  it("keeps the card's headline the volume-weighted average of the rows", () => {
+    const { api } = loadBackend();
+    // The markup is additive and constant per crop, so blending wholesale then
+    // adding it must equal blending the per-variety retail estimates. That
+    // identity is what makes the drawer's explanation true.
+    const rows = [vrow('甘藍-改良種', 20, 60000), vrow('甘藍-初秋', 31.5, 20000)];
+    const card = api.aggregateGroup(cabbage, rows, []);
+    const weighted =
+      (card.varieties[0].retail_price * 60000 + card.varieties[1].retail_price * 20000) / 80000;
+    expect(Math.abs(card.retail_price - weighted)).toBeLessThanOrEqual(1); // rounding only
   });
 
   it('returns null for a single variety — the blended number already tells the story', () => {
     const { api } = loadBackend();
-    expect(api.varietyBreakdown([vrow('甘藍-初秋', 20, 5000)], 5000)).toBeNull();
+    expect(api.varietyBreakdown(cabbage, [vrow('甘藍-初秋', 20, 5000)], 5000)).toBeNull();
   });
 
   it('folds away sub-10% varieties, and nulls out when folding leaves fewer than two', () => {
@@ -869,14 +897,14 @@ describe('varietyBreakdown — per-variety drawer summary', () => {
       vrow('甘藍-初秋', 20, 9500),
       vrow('甘藍-紫色', 90, 400), // 4% share — noise for a shopper
     ];
-    expect(api.varietyBreakdown(rows, 9900)).toBeNull();
+    expect(api.varietyBreakdown(cabbage, rows, 9900)).toBeNull();
 
     const three = [
       vrow('甘藍-初秋', 20, 6000),
       vrow('甘藍-改良種', 15, 3500),
       vrow('甘藍-紫色', 90, 500), // 5% — folded, others remain
     ];
-    const out = api.varietyBreakdown(three, 10000);
+    const out = api.varietyBreakdown(cabbage, three, 10000);
     expect(out.map((v: { name: string }) => v.name)).toEqual(['初秋', '改良種']);
     expect(out[0].share_percent + out[1].share_percent).toBeLessThan(100); // folded slice stays visible as a gap
   });
@@ -887,13 +915,13 @@ describe('varietyBreakdown — per-variety drawer summary', () => {
       vrow('過貓-一號', 100, 150), // 50% share but only 150 kg traded
       vrow('過貓-二號', 80, 150),
     ];
-    expect(api.varietyBreakdown(rows, 300)).toBeNull();
+    expect(api.varietyBreakdown({ name: '過貓', official: '蕨菜', category: '葉菜類' }, rows, 300)).toBeNull();
   });
 
   it('caps the list at four varieties by volume', () => {
     const { api } = loadBackend();
     const rows = ['甲', '乙', '丙', '丁', '戊'].map((v, i) => vrow(`葡萄-${v}`, 50, 3000 + i * 100));
-    const out = api.varietyBreakdown(rows, 15500 + 1000);
+    const out = api.varietyBreakdown({ name: '葡萄', official: '葡萄', category: '水果' }, rows, 15500 + 1000);
     expect(out).toHaveLength(4);
     expect(out[0].name).toBe('戊'); // largest volume first
     expect(out.map((v: { name: string }) => v.name)).not.toContain('甲'); // smallest folded by the cap
@@ -902,20 +930,19 @@ describe('varietyBreakdown — per-variety drawer summary', () => {
   it('labels unmarked rows 一般', () => {
     const { api } = loadBackend();
     const rows = [vrow('香蕉', 30, 5000), vrow('香蕉-芭蕉', 45, 3000)];
-    const out = api.varietyBreakdown(rows, 8000);
+    const out = api.varietyBreakdown({ name: '香蕉', official: '香蕉', category: '水果' }, rows, 8000);
     expect(out.map((v: { name: string }) => v.name)).toEqual(['一般', '芭蕉']);
   });
 
   it('rides on aggregateGroup only when a real breakdown exists', () => {
     const { api } = loadBackend();
-    const def = { name: '竹筍', official: '竹筍', category: '根莖類' };
-    const multi = api.aggregateGroup(def, [
+    const multi = api.aggregateGroup(bamboo, [
       vrow('竹筍-綠竹筍', 95.2, 9000),
       vrow('竹筍-麻竹筍', 38.7, 13000),
     ], []);
     expect(multi.varieties).toHaveLength(2);
 
-    const single = api.aggregateGroup(def, [vrow('竹筍-麻竹筍', 38.7, 13000)], []);
+    const single = api.aggregateGroup(bamboo, [vrow('竹筍-麻竹筍', 38.7, 13000)], []);
     expect(single.varieties).toBeUndefined();
   });
 });

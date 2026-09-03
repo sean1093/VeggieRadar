@@ -1459,18 +1459,36 @@ function aggregateGroup(def, todayRows, prevRows) {
 
   // A blended average can sit far from every stall when varieties diverge
   // (綠竹筍 trades at 2.5× 麻竹筍). The drawer decomposes it when that happens.
-  var varieties = varietyBreakdown(todayRows, today.volume);
+  var varieties = varietyBreakdown(def, todayRows, today.volume);
   if (varieties) card.varieties = varieties;
   return card;
 }
 
 /**
- * Per-variety wholesale summary for one board item, or null when a breakdown
- * would add nothing (fewer than two meaningful varieties). Shares are
- * computed against the item's TOTAL traded volume, so they stay honest even
- * when folded-away small varieties leave the shown rows summing below 100%.
+ * Per-variety summary for one board item, or null when a breakdown would add
+ * nothing (fewer than two meaningful varieties). Shares are computed against
+ * the item's TOTAL traded volume, so they stay honest even when folded-away
+ * small varieties leave the shown rows summing below 100%.
+ *
+ * Each row carries BOTH bases, matching the card: the estimated market price
+ * leads and the measured wholesale price supports it. Publishing wholesale
+ * alone made the section unusable — a shopper is quoted retail, so a
+ * wholesale-only row cannot be compared with anything at the stall, and it
+ * silently disagreed with the card's retail headline.
+ *
+ * Applying the ROOT markup to a variety is sound precisely because the markup
+ * is ADDITIVE and constant per crop:
+ *
+ *   retail_variety = wholesale_variety + markup(root)
+ *   retail_blend   = wholesale_blend   + markup(root) = Σ(share × retail_variety)
+ *
+ * So the markup's error is identical for both, while the variety row uses a
+ * more precise wholesale input — making it MORE accurate for the variety in
+ * front of the shopper than the headline is. It also makes the card's
+ * headline exactly the volume-weighted average of these rows, which is what
+ * the drawer now says out loud.
  */
-function varietyBreakdown(rows, totalVolume) {
+function varietyBreakdown(def, rows, totalVolume) {
   if (!(totalVolume > 0)) return null;
   var groups = {};
   for (var i = 0; i < rows.length; i++) {
@@ -1486,9 +1504,13 @@ function varietyBreakdown(rows, totalVolume) {
     if (g.volume < MIN_TRADE_VOLUME) continue;
     var share = g.volume / totalVolume;
     if (share < VARIETY_MIN_SHARE) continue;
+    var catty = g.avg * CATTY_PER_KG;
     qualified.push({
       name: names[j],
-      catty_price: round1(g.avg * CATTY_PER_KG),
+      catty_price: round1(catty),
+      // Same calibrated table and same rounding as the card's headline, so the
+      // two surfaces cannot drift apart.
+      retail_price: retailBand(catty, def.official, def.category).mid,
       share_percent: Math.round(share * 100),
       volume: g.volume
     });
@@ -1497,7 +1519,12 @@ function varietyBreakdown(rows, totalVolume) {
 
   qualified.sort(function (a, b) { return b.volume - a.volume; });
   return qualified.slice(0, VARIETY_MAX_COUNT).map(function (v) {
-    return { name: v.name, catty_price: v.catty_price, share_percent: v.share_percent };
+    return {
+      name: v.name,
+      catty_price: v.catty_price,
+      retail_price: v.retail_price,
+      share_percent: v.share_percent
+    };
   });
 }
 

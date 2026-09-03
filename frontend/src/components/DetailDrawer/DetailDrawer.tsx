@@ -172,25 +172,46 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
               </p>
             </div>
           )}
-          {/* Per-variety wholesale breakdown — present only when the blended
-              average hides meaningful spread (e.g. 綠竹筍 at 2.5× 麻竹筍). */}
+          {/* Per-variety breakdown — present only when the blended average
+              hides meaningful spread (e.g. 綠竹筍 at 2.5× 麻竹筍). Rows lead
+              with the estimated market price, exactly like the card: a shopper
+              is quoted retail, so a wholesale-only row could not be compared
+              with anything at the stall. */}
           {varieties.length > 0 && (
             <div>
-              <p className="mb-2 text-xs text-stone">今日品種行情（批發・元/台斤）</p>
+              <p className="mb-2 text-xs text-stone">今日品種行情（推估菜市場價・元/台斤）</p>
               <div className="space-y-1">
-                {varieties.map((v) => (
+                {varieties.map((v, i) => (
                   <div key={v.name} className="flex items-baseline justify-between gap-3 text-sm">
-                    <span className="min-w-0 break-words text-ink">{v.name}</span>
-                    <span className="shrink-0 whitespace-nowrap tabular-nums text-ink">
-                      {v.catty_price.toFixed(1)}
-                      <span className="ml-2 text-xs text-stone">量 {v.share_percent}%</span>
+                    <span className="min-w-0 break-words text-ink">
+                      {v.name}
+                      {/* Rows are volume-sorted, so the first is what a stall
+                          most likely has today. */}
+                      {i === 0 && <span className="ml-1 text-xs text-stone">主流</span>}
+                    </span>
+                    <span className="shrink-0 whitespace-nowrap text-right">
+                      {v.retail_price != null ? (
+                        <>
+                          <span className="tabular-nums text-ink">約 {v.retail_price}</span>
+                          <span className="ml-2 text-xs text-stone tabular-nums">
+                            批發 {v.catty_price.toFixed(1)}・量 {v.share_percent}%
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="tabular-nums text-ink">{v.catty_price.toFixed(1)}</span>
+                          <span className="ml-2 text-xs text-stone">批發・量 {v.share_percent}%</span>
+                        </>
+                      )}
                     </span>
                   </div>
                 ))}
               </div>
-              {shownShare <= 90 && (
-                <p className="mt-1 text-xs text-stone">其餘品種合計約佔 {100 - shownShare}%</p>
-              )}
+              <p className="mt-2 text-xs leading-relaxed text-stone">
+                上方大字是這些品種依成交量加權的平均推估，所以買到的品種不同、價格就會落在這幾行之間；
+                批發為實測值。
+                {shownShare <= 90 && `其餘品種合計約佔 ${100 - shownShare}%。`}
+              </p>
             </div>
           )}
 
