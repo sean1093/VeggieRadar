@@ -33,6 +33,8 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
   const triggers: { handler: string; kind: string }[] = [];
   const fetches: string[] = [];
   const locks = { waits: 0, releases: 0 };
+  const mails: { to: string; subject: string; body: string }[] = [];
+  let mailThrows = false;
 
   const respond = (url: string) => {
     fetches.push(url);
@@ -72,6 +74,12 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
         releaseLock: () => void (locks.releases += 1),
       }),
     },
+    MailApp: {
+      sendEmail: (to: string, subject: string, body: string) => {
+        if (mailThrows) throw new Error('mail quota exceeded');
+        mails.push({ to, subject, body });
+      },
+    },
     Logger: { log: (m: unknown) => void logs.push(String(m)) },
     Utilities: { sleep: () => {} },
     ContentService: {
@@ -110,12 +118,19 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
     'applyBaselines', 'backfillHistory', 'handleBackfill', 'buildBoard',
     'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown', 'handleSearch',
+    'sendAlert', 'clearAlert', 'handleAlertTest', 'ALERT_EMAIL', 'ALERT_FAILURE_STREAK',
+    'ALERT_SILENCE_MS', 'ALERT_COOLDOWN_MS', 'REFRESH_INTERVAL_HOURS', 'installDailyTrigger',
+    'refreshBoardCache',
   ];
   const factory = new Function(
     ...Object.keys(services),
     `${SOURCE}\nreturn { ${exported.join(', ')} };`,
   );
-  return { api: factory(...Object.values(services)), logs, props, cache, triggers, fetches, locks };
+  return {
+    api: factory(...Object.values(services)),
+    logs, props, cache, triggers, fetches, locks, mails,
+    breakMail: () => { mailThrows = true; },
+  };
 }
 
 const row = (CropName: string, Avg_Price: number, Trans_Quantity: number, MarketName = '台北一'): Row =>
@@ -952,5 +967,174 @@ describe('handleSearch', () => {
     const { api, fetches } = loadBackend();
     expect(api.handleSearch({}).error).toBe('請輸入查詢關鍵字');
     expect(fetches).toHaveLength(0);
+  });
+});
+/**
+ * Alerting is the only part of the pipeline whose failure is invisible: if the
+ * mail never arrives, nobody learns the app is stale. These lock down when it
+ * fires, when it stays quiet, and — most importantly — that it can never take
+ * the board down with it.
+ */
+describe('failure alerting', () => {
+  const goodRows = { 甘藍: [row('甘藍-初秋', 20, 60000)] };
+
+  it('stays quiet while a single refresh failure self-heals', () => {
+    const { api, mails, props } = loadBackend(); // no MOA rows → empty board
+    api.refreshBoardCache();
+    expect(props.get('veggie_alert_streak')).toBe('1');
+    expect(mails).toHaveLength(0);
+  });
+
+  it('emails once the failures become a streak', () => {
+    const { api, mails } = loadBackend();
+    for (let i = 0; i < api.ALERT_FAILURE_STREAK; i++) api.refreshBoardCache();
+
+    expect(mails).toHaveLength(1);
+    expect(mails[0].to).toBe(api.ALERT_EMAIL);
+    expect(mails[0].subject).toContain('連續 3 次更新失敗');
+    expect(mails[0].body).toContain('近期查無交易資料'); // the actual reason, not a generic message
+  });
+
+  it('rate-limits to one mail per cooldown window', () => {
+    const { api, mails } = loadBackend();
+    for (let i = 0; i < api.ALERT_FAILURE_STREAK + 4; i++) api.refreshBoardCache();
+    expect(mails).toHaveLength(1);
+  });
+
+  it('reports recovery once and resets the streak', () => {
+    const { api, mails, props } = loadBackend(goodRows);
+    // Force an open incident, then let a good refresh close it.
+    props.set('veggie_alert_active', '1');
+    props.set('veggie_alert_sent_at', new Date().toISOString());
+    props.set('veggie_alert_streak', '5');
+
+    api.refreshBoardCache();
+
+    expect(mails).toHaveLength(1);
+    expect(mails[0].subject).toContain('已恢復正常');
+    expect(props.get('veggie_alert_streak')).toBe('0');
+    expect(props.has('veggie_alert_active')).toBe(false);
+
+    // A second healthy refresh must not re-announce recovery.
+    api.refreshBoardCache();
+    expect(mails).toHaveLength(1);
+  });
+
+  it('says nothing on a healthy refresh with no incident open', () => {
+    const { api, mails } = loadBackend(goodRows);
+    api.refreshBoardCache();
+    expect(mails).toHaveLength(0);
+  });
+
+  it('never lets a mail failure break the refresh', () => {
+    const { api, breakMail, logs } = loadBackend();
+    breakMail();
+    for (let i = 0; i < api.ALERT_FAILURE_STREAK; i++) {
+      expect(() => api.refreshBoardCache()).not.toThrow();
+    }
+    expect(logs.some((l) => l.includes('sendAlert failed'))).toBe(true);
+  });
+
+  it('never lets a mail failure break board serving', () => {
+    const { api, breakMail } = loadBackend();
+    breakMail();
+    api.storeBoard({
+      type: 'board', date: '2026-08-26', roc_date: '115.08.26', count: 1,
+      items: [{ code: 'C1', name: '高麗菜' }],
+      generated_at: new Date(Date.now() - api.ALERT_SILENCE_MS - 60_000).toISOString(),
+    });
+    const board = api.readBoard();
+    expect(board.items).toHaveLength(1); // prices still served
+  });
+
+  describe('silence detection on the serving path', () => {
+    const boardAged = (ms: number) => ({
+      type: 'board', date: '2026-08-26', roc_date: '115.08.26', count: 1,
+      items: [{ code: 'C1', name: '高麗菜' }],
+      generated_at: new Date(Date.now() - ms).toISOString(),
+    });
+
+    it('emails when the board keeps ageing with no failures to count', () => {
+      const { api, mails } = loadBackend();
+      api.storeBoard(boardAged(api.ALERT_SILENCE_MS + 60_000));
+      api.readBoard();
+      expect(mails).toHaveLength(1);
+      expect(mails[0].subject).toContain('看板已停止更新');
+      expect(mails[0].body).toContain('installDailyTrigger'); // tells the reader how to fix it
+    });
+
+    it('stays quiet for a merely stale board that self-heal already covers', () => {
+      const { api, mails } = loadBackend();
+      api.storeBoard(boardAged(api.BOARD_MAX_AGE_MS + 60_000));
+      const board = api.readBoard();
+      expect(board.stale).toBe(true);
+      expect(board.refresh_queued).toBe(true);
+      expect(mails).toHaveLength(0); // a queued rebuild is not an incident
+    });
+
+    it('emails at most once per cooldown however many visitors arrive', () => {
+      const { api, mails } = loadBackend();
+      api.storeBoard(boardAged(api.ALERT_SILENCE_MS + 60_000));
+      api.readBoard();
+      api.readBoard();
+      api.readBoard();
+      expect(mails).toHaveLength(1);
+    });
+  });
+
+  it('exposes alert state through diag without leaking the address', () => {
+    const { api } = loadBackend();
+    api.refreshBoardCache();
+    const diag = api.handleDiag();
+    expect(diag.alert).toEqual({ failure_streak: 1, incident_open: false, last_sent: null });
+    expect(JSON.stringify(diag)).not.toContain(api.ALERT_EMAIL);
+  });
+
+  describe('?action=alerttest', () => {
+    it('sends one probe mail and then locks, leaving incident state untouched', () => {
+      const { api, mails, props } = loadBackend();
+      const first = api.handleAlertTest();
+      expect(first.sent).toBe(true);
+      expect(mails[0].subject).toContain('測試信');
+
+      const second = api.handleAlertTest();
+      expect(second.sent).toBe(false);
+      expect(mails).toHaveLength(1);
+      // A test must never look like, or suppress, a real incident.
+      expect(props.has('veggie_alert_active')).toBe(false);
+      expect(props.has('veggie_alert_sent_at')).toBe(false);
+    });
+
+    it('reports the mail failure instead of throwing', () => {
+      const { api, breakMail } = loadBackend();
+      breakMail();
+      expect(api.handleAlertTest().sent).toBe(false);
+    });
+  });
+});
+
+/**
+ * The staleness threshold answers "is the pipeline dead?", so it must sit
+ * above the refresh cadence plus a crawl. When both were 4 h, a healthy board
+ * reported itself stale in the minutes before every scheduled run.
+ */
+describe('refresh cadence vs staleness threshold', () => {
+  it('leaves at least an hour of headroom above the cadence', () => {
+    const { api } = loadBackend();
+    const cadenceMs = api.REFRESH_INTERVAL_HOURS * 60 * 60 * 1000;
+    expect(api.BOARD_MAX_AGE_MS).toBeGreaterThanOrEqual(cadenceMs + 60 * 60 * 1000);
+  });
+
+  it('installs the cron from the same constant the threshold is derived from', () => {
+    const { api, triggers } = loadBackend({ 甘藍: [row('甘藍-初秋', 20, 60000)] });
+    api.installDailyTrigger();
+    expect(triggers).toEqual([
+      { handler: 'refreshBoardCache', kind: `everyHours:${api.REFRESH_INTERVAL_HOURS}` },
+    ]);
+  });
+
+  it('alerts on silence only well after self-heal has had its chance', () => {
+    const { api } = loadBackend();
+    expect(api.ALERT_SILENCE_MS).toBeGreaterThan(api.BOARD_MAX_AGE_MS);
   });
 });

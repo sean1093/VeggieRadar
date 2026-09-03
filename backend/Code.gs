@@ -63,7 +63,7 @@ var TRADE_DATES_CACHE_KEY = 'veggie_trade_dates';
 var TRADE_DATES_TTL = 60 * 60;   // seconds; saves up to 16 probe fetches per search miss
 
 // Durable board storage. ScriptProperties caps a single value at 9 KB and the
-// board is ~25 KB, so it is written as numbered chunks.
+// board is ~34 KB, so it is written as numbered chunks.
 var BOARD_PROP_PREFIX = 'veggie_board_v2_chunk_';
 var BOARD_PROP_COUNT = 'veggie_board_v2_chunks';
 var PROP_CHUNK_SIZE = 8000;
@@ -72,13 +72,40 @@ var PROP_CHUNK_SIZE = 8000;
 // stays put over weekends, holidays and typhoon closures, when MOA publishes only
 // `休市` rows. `generated_at` is when we last crawled, which must keep moving; a
 // board that stops being regenerated is the actual failure mode.
-var BOARD_MAX_AGE_MS = 4 * 60 * 60 * 1000; // rebuild on demand past this age
+//
+// BOARD_MAX_AGE_MS must stay comfortably ABOVE the refresh cadence plus the
+// crawl duration. When the two were both 4 h, a perfectly healthy board spent
+// the minutes before every scheduled run reporting `stale: true` — which
+// queued a pointless rebuild and showed 「資料更新中」 to whoever loaded the
+// app in that window. The threshold answers "is the pipeline dead?", so it
+// only has to be tight enough to self-heal within one visit.
+var REFRESH_INTERVAL_HOURS = 4;                  // time-driven trigger cadence
+var BOARD_MAX_AGE_MS = 6 * 60 * 60 * 1000;       // > cadence + crawl; rebuild on demand past this
 var REFRESH_LOCK_KEY = 'veggie_refresh_queued';
 var REFRESH_LOCK_TTL = 15 * 60;            // seconds; one queued rebuild per window
 var REFRESH_ONCE_FN = 'refreshBoardCacheOnce';
 var REFRESH_CRON_FN = 'refreshBoardCache';
 var LAST_OK_PROP = 'veggie_last_refresh_ok';
 var LAST_FAIL_PROP = 'veggie_last_refresh_fail';
+
+// Failure alerting. A single failed refresh is routine (MOA throttles a batch
+// now and then) and self-heals, so alerting on one would train the recipient
+// to ignore the mail. Two distinct real failures deserve an email:
+//   - a STREAK of failed refreshes: the crawl runs but never yields a board.
+//   - SILENCE: the board keeps ageing with no refresh at all, which is what a
+//     deleted or broken trigger looks like. Nothing is running to notice it,
+//     so the serving path raises this one.
+// Both are rate-limited to one mail per incident window, and every mail path
+// is wrapped so alerting can never break serving or a refresh.
+var ALERT_EMAIL = 'sean1093@gmail.com';
+var ALERT_FAILURE_STREAK = 3;                      // consecutive failed refreshes ≈ half a day stale
+var ALERT_SILENCE_MS = 12 * 60 * 60 * 1000;        // board age that means nothing is running
+var ALERT_COOLDOWN_MS = 24 * 60 * 60 * 1000;       // one alert per incident window
+var ALERT_TEST_LOCK_KEY = 'veggie_alert_test';
+var ALERT_TEST_LOCK_TTL = 60 * 60;                 // seconds; bounds ?action=alerttest
+var ALERT_STREAK_PROP = 'veggie_alert_streak';
+var ALERT_SENT_PROP = 'veggie_alert_sent_at';
+var ALERT_ACTIVE_PROP = 'veggie_alert_active';
 // Per-item wholesale price history, appended by the 4-hourly refresh (zero
 // extra MOA traffic) and seeded once through `?action=backfill`. It powers
 // the "vs the usual price" baseline: the median of up to BASELINE_WINDOW
@@ -351,6 +378,8 @@ function doGet(e) {
       payload = handleWarm(params);
     } else if (action === 'backfill') {
       payload = handleBackfill(params);
+    } else if (action === 'alerttest') {
+      payload = handleAlertTest();
     } else if (action === 'diag') {
       payload = handleDiag();
     } else {
@@ -397,6 +426,21 @@ function readBoard() {
   board.age_ms = boardAgeMs(board);
   board.stale = board.age_ms === null || board.age_ms > BOARD_MAX_AGE_MS;
   if (board.stale) board.refresh_queued = scheduleRefresh();
+  // A dead trigger produces no failed refreshes to count — only a board that
+  // quietly keeps ageing. The serving path is the only thing still executing,
+  // so it is what raises that alarm. Cooldown-guarded inside `sendAlert`, and
+  // `sendAlert` never throws, so this cannot affect the response.
+  if (board.age_ms === null || board.age_ms > ALERT_SILENCE_MS) {
+    sendAlert(
+      '[VeggieRadar] 看板已停止更新',
+      '看板持續變舊，但沒有任何更新失敗記錄 —— 這是排程觸發器消失或壞掉的樣子。\n\n' +
+      '交易日：' + (board.roc_date || '（未知）') + '\n' +
+      '最後爬取：' + (board.generated_at || '（未知）') + '\n' +
+      '已過時間：' + (board.age_ms === null ? '未知' : Math.round(board.age_ms / 3600000) + ' 小時') + '\n\n' +
+      '診斷：' + diagUrl() + '\n' +
+      '修復：於 Apps Script 專案執行 installDailyTrigger()，並確認 diag 的 triggers 含 refreshBoardCache。\n',
+    );
+  }
   return board;
 }
 
@@ -538,11 +582,109 @@ function refreshBoardCache() {
     storeBoard(board);
     updateHistory(board);
     props.setProperty(LAST_OK_PROP, board.generated_at + ' ' + board.roc_date + ' ' + board.count + ' items');
+    props.setProperty(ALERT_STREAK_PROP, '0');
+    clearAlert(
+      '看板已重新建立。\n\n' +
+      '交易日：' + board.roc_date + '\n' +
+      '品項數：' + board.count + '\n' +
+      '完成於：' + board.generated_at + '\n',
+    );
   } else {
-    props.setProperty(LAST_FAIL_PROP, new Date().toISOString() + ' ' + (board.error || 'empty board'));
+    var reason = board.error || 'empty board';
+    props.setProperty(LAST_FAIL_PROP, new Date().toISOString() + ' ' + reason);
+    var streak = (parseInt(props.getProperty(ALERT_STREAK_PROP) || '0', 10) || 0) + 1;
+    props.setProperty(ALERT_STREAK_PROP, String(streak));
+    if (streak >= ALERT_FAILURE_STREAK) {
+      sendAlert(
+        '[VeggieRadar] 連續 ' + streak + ' 次更新失敗',
+        '看板更新連續失敗，使用者看到的行情正在變舊。\n\n' +
+        '連續失敗次數：' + streak + '\n' +
+        '最後一次失敗原因：' + reason + '\n' +
+        '最後一次成功：' + (props.getProperty(LAST_OK_PROP) || '（無記錄）') + '\n\n' +
+        '診斷：' + diagUrl() + '\n' +
+        '常見原因：MOA 連續節流、交易日 probe 失敗、Apps Script 配額用盡。\n',
+      );
+    }
   }
   Logger.log('Board refreshed: ' + (board.count || 0) + ' items for ' + (board.roc_date || 'n/a'));
   return board;
+}
+
+// --- Failure alerting ---
+
+/**
+ * Emails at most one alert per cooldown window and opens an incident.
+ * NEVER throws: alerting sits on both the refresh and the serving path, and a
+ * mail failure must not be able to take the board down with it.
+ * @returns {boolean} true when a mail was actually sent.
+ */
+function sendAlert(subject, body) {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var sentAt = Date.parse(props.getProperty(ALERT_SENT_PROP) || '');
+    if (!isNaN(sentAt) && Date.now() - sentAt < ALERT_COOLDOWN_MS) return false;
+    MailApp.sendEmail(ALERT_EMAIL, subject, body);
+    props.setProperty(ALERT_SENT_PROP, new Date().toISOString());
+    props.setProperty(ALERT_ACTIVE_PROP, '1');
+    return true;
+  } catch (err) {
+    Logger.log('sendAlert failed: ' + err);
+    return false;
+  }
+}
+
+/**
+ * Closes an open incident and reports the recovery once. Deliberately ignores
+ * the cooldown — the "it is fixed" mail is the closing bracket of an alert
+ * that was already sent, and staying silent would leave the recipient
+ * believing the app is still broken.
+ */
+function clearAlert(body) {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    if (props.getProperty(ALERT_ACTIVE_PROP) !== '1') return false;
+    props.deleteProperty(ALERT_ACTIVE_PROP);
+    props.deleteProperty(ALERT_SENT_PROP);
+    MailApp.sendEmail(ALERT_EMAIL, '[VeggieRadar] 已恢復正常', body + '\n診斷：' + diagUrl() + '\n');
+    return true;
+  } catch (err) {
+    Logger.log('clearAlert failed: ' + err);
+    return false;
+  }
+}
+
+/** Best-effort diag link for alert bodies; never throws. */
+function diagUrl() {
+  try {
+    return ScriptApp.getService().getUrl() + '?action=diag';
+  } catch (err) {
+    return '(Web App URL 不可用，請於 Apps Script 專案查看)';
+  }
+}
+
+/**
+ * `?action=alerttest` — proves the mail scope is actually authorised, which is
+ * the one thing that cannot be verified from the tests. Rate-limited, and
+ * deliberately does NOT touch incident state, so a test never masks or fakes a
+ * real alert.
+ */
+function handleAlertTest() {
+  var cache = CacheService.getScriptCache();
+  if (cache.get(ALERT_TEST_LOCK_KEY)) {
+    return { type: 'alerttest', sent: false, message: '測試信已於一小時內寄出' };
+  }
+  cache.put(ALERT_TEST_LOCK_KEY, '1', ALERT_TEST_LOCK_TTL);
+  try {
+    MailApp.sendEmail(
+      ALERT_EMAIL,
+      '[VeggieRadar] 測試信（非故障）',
+      '這是一封測試信，用來確認警報信管道可用。收到代表故障時你也會收到通知。\n\n診斷：' + diagUrl() + '\n',
+    );
+    return { type: 'alerttest', sent: true, message: '已寄出測試信' };
+  } catch (err) {
+    Logger.log('handleAlertTest failed: ' + err);
+    return { type: 'alerttest', sent: false, message: String(err && err.message || err) };
+  }
 }
 
 /**
@@ -617,6 +759,14 @@ function handleDiag() {
     last_refresh_ok: props[LAST_OK_PROP] || null,
     last_refresh_fail: props[LAST_FAIL_PROP] || null,
     history: historySummary(),
+    // Alert state, so a silent mailbox can be told apart from a silent
+    // pipeline. The recipient address is deliberately not exposed — diag is a
+    // public endpoint.
+    alert: {
+      failure_streak: parseInt(props[ALERT_STREAK_PROP] || '0', 10) || 0,
+      incident_open: props[ALERT_ACTIVE_PROP] === '1',
+      last_sent: props[ALERT_SENT_PROP] || null,
+    },
   };
 }
 
@@ -1344,6 +1494,6 @@ function round1(n) {
 // --- Setup helper: run once to install the recurring refresh trigger ---
 function installDailyTrigger() {
   dropTriggers(REFRESH_CRON_FN);
-  ScriptApp.newTrigger(REFRESH_CRON_FN).timeBased().everyHours(4).create();
+  ScriptApp.newTrigger(REFRESH_CRON_FN).timeBased().everyHours(REFRESH_INTERVAL_HOURS).create();
   return refreshBoardCache();
 }

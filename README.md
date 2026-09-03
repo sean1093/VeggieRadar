@@ -84,9 +84,11 @@ MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ Frontend (G
     requests for it.
   - `doGet` (default) — serves the stored board instantly. **It never crawls
     synchronously** (a cold crawl exceeds the Web App response window and 404s).
-    A board past `BOARD_MAX_AGE_MS` (4 h) is still served, but the request also
+    A board past `BOARD_MAX_AGE_MS` (6 h) is still served, but the request also
     queues a background rebuild, so a dead trigger self-heals instead of
-    freezing the app on an old date.
+    freezing the app on an old date. The threshold deliberately sits **above**
+    the 4 h cadence plus the crawl: when the two were equal, a healthy board
+    reported itself stale in the minutes before every scheduled run.
   - `doGet?action=search&query=<name>` — filters the board, falling back to a live
     query. Accepts Chinese and common English/colloquial terms via an alias table.
     The trading-date probe is cached for an hour, so a burst of misses no longer
@@ -101,8 +103,11 @@ MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ Frontend (G
     queries (`force=1` jumps a one-hour lock); also a one-off trigger, same
     reason.
   - `doGet?action=diag` — board freshness, installed triggers, the last refresh
-    outcome and history coverage, so a stalled pipeline is diagnosable without
-    the GAS console.
+    outcome, history coverage and alert state, so a stalled pipeline is
+    diagnosable without the GAS console.
+  - `doGet?action=alerttest` — sends one probe mail (rate-limited to one per
+    hour) so the alerting channel can be verified without waiting for an
+    outage; it never touches incident state.
   - Prices are volume-weighted averages across markets; items below 200 kg traded
     are filtered; the latest day with real trades is found automatically.
 - **Frontend (`frontend/`):** React + Vite + TypeScript + Tailwind + shadcn/ui.
@@ -156,6 +161,27 @@ critical section: the 4-hourly refresh and a queued backfill genuinely can
 overlap, and a read-modify-write race would silently drop observations. The
 backfill crawls every window *before* taking the lock, so the critical section
 lasts milliseconds.
+
+### Alerting: a broken pipeline has to reach a human
+
+`?action=diag` only helps someone who thinks to look. Two failures are
+emailed to the maintainer instead, each once per 24 h incident window:
+
+| Signal | Trigger | Why it needs its own detector |
+| --- | --- | --- |
+| **Failure streak** | 3 consecutive refreshes that yield no board | One failure is routine (MOA throttles a batch) and self-heals; alerting on it would train the recipient to ignore the mail |
+| **Silence** | Served board older than 12 h | A deleted or broken trigger produces *no* failures to count. Nothing is running to notice, so the serving path raises this one |
+
+A recovering refresh closes the incident with one 「已恢復正常」 mail, so an
+alert always has a matching all-clear. `sendAlert` / `clearAlert` swallow every
+error by design: alerting sits on both the refresh and the serving path, and a
+mail quota failure must never be able to take the board down with it. `diag`
+reports `alert.failure_streak` / `alert.incident_open` / `alert.last_sent` —
+never the address, since `diag` is public.
+
+`MailApp` needs the `script.send_mail` scope, now declared explicitly in
+`appsscript.json`. Changing scopes requires the deploying owner to re-consent,
+so verify a canary deployment before redeploying the pinned production one.
 
 ### Trading date vs. refresh time
 
@@ -265,7 +291,11 @@ GET {WEB_APP_URL}/exec?action=backfill[&force=1]
 GET {WEB_APP_URL}/exec?action=diag
 → { "type": "diag", "board": { "generated_at": ..., "stale": false },
      "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null,
-     "history": { "items": 97, "min_days": 1, "max_days": 24 } }
+     "history": { "items": 97, "min_days": 1, "max_days": 24 },
+     "alert": { "failure_streak": 0, "incident_open": false, "last_sent": null } }
+
+GET {WEB_APP_URL}/exec?action=alerttest
+→ { "type": "alerttest", "sent": true, "message": "已寄出測試信" }
 ```
 `warm` and `backfill` both queue their crawl in a one-off trigger and answer at
 once — the crawls take minutes and would blow the Web App response window.
@@ -426,9 +456,11 @@ Code lives in `backend/Code.gs`, deployed with `clasp` (`.clasp.json` sets
    `clasp push` only moves HEAD — the `/exec` URL serves a pinned version, so
    redeploy the same deployment to publish code:
    `clasp deploy -i <deploymentId> -d "<description>"`.
-2. Run `installDailyTrigger()` once in the editor — it installs the 4-hourly
-   refresh trigger and warms the board so the first visitor never hits a cold
-   crawl. Confirm with `?action=diag`: `triggers` must list `refreshBoardCache`.
+2. Run `installDailyTrigger()` once in the editor — it installs the refresh
+   trigger on `REFRESH_INTERVAL_HOURS` and warms the board so the first visitor
+   never hits a cold crawl. Confirm with `?action=diag`: `triggers` must list
+   `refreshBoardCache`. Running it also grants the mail scope the alerting
+   needs; `?action=alerttest` confirms a mail actually arrives.
 3. Hit `?action=backfill` once to seed the baseline history (the crawl takes a
    few minutes), then confirm `diag.history.items` is non-zero. Until it is, the
    board simply ships without baseline fields and the UI hides the badge and the
