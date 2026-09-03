@@ -1,14 +1,4 @@
 {
   "scriptId": "1iPuBQwjSi4bF9-Th-zuVFhGip2WmMkRCQPLrEBudfhQFQVdSgpLf77EN",
-  "rootDir": "backend/",
-  "filePushOrder": [
-    "backend/Config.gs",
-    "backend/WebApp.gs",
-    "backend/Board.gs",
-    "backend/Aggregate.gs",
-    "backend/History.gs",
-    "backend/Alerts.gs",
-    "backend/Moa.gs",
-    "backend/Search.gs"
-  ]
+  "rootDir": "backend/"
 }

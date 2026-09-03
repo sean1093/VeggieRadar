@@ -80,7 +80,9 @@ MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ Frontend (G
   constant plus the board definition), `WebApp` (the `doGet` router),
   `Board`, `Aggregate`, `History`, `Alerts`, `Moa`, `Search`. Apps Script merges
   them into one global scope, so the split is organisational, not architectural;
-  `.clasp.json` pins `filePushOrder` and a test asserts it covers every file.
+  no ordering config is needed or used, because no top-level initialiser here
+  depends on another file — a test enforces that, so load order stays
+  irrelevant rather than becoming something this repo has to pin.
   - `refreshBoardCache()` — run by a 4-hourly time-driven trigger; crawls the
     board items with `UrlFetchApp.fetchAll` (concurrent, batched at 13), stores
     the board in `CacheService` plus durable `ScriptProperties`, and appends the
@@ -503,7 +505,7 @@ caught exactly that).
 
 ### Backend (Google Apps Script)
 Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
-`rootDir` to `backend/` and pins `filePushOrder`).
+`rootDir` to `backend/`; no `filePushOrder`, see §2).
 1. `clasp push`, then deploy as a **Web App** (execute as: me; access: anyone).
    `clasp push` only moves HEAD — the `/exec` URL serves a pinned version, so
    redeploy the same deployment to publish code:

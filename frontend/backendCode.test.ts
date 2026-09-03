@@ -23,16 +23,16 @@ type Row = {
   TransDate?: string;
 };
 
-// Apps Script concatenates every .gs file into ONE global scope, so the tests
-// compose them the same way, in the order `.clasp.json` pins for pushes.
-// Reading the manifest instead of hardcoding a list means a new backend file is
-// covered automatically rather than silently untested.
+// Apps Script merges every .gs file into ONE global scope, so the tests compose
+// them the same way. Read from disk rather than from a manifest: `.clasp.json`
+// has no ordering key on purpose — no top-level initialiser here depends on
+// another file (a test below enforces that), so load order cannot matter, and a
+// config key whose semantics are relative to `rootDir` would only add a way to
+// be wrong. Reading the directory also covers a new backend file automatically
+// instead of leaving it silently untested.
 const BACKEND_DIR = resolve(__dirname, '../backend');
-const PUSH_ORDER: string[] = JSON.parse(
-  readFileSync(resolve(__dirname, '../.clasp.json'), 'utf8'),
-).filePushOrder;
-const GS_FILES = readdirSync(BACKEND_DIR).filter((f) => f.endsWith('.gs'));
-const SOURCE = PUSH_ORDER.map((p) => readFileSync(resolve(__dirname, '..', p), 'utf8')).join('\n');
+const GS_FILES = readdirSync(BACKEND_DIR).filter((f) => f.endsWith('.gs')).sort();
+const SOURCE = GS_FILES.map((f) => readFileSync(resolve(BACKEND_DIR, f), 'utf8')).join('\n');
 
 /** Loads the backend with stubbed GAS globals. `responses` maps URL → rows. */
 function loadBackend(responses: Record<string, Row[]> = {}) {
@@ -1308,22 +1308,46 @@ describe('alerting under contention and failure', () => {
   });
 });
 /**
- * The backend is split across several .gs files that Apps Script merges into one
- * global scope. `filePushOrder` is the only place that ordering is written down,
- * and it is also what these tests read to compose the source — so a file missing
- * from it would be pushed in arbitrary order AND silently untested.
+ * The backend is split across several .gs files that Apps Script merges into
+ * one global scope. These are the two properties that keep that split safe
+ * forever, as opposed to the one-off "nothing was dropped" check that belonged
+ * to the migration itself and would rot into a test of a deleted file.
  */
 describe('backend file layout', () => {
-  it('pins every .gs file in filePushOrder', () => {
-    const pinned = PUSH_ORDER.map((p) => p.replace(/^backend\//, '')).sort();
-    expect(pinned).toEqual([...GS_FILES].sort());
-  });
-
-  it('keeps every declaration reachable from one merged scope', () => {
-    // The split must be a pure move: the same globals, exactly once each.
+  it('declares every global exactly once across the merged scope', () => {
+    // Catches the copy-paste that leaves a function in two files, where Apps
+    // Script would silently keep whichever loads last.
     const declarations = [...SOURCE.matchAll(/^(?:function (\w+)|var (\w+))/gm)].map((m) => m[1] ?? m[2]);
-    expect(new Set(declarations).size).toBe(declarations.length);
+    const duplicated = declarations.filter((n, i) => declarations.indexOf(n) !== i);
+    expect(duplicated).toEqual([]);
     expect(declarations).toContain('doGet');
     expect(declarations).toContain('BOARD_ITEMS');
+  });
+
+  it('keeps load order irrelevant: no top-level initialiser touches another file', () => {
+    // This is what lets the project ship without a pinned file order. A `var`
+    // initialised from a function call or from another constant would make the
+    // load sequence load-bearing — and Apps Script's order is not something
+    // this repo controls.
+    const names = new Set(
+      [...SOURCE.matchAll(/^(?:function (\w+)|var (\w+))/gm)].map((m) => m[1] ?? m[2]),
+    );
+    const offenders: string[] = [];
+    for (const file of GS_FILES) {
+      const lines = readFileSync(resolve(BACKEND_DIR, file), 'utf8').split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const decl = lines[i].match(/^var (\w+) = (.*)$/);
+        if (!decl) continue;
+        let init = decl[2];
+        while (i < lines.length - 1 && !/;\s*(\/\/.*)?$/.test(lines[i])) init += '\n' + lines[++i];
+        const code = init.replace(/\/\/.*$/gm, '').replace(/'[^']*'/g, "''");
+        const calls = [...code.matchAll(/(\w+)\s*\(/g)].map((m) => m[1]);
+        const refs = [...code.matchAll(/\b([A-Z][A-Z0-9_]{2,})\b/g)]
+          .map((m) => m[1])
+          .filter((n) => names.has(n));
+        if (calls.length || refs.length) offenders.push(`${file}:${decl[1]}`);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });
