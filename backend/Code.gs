@@ -723,22 +723,34 @@ function diagUrl() {
  * key: cache eviction would otherwise re-open this public, unauthenticated
  * endpoint immediately. Incident state is deliberately untouched, so a probe
  * never fakes or suppresses a real alert.
+ *
+ * The send is wrapped locally rather than left to `withAlertLock`: the whole
+ * point of this endpoint is to say WHY the channel is down (an unauthorised
+ * scope reads very differently from a mail quota), and the shared helper
+ * deliberately swallows that reason. A diagnostic that cannot report the
+ * diagnosis is just a slower way of learning nothing.
  */
 function handleAlertTest() {
   var outcome = withAlertLock(function () {
     var props = PropertiesService.getScriptProperties();
     var at = Date.parse(props.getProperty(ALERT_TEST_PROP) || '');
-    if (!isNaN(at) && Date.now() - at < ALERT_TEST_INTERVAL_MS) return 'locked';
-    MailApp.sendEmail(
-      ALERT_EMAIL,
-      '[VeggieRadar] 測試信（非故障）',
-      '這是一封測試信，用來確認警報信管道可用。收到代表故障時你也會收到通知。\n\n診斷：' + diagUrl() + '\n');
+    if (!isNaN(at) && Date.now() - at < ALERT_TEST_INTERVAL_MS) return { state: 'locked' };
+    try {
+      MailApp.sendEmail(
+        ALERT_EMAIL,
+        '[VeggieRadar] 測試信（非故障）',
+        '這是一封測試信，用來確認警報信管道可用。收到代表故障時你也會收到通知。\n\n診斷：' + diagUrl() + '\n');
+    } catch (err) {
+      return { state: 'failed', error: String(err && err.message || err) };
+    }
     props.setProperty(ALERT_TEST_PROP, new Date().toISOString());
-    return 'sent';
+    return { state: 'sent' };
   });
-  if (outcome === 'sent') return { type: 'alerttest', sent: true, message: '已寄出測試信' };
-  if (outcome === 'locked') return { type: 'alerttest', sent: false, message: '測試信已於一小時內寄出' };
-  return { type: 'alerttest', sent: false, message: '寄信失敗或有其他執行中，請稍後再試' };
+
+  if (!outcome) return { type: 'alerttest', sent: false, message: '另一個執行正在處理警報，請稍後再試' };
+  if (outcome.state === 'sent') return { type: 'alerttest', sent: true, message: '已寄出測試信' };
+  if (outcome.state === 'locked') return { type: 'alerttest', sent: false, message: '測試信已於一小時內寄出' };
+  return { type: 'alerttest', sent: false, message: '寄信失敗', error: outcome.error };
 }
 
 /**

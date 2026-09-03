@@ -1116,10 +1116,20 @@ describe('failure alerting', () => {
       expect(props.has('veggie_alert_sent_at')).toBe(false);
     });
 
-    it('reports the mail failure instead of throwing', () => {
-      const { api, breakMail } = loadBackend();
+    it('reports WHY the channel is down instead of a generic failure', () => {
+      const { api, breakMail, fixMail, mails } = loadBackend();
       breakMail();
-      expect(api.handleAlertTest().sent).toBe(false);
+      const failed = api.handleAlertTest();
+      expect(failed.sent).toBe(false);
+      // An unauthorised scope must read differently from a mail quota, or the
+      // endpoint teaches the operator nothing.
+      expect(failed.error).toContain('mail quota exceeded');
+
+      // A failed probe consumed no quota, so it must be retryable at once —
+      // that is how the operator confirms a fix.
+      fixMail();
+      expect(api.handleAlertTest().sent).toBe(true);
+      expect(mails).toHaveLength(1);
     });
   });
 });
@@ -1223,11 +1233,13 @@ describe('alerting under contention and failure', () => {
     expect(mails).toHaveLength(1);
   });
 
-  it('reports busy rather than sending when the probe loses the lock', () => {
+  it('reports contention rather than sending when the probe loses the lock', () => {
     const { api, contendLock, mails } = loadBackend();
     contendLock();
     const res = api.handleAlertTest();
     expect(res.sent).toBe(false);
+    expect(res.message).toContain('另一個執行');
+    expect(res.error).toBeUndefined(); // contention is not a channel failure
     expect(mails).toHaveLength(0);
   });
 });
