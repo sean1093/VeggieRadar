@@ -4,8 +4,8 @@ name: CI
 # inside the deploy workflows themselves (deploy-pages / deploy-gas run the
 # suite before publishing), so running this job there too would duplicate
 # the same install + test + build on every push.
-# The frontend suite includes backendCode.test.ts, which evaluates
-# backend/Code.gs against stubbed GAS services — one job covers both halves.
+# The frontend suite includes backendCode.test.ts, which evaluates every
+# backend/*.gs against stubbed GAS services — one job covers both halves.
 on:
   pull_request:
   workflow_dispatch:

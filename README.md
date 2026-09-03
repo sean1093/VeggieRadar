@@ -76,7 +76,13 @@ MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ Frontend (G
 - **Data source:** Taiwan MOA "Agricultural Products Wholesale Market Transactions"
   open data, no API key. `https://data.moa.gov.tw/api/v1/AgriProductsTransType/`
   (ROC-calendar dates, e.g. `115.08.26`; prices in `元/公斤`).
-- **Backend (`backend/Code.gs`):**
+- **Backend (`backend/*.gs`):** one file per domain — `Config` (every tuneable
+  constant plus the board definition), `WebApp` (the `doGet` router),
+  `Board`, `Aggregate`, `History`, `Alerts`, `Moa`, `Search`. Apps Script merges
+  them into one global scope, so the split is organisational, not architectural;
+  no ordering config is needed or used, because no top-level initialiser here
+  depends on another file — a test enforces that, so load order stays
+  irrelevant rather than becoming something this repo has to pin.
   - `refreshBoardCache()` — run by a 4-hourly time-driven trigger; crawls the
     board items with `UrlFetchApp.fetchAll` (concurrent, batched at 13), stores
     the board in `CacheService` plus durable `ScriptProperties`, and appends the
@@ -488,7 +494,7 @@ VITE_API_BASE_URL=<your GAS Web App /exec URL>
 ```bash
 npm run build          # tsc typecheck + vite build
 npm run test:run       # vitest once — includes backendCode.test.ts, which loads
-                       # ../backend/Code.gs with stubbed GAS services
+                       # every ../backend/*.gs with stubbed GAS services
 npm test               # vitest in watch mode
 npm run test:coverage  # v8 coverage report
 ```
@@ -498,8 +504,8 @@ time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
 
 ### Backend (Google Apps Script)
-Code lives in `backend/Code.gs`, deployed with `clasp` (`.clasp.json` sets
-`rootDir` to `backend/`).
+Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
+`rootDir` to `backend/`; no `filePushOrder`, see §2).
 1. `clasp push`, then deploy as a **Web App** (execute as: me; access: anyone).
    `clasp push` only moves HEAD — the `/exec` URL serves a pinned version, so
    redeploy the same deployment to publish code:
