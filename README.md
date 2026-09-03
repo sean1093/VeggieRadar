@@ -429,8 +429,10 @@ The drawer decomposes it, published only when a breakdown adds something:
 **≥2 varieties, each holding ≥10% of the item's traded volume** and clearing the
 absolute volume floor, volume-sorted (so the market mainstream reads first) and
 capped at 4 rows; unlabelled rows group as 一般. Shares are computed against the
-item's *total* volume, so folded-away varieties leave an honest gap — and when
-the shown rows cover ≤90%, the drawer states how much the remainder holds.
+item's *total* volume, so folded-away varieties leave an honest gap — and the
+drawer discloses that remainder whenever it is nonzero, not merely when it is
+large. A "roughly complete" threshold used to hide gaps of 1–9%, which let the
+weighted-average sentence below describe rows that quietly omitted volume.
 
 Each row carries **both** bases, exactly like the card: the estimated market
 price leads and the measured wholesale price supports it. Publishing wholesale
@@ -438,8 +440,8 @@ alone made the section unusable — a shopper is quoted retail, so a
 wholesale-only row cannot be compared with anything at the stall, and it
 silently disagreed with the card's retail headline.
 
-Applying the root markup to a variety is sound precisely *because* the markup
-is additive and constant per crop:
+Applying the root markup to a variety works precisely *because* the markup is
+additive and constant per crop:
 
 ```
 retail_variety = wholesale_variety + markup(root)
@@ -448,11 +450,20 @@ retail_blend   = wholesale_blend   + markup(root) = Σ(share × retail_variety)
 
 The markup's error is identical for both, while the variety row uses a more
 precise wholesale input — so for the variety in front of the shopper it is
-*more* accurate than the headline. The identity also means the card's headline
-**is** the volume-weighted average of the rows, which is what the drawer says
-out loud (「上方大字是這些品種依成交量加權的平均推估」) and what
-`mockBoard.test.ts` holds the bundled demo to. Verified in the UI: a 竹筍 card
-reading 約 61 against rows of 54 / 51 / 85 at shares 41 / 34 / 25.
+*more* accurate than the headline. The identity also makes the card's headline
+the volume-weighted average of the rows, which `mockBoard.test.ts` holds the
+bundled demo to. Verified in the UI: a 竹筍 card reading 約 61 against rows of
+54 / 51 / 85 at shares 41 / 34 / 25 — a weighted average of 60.7.
+
+Two limits are stated in the drawer rather than papered over:
+
+- **Approximate, not exact.** Each row price and each share is rounded
+  independently of the headline, so the drawer says 約等於, not 等於.
+- **Root-level uncertainty.** §4's markups are fitted on paired *root-crop*
+  observations. 綠竹筍 and 麻竹筍 may genuinely carry different stall margins;
+  nothing measures that. A variety row therefore inherits the root's error band
+  rather than earning its own, and the drawer says so — showing a single 約 N
+  per row without that sentence would claim precision the model lacks.
 
 This also exposes a pre-existing subtlety honestly: a seasonal rotation in the
 variety mix moves the blended average even when no single variety moved. The

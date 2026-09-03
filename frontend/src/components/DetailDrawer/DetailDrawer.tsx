@@ -207,10 +207,16 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
                   </div>
                 ))}
               </div>
+              {/* Three separate honesty constraints, all learned the hard way:
+                  the headline blends ALL varieties (not just the listed ones),
+                  each row and share is rounded independently so the
+                  relationship is approximate, and the markup is calibrated per
+                  ROOT crop — a variety row inherits that uncertainty rather
+                  than earning its own. */}
               <p className="mt-2 text-xs leading-relaxed text-stone">
-                上方大字是這些品種依成交量加權的平均推估，所以買到的品種不同、價格就會落在這幾行之間；
-                批發為實測值。
-                {shownShare <= 90 && `其餘品種合計約佔 ${100 - shownShare}%。`}
+                上方大字約等於全部品種依成交量加權的平均，所以買到的品種不同，價格就會落在這幾行之間；
+                批發為實測值。各品種推估沿用同一套「根作物」加成，誤差與上方區間相同。
+                {shownShare < 100 && `未列出的品種合計約佔 ${100 - shownShare}%。`}
               </p>
             </div>
           )}

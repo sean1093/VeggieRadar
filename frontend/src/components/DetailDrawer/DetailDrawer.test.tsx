@@ -170,9 +170,16 @@ describe('DetailDrawer', () => {
       expect(shares).toEqual(['批發 25.9・量 41%', '批發 23.2・量 34%', '批發 57.1・量 24%']);
     });
 
-    it('explains that the headline is the weighted average of these rows', () => {
+    it('states the relationship as approximate and over ALL varieties', () => {
       render(<DetailDrawer isOpen onClose={() => {}} item={bamboo} allProduceItems={mockAllProduceItems} />);
-      expect(screen.getByText(/依成交量加權的平均推估/)).toBeInTheDocument();
+      // "約等於" and "全部品種", not an exact identity over the listed rows:
+      // each row and share is rounded independently, and rows can omit volume.
+      expect(screen.getByText(/約等於全部品種依成交量加權的平均/)).toBeInTheDocument();
+    });
+
+    it('inherits the root-level markup uncertainty instead of implying its own', () => {
+      render(<DetailDrawer isOpen onClose={() => {}} item={bamboo} allProduceItems={mockAllProduceItems} />);
+      expect(screen.getByText(/沿用同一套「根作物」加成，誤差與上方區間相同/)).toBeInTheDocument();
     });
 
     it('falls back to wholesale-only rows for a board cached before retail per variety', () => {
@@ -201,7 +208,7 @@ describe('DetailDrawer', () => {
       expect(screen.queryByText(/今日品種行情/)).not.toBeInTheDocument();
     });
 
-    it('discloses the folded remainder when shown rows cover ≤90% of volume', () => {
+    it('discloses any omitted volume, however small', () => {
       const sparse: ProduceItem = {
         ...withRetail,
         varieties: [
@@ -210,13 +217,26 @@ describe('DetailDrawer', () => {
         ],
       };
       render(<DetailDrawer isOpen onClose={() => {}} item={sparse} allProduceItems={mockAllProduceItems} />);
-      expect(screen.getByText(/其餘品種合計約佔 30%/)).toBeInTheDocument();
+      expect(screen.getByText(/未列出的品種合計約佔 30%/)).toBeInTheDocument();
     });
 
-    it('omits the remainder when the rows essentially cover the volume', () => {
+    it('discloses even a 1% remainder, since the rows claim to average the whole', () => {
+      // 41 + 34 + 24 = 99%. A 「大致完整」 threshold used to hide this, which
+      // let the weighted-average sentence describe rows that omitted volume.
       render(<DetailDrawer isOpen onClose={() => {}} item={bamboo} allProduceItems={mockAllProduceItems} />);
-      // 41 + 34 + 24 = 99% — no remainder worth disclosing.
-      expect(screen.queryByText(/其餘品種/)).not.toBeInTheDocument();
+      expect(screen.getByText(/未列出的品種合計約佔 1%/)).toBeInTheDocument();
+    });
+
+    it('omits the remainder only when the rows truly cover everything', () => {
+      const complete: ProduceItem = {
+        ...withRetail,
+        varieties: [
+          { name: '甲', catty_price: 20, retail_price: 45, share_percent: 60 },
+          { name: '乙', catty_price: 30, retail_price: 58, share_percent: 40 },
+        ],
+      };
+      render(<DetailDrawer isOpen onClose={() => {}} item={complete} allProduceItems={mockAllProduceItems} />);
+      expect(screen.queryByText(/未列出的品種/)).not.toBeInTheDocument();
     });
     it('toggles the watchlist from the drawer star', () => {
       const onToggleWatch = vi.fn();
