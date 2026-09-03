@@ -1,0 +1,17 @@
+# Credentials. None of these belong in the repo, and the CI GAS deploy writes
+# gcp-sa-key.json into the working directory at runtime — without this rule a
+# stray `git add -A` on a machine that ran that step would commit a real
+# service-account key.
+gcp-sa-key.json
+.clasprc.json
+*credentials*.json
+*client_secret*.json
+*.pem
+*.p12
+.env.local
+.env.*.local
+
+# Scratch data for the offline retail calibration (derived, re-downloadable).
+.calibration/
+
+.DS_Store

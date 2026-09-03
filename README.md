@@ -540,10 +540,27 @@ npm run test:run       # vitest once — includes backendCode.test.ts, which loa
 npm test               # vitest in watch mode
 npm run test:coverage  # v8 coverage report
 ```
-163 tests at ~97% statement / ~90% branch coverage. `vitest.config.ts` pins
+208 tests at ~97% statement / ~90% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
+
+### What is committed, and why it is safe
+
+Two files look like secrets and are not:
+
+| File | Contents | Why committing it is fine |
+| --- | --- | --- |
+| `.clasp.json` | `scriptId` | An identifier, not a credential — like a Drive file ID. Verified anonymously: `script.google.com/d/<scriptId>/edit` returns **302 to Google login**, and the Apps Script API returns **401**. Access is gated by the project's Drive ACL plus OAuth, so this is safe *as long as the project is never link-shared*. |
+| `frontend/.env` | `VITE_API_BASE_URL` | The `/exec` endpoint is public by necessity — the browser calls it. Vite also **inlines every `VITE_*` variable into the client bundle**, so this file is public whatever git does with it. A test asserts it holds nothing else. |
+
+The actual credentials live outside the repo and must stay there: `~/.clasprc.json`
+(your OAuth refresh token) and the `GCP_SA_KEY` / `CLASP_TOKEN` repo secrets.
+The root `.gitignore` covers them plus `gcp-sa-key.json`, which the GAS deploy
+workflow writes *into the checkout* at runtime — harmless on a throwaway runner,
+a live credential in a commit anywhere else. `frontend/repoHygiene.test.ts`
+derives that list from the workflows themselves, so a new credential-writing
+step that forgets an ignore rule fails a test instead of leaking.
 
 ### Backend (Google Apps Script)
 Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
