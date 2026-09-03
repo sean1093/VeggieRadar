@@ -558,9 +558,16 @@ The actual credentials live outside the repo and must stay there: `~/.clasprc.js
 (your OAuth refresh token) and the `GCP_SA_KEY` / `CLASP_TOKEN` repo secrets.
 The root `.gitignore` covers them plus `gcp-sa-key.json`, which the GAS deploy
 workflow writes *into the checkout* at runtime — harmless on a throwaway runner,
-a live credential in a commit anywhere else. `frontend/repoHygiene.test.ts`
-derives that list from the workflows themselves, so a new credential-writing
-step that forgets an ignore rule fails a test instead of leaking.
+a live credential in a commit anywhere else. It also ignores `node_modules/`
+and `dist/`, because tooling run from the repo root creates them where
+`frontend/.gitignore` cannot see them — which is how a stray vitest cache file
+got committed once.
+
+`frontend/repoHygiene.test.ts` asks **git** whether each dangerous path is
+ignored (`git check-ignore`) rather than pattern-matching the ignore file:
+only git implements gitignore semantics, including the `!frontend/.env`
+negation that keeps the one intentional env file tracked. It also asserts that
+nothing credential-shaped, and no dependency or build output, is tracked.
 
 ### Backend (Google Apps Script)
 Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
