@@ -31,11 +31,17 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string | undefined;
 // cached copy, so it fails reasonably fast. Search is user-initiated (higher
 // waiting tolerance) and its live-miss path measures 8-31 s in production —
 // a warm miss fits under 15 s, and a cold one that times out primes the
-// backend's trade-date cache so the offered retry succeeds. Trend degrades
-// silently, so it gets the short leash.
+// backend's trade-date cache so the offered retry succeeds.
+//
+// Trend needs 15 s too, and the earlier 8 s was a measurement error on my
+// part: a COLD trend crawl was measured at 10.0 s in production, so with an
+// 8 s deadline the first visitor after each hourly cache expiry always timed
+// out and saw 「暫無趨勢資料」 — their request only warmed the cache for
+// everyone else. Waiting costs nothing visible here: the drawer's prices are
+// already rendered and the chart slot holds its height.
 const BOARD_TIMEOUT_MS = 12_000;
 const SEARCH_TIMEOUT_MS = 15_000;
-const TREND_TIMEOUT_MS = 8_000;
+const TREND_TIMEOUT_MS = 15_000;
 
 const BOARD_CACHE_KEY = 'veggieradar_last_board_v1';
 

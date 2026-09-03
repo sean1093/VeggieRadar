@@ -10,11 +10,8 @@ const ProduceTrendChart: React.FC<ProduceTrendChartProps> = ({ trend }) => {
     return <div data-testid="produce-trend-chart" className="text-center text-gray-500 text-sm">無趨勢資料</div>;
   }
 
-  // Recharts expects an array of objects for data
-  const chartData = trend.map((price, index) => ({
-    name: `Day ${index + 1}`, // Placeholder for actual dates if available
-    price: price,
-  }));
+  // The Line reads `price`; no axis is rendered, so no label field is needed.
+  const chartData = trend.map((price) => ({ price }));
 
   return (
     <div data-testid="produce-trend-chart" className="w-full h-16">
@@ -23,7 +20,7 @@ const ProduceTrendChart: React.FC<ProduceTrendChartProps> = ({ trend }) => {
           <Line
             type="monotone"
             dataKey="price"
-            stroke="#8884d8" // A neutral color, can be dynamic later
+            stroke="#6E7B5B" // sage; recharts' default purple is outside the palette
             strokeWidth={2}
             dot={false} // Minimalist: no dots on data points
           />

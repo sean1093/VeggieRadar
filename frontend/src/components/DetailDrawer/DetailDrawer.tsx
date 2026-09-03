@@ -6,10 +6,22 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import ProduceTrendChart from '../ProduceTrendChart/ProduceTrendChart';
 import type { ProduceItem } from '../../types/produce';
 import { fetchProduceTrend } from '../../services/api';
 import { marketPrice } from '../../lib/utils/market-price';
+
+// recharts is ~half the initial JS and serves exactly one element inside this
+// drawer, so it is fetched on demand — a board-first app whose visits mostly
+// never open a drawer should not pay for it up front.
+//
+// Imported manually into state rather than through `React.lazy`/`Suspense`:
+// `lazy` caches a REJECTED promise and re-throws on every later render, and
+// with no error boundary above this component a failed chunk (offline, a
+// deploy mid-session) would unmount the whole board — the exact opposite of
+// this app's "degrade honestly, never blankly" rule. Explicit state also makes
+// "still downloading" and "gave up" renderable, and observable in tests.
+const loadChart = () => import('../ProduceTrendChart/ProduceTrendChart');
+type ChartComponent = React.ComponentType<{ trend?: number[] }>;
 
 interface DetailDrawerProps {
   isOpen: boolean;
@@ -24,15 +36,32 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
   const [trendData, setTrendData] = useState<number[]>([]);
   const [trendLoading, setTrendLoading] = useState(false);
 
+  // Wrapped in an object: a bare component in state would be mistaken for a
+  // functional state updater.
+  const [chart, setChart] = useState<{ Component: ChartComponent } | 'failed' | null>(null);
+
   useEffect(() => {
     if (!isOpen || !item?.official_name) {
       setTrendData([]);
       return;
     }
+    let cancelled = false;
+    // Warm the chunk alongside the trend request rather than after it, so the
+    // download overlaps the ~1.3 s GAS round trip instead of adding to it.
+    loadChart()
+      .then((mod) => {
+        if (!cancelled) setChart({ Component: mod.default });
+      })
+      .catch(() => {
+        if (!cancelled) setChart('failed');
+      });
     setTrendLoading(true);
     fetchProduceTrend(item.official_name, 7)
       .then(setTrendData)
       .finally(() => setTrendLoading(false));
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen, item?.official_name]);
 
   const down = item.change_percent < 0;
@@ -61,6 +90,20 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
     })
     .sort((a, b) => a.price - b.price)
     .slice(0, 3);
+
+  // Every branch renders at the chart's own height, so neither the trend
+  // request nor the module resolving can shift the dialog under a finger.
+  const trendNote = (text: string) => (
+    <div className="flex h-16 items-center justify-center text-sm text-stone">{text}</div>
+  );
+  let chartArea;
+  if (trendLoading) chartArea = trendNote('載入中…');
+  else if (trendData.length === 0) chartArea = trendNote('暫無趨勢資料');
+  else if (chart === null) chartArea = trendNote('載入中…');
+  // The module failed; the drawer's prices are unaffected and stay on screen
+  // rather than taking the board down with them.
+  else if (chart === 'failed') chartArea = trendNote('趨勢圖載入失敗');
+  else chartArea = <chart.Component trend={trendData} />;
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
@@ -154,13 +197,7 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
           {/* 7-day trend */}
           <div>
             <p className="mb-2 text-xs text-stone">近 7 日價格趨勢（元/公斤）</p>
-            {trendLoading ? (
-              <div className="py-6 text-center text-sm text-stone">載入中…</div>
-            ) : trendData.length ? (
-              <ProduceTrendChart trend={trendData} />
-            ) : (
-              <div className="py-6 text-center text-sm text-stone">暫無趨勢資料</div>
-            )}
+            {chartArea}
             {item.baseline_price != null && item.vs_baseline_percent != null && (
               <p className="mt-2 text-xs text-stone">
                 近一個月批發中位約 {item.baseline_price} 元/台斤，今日批發
