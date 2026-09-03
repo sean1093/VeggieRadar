@@ -212,29 +212,35 @@ describe('DetailDrawer', () => {
 });
 /**
  * recharts is roughly half the initial JS and only this drawer uses it, so it
- * is code-split. These pin the two things that could regress: the chunk must
- * actually resolve and render, and the drawer must not wait for it.
+ * is fetched on demand. These pin what could regress: the chart still arrives,
+ * the prices never wait for it, and no state change shifts the dialog.
  */
-describe('DetailDrawer — lazily loaded trend chart', () => {
-  it('renders the chart once the chunk and the trend data arrive', async () => {
+describe('DetailDrawer — on-demand trend chart', () => {
+  it('renders the chart once the module and the trend data arrive', async () => {
     vi.mocked(fetchProduceTrend).mockResolvedValueOnce([23.1, 24, 22.5]);
     render(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
 
     expect(await screen.findByTestId('produce-trend-chart')).toBeInTheDocument();
   });
 
-  it('shows the drawer body immediately, without waiting for the chart', () => {
+  it('reserves the chart height in every state, so resolving it cannot shift the dialog', async () => {
     vi.mocked(fetchProduceTrend).mockResolvedValueOnce([23.1, 24, 22.5]);
     render(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
 
-    // Synchronous assertions: the prices a shopper opened the drawer for are
-    // already on screen while the chart chunk is still in flight.
-    expect(screen.getByText(withRetail.name)).toBeInTheDocument();
-    expect(screen.getByText('菜市場參考價')).toBeInTheDocument();
-    expect(screen.queryByTestId('produce-trend-chart')).not.toBeInTheDocument();
+    // Pending: the placeholder already occupies the chart's own height.
+    expect(screen.getByText('載入中…')).toHaveClass('h-16');
+    expect(await screen.findByTestId('produce-trend-chart')).toHaveClass('h-16');
   });
 
-  it('renders no chart and no chunk request when there is no trend data', async () => {
+  it('shows the prices while the chart is still pending', () => {
+    vi.mocked(fetchProduceTrend).mockResolvedValueOnce([23.1, 24, 22.5]);
+    render(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
+
+    expect(screen.getByText(withRetail.name)).toBeInTheDocument();
+    expect(screen.getByText('菜市場參考價')).toBeInTheDocument();
+  });
+
+  it('renders the empty state, not a chart, when the crop has no trend', async () => {
     render(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
     expect(await screen.findByText('暫無趨勢資料')).toBeInTheDocument();
     expect(screen.queryByTestId('produce-trend-chart')).not.toBeInTheDocument();
