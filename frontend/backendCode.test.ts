@@ -1116,20 +1116,48 @@ describe('failure alerting', () => {
       expect(props.has('veggie_alert_sent_at')).toBe(false);
     });
 
-    it('reports WHY the channel is down instead of a generic failure', () => {
-      const { api, breakMail, fixMail, mails } = loadBackend();
+    it('reports a failure CATEGORY without echoing the raw exception', () => {
+      const { api, breakMail, props } = loadBackend();
       breakMail();
       const failed = api.handleAlertTest();
-      expect(failed.sent).toBe(false);
-      // An unauthorised scope must read differently from a mail quota, or the
-      // endpoint teaches the operator nothing.
-      expect(failed.error).toContain('mail quota exceeded');
 
-      // A failed probe consumed no quota, so it must be retryable at once —
-      // that is how the operator confirms a fix.
+      expect(failed.sent).toBe(false);
+      // Category is what the operator acts on: an unauthorised scope reads
+      // differently from an exhausted quota.
+      expect(failed.reason).toBe('mail_quota_exhausted');
+      // The endpoint is public and unauthenticated, and Apps Script mail
+      // errors can quote the recipient address — raw text must never leak.
+      expect(JSON.stringify(failed)).not.toContain('mail quota exceeded');
+      expect(JSON.stringify(failed)).not.toContain(api.ALERT_EMAIL);
+      // ...but the raw text is kept for whoever owns the script.
+      expect(props.has('veggie_alert_test_failed_at')).toBe(true);
+    });
+
+    it('backs off after a failure so a broken channel cannot be hammered', () => {
+      const { api, breakMail, fixMail, mails } = loadBackend();
+      breakMail();
+      expect(api.handleAlertTest().reason).toBe('mail_quota_exhausted');
+
+      // A failed probe consumes no mail quota, so without a backoff a loop of
+      // them would keep seizing the shared lock and starve the real alerts.
       fixMail();
+      const blocked = api.handleAlertTest();
+      expect(blocked.sent).toBe(false);
+      expect(blocked.message).toContain('剛才寄送失敗');
+      expect(mails).toHaveLength(0);
+    });
+
+    it('sends again once the backoff has aged out, and clears it', () => {
+      const { api, breakMail, fixMail, props, mails } = loadBackend();
+      breakMail();
+      api.handleAlertTest();
+      fixMail();
+      // Age the backoff past its window.
+      props.set('veggie_alert_test_failed_at', new Date(Date.now() - 5 * 60_000).toISOString());
+
       expect(api.handleAlertTest().sent).toBe(true);
       expect(mails).toHaveLength(1);
+      expect(props.has('veggie_alert_test_failed_at')).toBe(false);
     });
   });
 });

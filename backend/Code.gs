@@ -105,7 +105,9 @@ var ALERT_SILENCE_MS = 12 * 60 * 60 * 1000;        // board age that means nothi
 var ALERT_COOLDOWN_MS = 24 * 60 * 60 * 1000;       // one alert per incident window
 var ALERT_LOCK_WAIT_MS = 3 * 1000;                 // brief: losing the race means someone else is deciding
 var ALERT_TEST_PROP = 'veggie_alert_test_at';      // durable, so cache eviction cannot re-open the endpoint
-var ALERT_TEST_INTERVAL_MS = 60 * 60 * 1000;       // bounds ?action=alerttest
+var ALERT_TEST_INTERVAL_MS = 60 * 60 * 1000;       // bounds a SUCCESSFUL ?action=alerttest
+var ALERT_TEST_FAIL_PROP = 'veggie_alert_test_failed_at';
+var ALERT_TEST_FAIL_BACKOFF_MS = 60 * 1000;        // bounds hammering a broken channel
 var ALERT_STREAK_PROP = 'veggie_alert_streak';
 var ALERT_SENT_PROP = 'veggie_alert_sent_at';
 var ALERT_ACTIVE_PROP = 'veggie_alert_active';
@@ -697,10 +699,18 @@ function sendAlert(subject, body) {
   }) === true;
 }
 
+/**
+ * True while `iso` is inside a `windowMs` window. Shared by the incident
+ * cooldown and both probe limiters so all three age identically.
+ */
+function withinWindow(iso, windowMs) {
+  var at = Date.parse(iso || '');
+  return !isNaN(at) && Date.now() - at < windowMs;
+}
+
 /** True while the current incident window suppresses further alerts. */
 function withinCooldown(props) {
-  var sentAt = Date.parse(props.getProperty(ALERT_SENT_PROP) || '');
-  return !isNaN(sentAt) && Date.now() - sentAt < ALERT_COOLDOWN_MS;
+  return withinWindow(props.getProperty(ALERT_SENT_PROP), ALERT_COOLDOWN_MS);
 }
 
 function openIncident(props) {
@@ -718,39 +728,62 @@ function diagUrl() {
 }
 
 /**
+ * Maps a mail exception to an operator-meaningful CATEGORY. The raw message is
+ * logged, never returned: `?action=alerttest` is public and unauthenticated,
+ * and Apps Script mail errors can quote the recipient address — the very thing
+ * `diag` deliberately withholds. A category is all the operator needs to act.
+ */
+function classifyMailError(err) {
+  var text = String((err && err.message) || err || '');
+  Logger.log('alerttest mail failure: ' + text);
+  if (/permission|authoriz|scope|consent/i.test(text)) return 'mail_scope_unauthorised';
+  if (/quota|limit|exceeded/i.test(text)) return 'mail_quota_exhausted';
+  if (/invalid|recipient|address/i.test(text)) return 'recipient_rejected';
+  return 'unknown';
+}
+
+/**
  * `?action=alerttest` — proves the mail scope is actually authorised, the one
- * thing tests cannot verify. The limiter is a DURABLE timestamp, not a cache
- * key: cache eviction would otherwise re-open this public, unauthenticated
+ * thing tests cannot verify. Both limiters are DURABLE timestamps, not cache
+ * keys: cache eviction would otherwise re-open this public, unauthenticated
  * endpoint immediately. Incident state is deliberately untouched, so a probe
  * never fakes or suppresses a real alert.
  *
- * The send is wrapped locally rather than left to `withAlertLock`: the whole
- * point of this endpoint is to say WHY the channel is down (an unauthorised
- * scope reads very differently from a mail quota), and the shared helper
- * deliberately swallows that reason. A diagnostic that cannot report the
- * diagnosis is just a slower way of learning nothing.
+ * A FAILED probe consumes no mail quota, so it arms a short backoff rather
+ * than nothing: without one, a loop of failing probes would take the shared
+ * script lock over and over and could starve the real silence alert.
  */
 function handleAlertTest() {
   var outcome = withAlertLock(function () {
-    var props = PropertiesService.getScriptProperties();
-    var at = Date.parse(props.getProperty(ALERT_TEST_PROP) || '');
-    if (!isNaN(at) && Date.now() - at < ALERT_TEST_INTERVAL_MS) return { state: 'locked' };
     try {
-      MailApp.sendEmail(
-        ALERT_EMAIL,
-        '[VeggieRadar] 測試信（非故障）',
-        '這是一封測試信，用來確認警報信管道可用。收到代表故障時你也會收到通知。\n\n診斷：' + diagUrl() + '\n');
+      var props = PropertiesService.getScriptProperties();
+      if (withinWindow(props.getProperty(ALERT_TEST_PROP), ALERT_TEST_INTERVAL_MS)) return { state: 'locked' };
+      if (withinWindow(props.getProperty(ALERT_TEST_FAIL_PROP), ALERT_TEST_FAIL_BACKOFF_MS)) return { state: 'backoff' };
+      try {
+        MailApp.sendEmail(
+          ALERT_EMAIL,
+          '[VeggieRadar] 測試信（非故障）',
+          '這是一封測試信，用來確認警報信管道可用。收到代表故障時你也會收到通知。\n\n診斷：' + diagUrl() + '\n');
+      } catch (err) {
+        props.setProperty(ALERT_TEST_FAIL_PROP, new Date().toISOString());
+        return { state: 'failed', reason: classifyMailError(err) };
+      }
+      props.setProperty(ALERT_TEST_PROP, new Date().toISOString());
+      props.deleteProperty(ALERT_TEST_FAIL_PROP);
+      return { state: 'sent' };
     } catch (err) {
-      return { state: 'failed', error: String(err && err.message || err) };
+      // Bookkeeping itself failed. Reported as a channel failure rather than
+      // as contention, so the two stay distinguishable.
+      Logger.log('alerttest bookkeeping failed: ' + err);
+      return { state: 'failed', reason: 'unknown' };
     }
-    props.setProperty(ALERT_TEST_PROP, new Date().toISOString());
-    return { state: 'sent' };
   });
 
   if (!outcome) return { type: 'alerttest', sent: false, message: '另一個執行正在處理警報，請稍後再試' };
   if (outcome.state === 'sent') return { type: 'alerttest', sent: true, message: '已寄出測試信' };
   if (outcome.state === 'locked') return { type: 'alerttest', sent: false, message: '測試信已於一小時內寄出' };
-  return { type: 'alerttest', sent: false, message: '寄信失敗', error: outcome.error };
+  if (outcome.state === 'backoff') return { type: 'alerttest', sent: false, message: '剛才寄送失敗，請稍後再試' };
+  return { type: 'alerttest', sent: false, message: '寄信失敗', reason: outcome.reason };
 }
 
 /**
