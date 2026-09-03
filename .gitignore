@@ -1,0 +1,28 @@
+# Credentials. None of these belong in the repo, and the CI GAS deploy writes
+# gcp-sa-key.json into the working directory at runtime — without this rule a
+# stray `git add -A` on a machine that ran that step would commit a real
+# service-account key.
+gcp-sa-key.json
+.clasprc.json
+*credentials*.json
+*client_secret*.json
+*.pem
+*.p12
+
+# Any NEW env file is ignored. frontend/.env is the one deliberate exception:
+# it holds only VITE_API_BASE_URL, which Vite inlines into the public bundle
+# anyway, so it is public by construction and is committed on purpose.
+.env
+.env.*
+!frontend/.env
+
+# Dependencies and build caches. Tooling run from the repo root (rather than
+# from frontend/) creates these here, where frontend/.gitignore cannot see
+# them — which is exactly how a vitest cache file got committed once.
+node_modules/
+dist/
+
+# Scratch data for the offline retail calibration (derived, re-downloadable).
+.calibration/
+
+.DS_Store
