@@ -355,36 +355,62 @@ a NT$41 pear retailing at NT$67 (1.6×). Fitting a multiplier instead roughly
 doubles the error; fitting a free-slope line overfits and produces a *negative*
 slope for 瓜果類, which would predict cheaper retail as wholesale rises.
 
-`RETAIL_MARKUP_ROOT` holds 30 per-crop markups (each with ≥5 paired
-observations); anything else falls back to `RETAIL_MARKUP_CATEGORY`. The band is
-`markup × 0.75 … markup × 1.35`, rounded outward to NT$5 because stalls price in
-round numbers and because implying single-digit precision on an estimate would be
-dishonest.
+Three tiers, most specific first:
+
+| Tier | Table | Crops | Band |
+| --- | --- | --- | --- |
+| 1 | `RETAIL_MARKUP_ROOT` | 30 | fitted midpoint, band `× 0.75 … × 1.35` |
+| 2 | `RETAIL_BAND_ROOT` | 24 | fitted `[p10, median, p90]` of the crop's own markup distribution |
+| 3 | `RETAIL_MARKUP_CATEGORY` | the rest | one hand-tuned band per category |
+
+Everything is rounded outward to NT$5, because stalls price in round numbers and
+implying single-digit precision on an estimate would be dishonest. Board items
+on the coarse tier-3 fallback dropped from **72 of 104 to 47**.
 
 ### Calibration and accuracy
 
-Markups were fitted by joining MOA wholesale to two real municipal retail feeds
-on matching dates:
+Markups are fitted by joining MOA wholesale to two municipal retail feeds:
 
 | Source | Granularity | Coverage |
 | --- | --- | --- |
-| [臺中市公有零售市場每日蔬果價格表](https://newdatacenter.taichung.gov.tw/) | daily, 14 markets | 42 produce items, rolling 365 days |
-| [臺北市公有零售市場行情](https://data.taipei/) | monthly | 122 items (fills 果菜類 / 菇類 gaps) |
+| [臺中市公有零售市場每日蔬果價格表](https://data.gov.tw/dataset/84539) | daily, 14 markets | 42 produce items, rolling 365 days (4,425 rows) |
+| [臺北市公有零售市場行情](https://data.taipei/dataset/detail?id=54d9d492-1e2e-40d1-ae7b-fbce6f271bf1) | monthly | 122 items × **18 monthly snapshots** |
 
-Both are keyless JSON and quote `元/台斤` — the same unit the app displays, so no
-`/0.6` conversion is involved on the retail side.
+Both are keyless JSON quoting `元/台斤` — the same unit the app displays, so no
+conversion is involved on the retail side. A survey for a third municipal feed
+found none: Kaohsiung, Tainan and New Taipei publish no retail produce series,
+and data.gov.tw's dataset search API is broken (405/404).
 
-Held out the most recent month (dates after the fitting window) — **278 unseen
-observations**:
+**Tier 2 exists because the Taipei feed was under-used.** Only one of its 18
+monthly snapshots had ever been joined. Using all 18, plus the Taichung daily
+rows, produced paired observations for 64 crops — but simply extending tier 1's
+rule to them made things *worse*, which is why the tables differ:
 
-- band coverage **80%**
-- median absolute error of the midpoint **9.4%**
-- median signed bias **+2.3%**
+| Rule, on the crops tier 2 now covers | Band coverage | Median abs. error |
+| --- | --- | --- |
+| Category fallback (previous behaviour) | 77.1% | **18.8%** |
+| Per-crop midpoint with tier 1's `× 0.75 … × 1.35` band | 51.9% | 17.0% |
+| Per-crop `[p10, median, p90]` (**shipped**) | 74.3% | **7.6%** |
 
-That accuracy is why the UI shows a range rather than a single number, and why
-the drawer says 「非實際報價」. The two feeds are used *offline* to derive the
-constants; the runtime has no dependency on them, so the retail band adds no new
-network call and no new failure mode.
+Evaluated on a time-based holdout — the most recent 20% of each crop's
+observations, fitted on the older 80%. The midpoint's error drops by 60%; band
+coverage is within noise of the fallback while the band itself is *narrower*, by
+construction: **a crop is only listed when its own band is tighter than the
+category band it replaces.** That rule excludes 竹筍, 蘆筍, 菠菜, 芹菜, 萵苣菜
+and 李, whose markup spread is genuinely huge — usually because one MOA root
+covers varieties that trade far apart (綠竹筍 vs 麻竹筍, §5). 雜柑 and 甜橙 are
+excluded for a mapping mismatch: the retail feeds list one specific citrus while
+the MOA root spans many, which yields a negative p10.
+
+The **tier-1 numbers are deliberately untouched.** They were fitted on a window
+that overlaps this holdout, so any comparison flatters them — there is no
+evidence a refit would be better, and replacing working constants on a
+contaminated measurement would be a guess dressed as an improvement.
+
+That residual error is why the UI shows a range rather than a single number, and
+why the drawer says 「非實際報價」. Both feeds are used *offline* to derive the
+constants; the runtime has no dependency on them, so the retail band adds no
+network call and no failure mode.
 
 ---
 

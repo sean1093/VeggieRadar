@@ -330,6 +330,35 @@ var RETAIL_MARKUP_CATEGORY = {
   '其他':   [20, 35, 50]
 };
 
+/**
+ * Per-crop [p10, median, p90] of the OBSERVED markup distribution, in 元/台斤.
+ * These 24 crops previously fell through to `RETAIL_MARKUP_CATEGORY`, where the
+ * midpoint's median absolute error on held-out data was 18.8%; with their own
+ * band it is 7.6%, at comparable band coverage (77.1% → 74.3%).
+ *
+ * Fitted from the same two municipal feeds as `RETAIL_MARKUP_ROOT` (§4 of the
+ * README) after noticing the Taipei feed had 18 monthly snapshots available and
+ * only one was ever used. Quantiles rather than a multiple of the midpoint,
+ * because a fixed ±multiple is what made the tier-1 rule useless here: applied
+ * to these crops it LOST coverage (51.9%) against the category fallback it was
+ * meant to improve on.
+ *
+ * A crop is only listed when its own band is TIGHTER than the category band it
+ * replaces — otherwise the per-crop number would be less informative than the
+ * fallback, not more. That rule is what excludes 竹筍, 蘆筍, 菠菜, 芹菜, 萵苣菜
+ * and 李: their markup spread is genuinely huge, mostly because one MOA root
+ * covers varieties that trade far apart (綠竹筍 vs 麻竹筍). 雜柑 and 甜橙 are
+ * excluded because the retail feeds list one specific citrus while the MOA root
+ * spans many, which produces a negative p10.
+ */
+var RETAIL_BAND_ROOT = {
+  '小白菜': [20, 32, 36], '牛蒡': [32, 36, 40], '冬瓜': [26, 28, 32], '芋': [47, 48, 51],
+  '芥菜': [39, 48, 54], '芥藍菜': [48, 52, 66], '扁蒲': [32, 38, 43], '洋香瓜': [56, 77, 101],
+  '苦瓜': [49, 56, 65], '茄子': [48, 56, 60], '韭菜': [41, 43, 57], '海梨柑': [33, 35, 41],
+  '茭白筍': [109, 118, 126], '茼蒿': [37, 51, 60], '馬鈴薯': [28, 31, 32], '敏豆': [78, 87, 112],
+  '甜瓜': [94, 119, 121], '甜椒': [56, 64, 70], '莧菜': [18, 30, 34], '番茄': [53, 59, 68],
+  '楊桃': [17, 29, 57], '豌豆': [73, 92, 113], '濕木耳': [61, 66, 81], '薑': [61, 65, 79]
+};
 /** Band width applied to a per-root markup, which is a midpoint only. */
 var RETAIL_BAND_LOW = 0.75;
 
