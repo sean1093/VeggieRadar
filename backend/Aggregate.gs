@@ -114,9 +114,20 @@ function varietyBreakdown(def, rows, totalVolume) {
 }
 
 /**
- * Estimated traditional-market retail band in 元/台斤. Rounded outward to the
- * nearest NT$5 because stalls price in round numbers, and because implying
- * single-digit precision on an estimate would be dishonest.
+ * Estimated traditional-market retail band in 元/台斤, from the most specific
+ * calibration available for the crop:
+ *
+ *   1. `RETAIL_MARKUP_ROOT`  — a fitted midpoint; the band is a fixed multiple
+ *      of it. 30 crops, unchanged since they were first calibrated.
+ *   2. `RETAIL_BAND_ROOT`    — a fitted [p10, median, p90] of the crop's own
+ *      observed markup distribution. 24 crops that previously fell through to
+ *      the category table, where the midpoint's median error was 18.8%; with
+ *      their own band it is 7.6%. Assuming the spread is a fixed multiple of
+ *      the midpoint is what made tier 1's rule unusable for them.
+ *   3. `RETAIL_MARKUP_CATEGORY` — the coarse fallback for everything else.
+ *
+ * Rounded outward to the nearest NT$5 because stalls price in round numbers,
+ * and because implying single-digit precision on an estimate would be dishonest.
  */
 function retailBand(cattyPrice, root, category) {
   var markup = RETAIL_MARKUP_ROOT[root];
@@ -126,7 +137,7 @@ function retailBand(cattyPrice, root, category) {
     mid = markup;
     high = markup * RETAIL_BAND_HIGH;
   } else {
-    var band = RETAIL_MARKUP_CATEGORY[category] || RETAIL_MARKUP_CATEGORY['其他'];
+    var band = RETAIL_BAND_ROOT[root] || RETAIL_MARKUP_CATEGORY[category] || RETAIL_MARKUP_CATEGORY['其他'];
     low = band[0];
     mid = band[1];
     high = band[2];

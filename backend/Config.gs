@@ -330,6 +330,47 @@ var RETAIL_MARKUP_CATEGORY = {
   '其他':   [20, 35, 50]
 };
 
+/**
+ * Per-crop [p10, median, p90] of the OBSERVED markup distribution, in 元/台斤,
+ * for 21 crops that previously fell through to `RETAIL_MARKUP_CATEGORY`.
+ *
+ * Held-out accuracy on the crops this table covers:
+ *
+ *   category fallback   79.7% band coverage,  17.3% median abs. error
+ *   this table          81.4%                  6.8%
+ *
+ * (20 crops, 59 held-out observations; most recent 20% per crop, fitted on the
+ * older 80%.)
+ *
+ * Three constraints decide what gets listed, each learned from a measurement
+ * that contradicted the obvious guess:
+ *
+ *   1. Quantiles, not a multiple of the midpoint. Reusing tier 1's
+ *      `× 0.75 … × 1.35` band here LOST coverage against the very fallback it
+ *      was meant to beat (51.9% vs 60.3%) — the spread is not proportional to
+ *      the markup.
+ *   2. Taipei-derived crops only. A crop with daily Taichung coverage has
+ *      enough observations for a tier-1-style fit and belongs in that pipeline;
+ *      mixing the two sources produced a flattering blended average that hid a
+ *      coverage collapse on the Taichung side. 雜柑, 甜橙 and 海梨柑 are
+ *      excluded for this reason.
+ *   3. The band must be strictly TIGHTER than the category band it replaces,
+ *      or the per-crop number would be less informative than the default.
+ *      This excludes 竹筍, 蘆筍, 菠菜, 芹菜, 萵苣菜, 李 (spread genuinely huge,
+ *      usually because one MOA root spans varieties that trade far apart —
+ *      綠竹筍 vs 麻竹筍) and 豌豆, 洋香瓜 (exactly as wide as their category).
+ *
+ * 龍眼 and 枇杷 are absent for a fourth, duller reason: 5 observations each,
+ * below the 8 this needs. Their seasons are too short.
+ */
+var RETAIL_BAND_ROOT = {
+  '小白菜': [20, 32, 36], '牛蒡': [32, 36, 40], '冬瓜': [26, 28, 32], '芋': [47, 48, 51],
+  '芥菜': [39, 48, 54], '芥藍菜': [48, 52, 66], '扁蒲': [32, 38, 43], '苦瓜': [49, 56, 65],
+  '茄子': [48, 56, 60], '韭菜': [41, 43, 57], '茭白筍': [109, 118, 126], '茼蒿': [37, 51, 60],
+  '馬鈴薯': [28, 31, 32], '敏豆': [78, 87, 112], '甜瓜': [94, 119, 121], '甜椒': [56, 64, 70],
+  '莧菜': [18, 30, 34], '番茄': [53, 59, 68], '楊桃': [17, 29, 57], '濕木耳': [61, 66, 81],
+  '薑': [61, 65, 79]
+};
 /** Band width applied to a per-root markup, which is a midpoint only. */
 var RETAIL_BAND_LOW = 0.75;
 

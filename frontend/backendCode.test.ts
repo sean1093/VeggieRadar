@@ -134,7 +134,7 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
     'handleTrend', 'resolveTradeDates',
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
     'applyBaselines', 'backfillHistory', 'handleBackfill', 'buildBoard',
-    'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown', 'handleSearch',
+    'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown', 'handleSearch', 'RETAIL_BAND_ROOT',
     'sendAlert', 'recordRefreshOutcome', 'withAlertLock', 'handleAlertTest',
     'ALERT_EMAIL', 'ALERT_FAILURE_STREAK', 'ALERT_SILENCE_MS', 'ALERT_COOLDOWN_MS',
     'REFRESH_INTERVAL_HOURS', 'installDailyTrigger', 'refreshBoardCache',
@@ -286,12 +286,45 @@ describe('retailBand', () => {
     expect(api.retailBand(14, '甘藍', '葉菜類')).toEqual({ low: 35, mid: 43, high: 55 });
   });
 
-  it('falls back to the category band for an uncalibrated root', () => {
+  it('prefers a fitted per-crop band over the category fallback', () => {
+    // 番茄 has no tier-1 markup but does have a fitted [53, 59, 68] band, and
+    // the 果菜類 fallback would say [48, 70, 88] — a different, much wider band.
+    const band = api.retailBand(30, '番茄', '果菜類');
+    expect(band).toEqual({ low: 80, mid: 89, high: 100 });
+    expect(band).not.toEqual(
+      api.retailBand(30, '沒有校準的菜', '果菜類'),
+    );
+  });
+
+  it('falls back to the category band for a crop in neither table', () => {
     const [low, mid, high] = api.RETAIL_MARKUP_CATEGORY['菇類'];
     const band = api.retailBand(20, '杏鮑菇', '菇類');
     expect(band.mid).toBe(Math.round(20 + mid));
     expect(band.low).toBe(Math.floor((20 + low) / 5) * 5);
     expect(band.high).toBe(Math.ceil((20 + high) / 5) * 5);
+  });
+
+  it('keeps tier 1 winning over tier 2 for crops in both', () => {
+    // The 30 originally calibrated crops are deliberately untouched: the
+    // holdout comparison for them is contaminated (they were fitted on a
+    // window that includes it), so there is no evidence a refit is better.
+    const both = Object.keys(api.RETAIL_MARKUP_ROOT).filter((r) => api.RETAIL_BAND_ROOT[r]);
+    expect(both).toEqual([]);
+  });
+
+  it('only publishes a per-crop band strictly tighter than the fallback it replaces', () => {
+    // Equal width would be no more informative than the category default, so
+    // the rule is `<`, not `<=` — that is what excludes 豌豆 and 洋香瓜, whose
+    // fitted spread came out exactly as wide as their category band.
+    for (const [root, band] of Object.entries(api.RETAIL_BAND_ROOT) as [string, number[]][]) {
+      const def = api.BOARD_ITEMS.find((d: { official: string }) => d.official === root);
+      expect(def, `${root} must be a board crop`).toBeDefined();
+      const cat = api.RETAIL_MARKUP_CATEGORY[def.category];
+      expect(band[2] - band[0], `${root} band not tighter than ${def.category}`).toBeLessThan(cat[2] - cat[0]);
+      expect(band[0]).toBeGreaterThan(0);
+      expect(band[0]).toBeLessThan(band[1]);
+      expect(band[1]).toBeLessThan(band[2]);
+    }
   });
 
   it('never returns a band that straddles or undercuts the wholesale price', () => {
