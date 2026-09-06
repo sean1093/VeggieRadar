@@ -540,7 +540,7 @@ npm run test:run       # vitest once — includes backendCode.test.ts, which loa
 npm test               # vitest in watch mode
 npm run test:coverage  # v8 coverage report
 ```
-208 tests at ~97% statement / ~90% branch coverage. `vitest.config.ts` pins
+227 tests at ~97% statement / ~90% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -567,7 +567,7 @@ got committed once.
 ignored (`git check-ignore`) rather than pattern-matching the ignore file:
 only git implements gitignore semantics, including the `!frontend/.env`
 negation that keeps the one intentional env file tracked. It also asserts that
-nothing credential-shaped, and no dependency or build output, is tracked.
+nothing credential-shaped, and no dependency, build or coverage output, is tracked.
 
 ### Backend (Google Apps Script)
 Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
@@ -593,20 +593,30 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
 
 ## 7. Deployment
 
-- **CI** via `.github/workflows/ci.yml`: every pull request runs the suite plus
-  a typecheck/build. Pushes are gated inside the deploy workflows themselves
-  (both run the suite before publishing), so a red test blocks either surface
-  without duplicating the run.
+- **CI** via `.github/workflows/ci.yml`: every pull request runs ESLint, the
+  suite and a typecheck/build. Pushes are gated inside the deploy workflows
+  themselves (both run lint and the suite before publishing), so a red check
+  blocks either surface without duplicating the run. Dependabot
+  (`.github/dependabot.yml`) opens weekly PRs for the frontend toolchain and
+  the workflow actions; those PRs run the same gate.
 - **Frontend → GitHub Pages** via `.github/workflows/deploy-pages.yml`: pushing to
   the default branch runs the tests, builds `frontend/` and publishes to Pages. In
   the repo, set **Settings → Pages → Source: GitHub Actions**. Live at
   `https://<user>.github.io/VeggieRadar/` (`vite.config.ts` `base` is `/VeggieRadar/`).
 - **Backend → Apps Script** via `.github/workflows/deploy-gas.yml` (optional):
-  set repo secrets `GCP_SA_KEY` (or `CLASP_TOKEN`); otherwise deploy manually with
-  `clasp`. See `clasp_instructions.md`. The workflow runs the backend regression
-  tests, pushes, **redeploys the pinned `DEPLOYMENT_ID`** — without that step
-  `/exec` keeps serving old code — and then queues a board refresh via
-  `?action=warm&force=1`.
+  otherwise deploy manually with `clasp` (§6). The workflow runs lint and the
+  backend regression tests, pushes, **redeploys the pinned `DEPLOYMENT_ID`** —
+  without that step `/exec` keeps serving old code — and then queues a board
+  refresh via `?action=warm&force=1`. It authenticates with **one** of two repo
+  secrets (Settings → Secrets and variables → Actions), and skips the deploy
+  with a notice when neither is set:
+  - `GCP_SA_KEY` (recommended): a GCP service-account JSON key, base64-encoded,
+    for an account that has edit access to the Apps Script project. The
+    workflow decodes it into `gcp-sa-key.json` inside the checkout, which the
+    root `.gitignore` covers for exactly that reason.
+  - `CLASP_TOKEN` (simpler, less safe): the `refresh_token` from your local
+    `~/.clasprc.json` after `clasp login`. It is your personal OAuth grant, so
+    rotate it if the secret ever leaks.
 
 > Both deploy workflows need Node 22+: the suite uses `Promise.withResolvers`.
 
@@ -627,4 +637,4 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
 - Line Bot lookups (`doPost` is reserved).
 
 ## License
-MIT (to be added).
+[MIT](LICENSE).

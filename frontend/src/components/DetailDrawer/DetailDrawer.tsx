@@ -33,18 +33,21 @@ interface DetailDrawerProps {
 }
 
 const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allProduceItems, watched = false, onToggleWatch }) => {
-  const [trendData, setTrendData] = useState<number[]>([]);
-  const [trendLoading, setTrendLoading] = useState(false);
+  // The crop whose trend the drawer shows, or null while closed. The trend is
+  // stored together with the key it answers, so a new item or a reopen reads
+  // as "loading" until its own answer lands — nothing to reset in the effect,
+  // and a late answer for the previous item can never land on this one.
+  const trendKey = isOpen && item?.official_name ? item.official_name : null;
+  const [trend, setTrend] = useState<{ key: string; data: number[] } | null>(null);
+  const trendLoading = trendKey !== null && trend?.key !== trendKey;
+  const trendData = trendKey !== null && trend?.key === trendKey ? trend.data : [];
 
   // Wrapped in an object: a bare component in state would be mistaken for a
   // functional state updater.
   const [chart, setChart] = useState<{ Component: ChartComponent } | 'failed' | null>(null);
 
   useEffect(() => {
-    if (!isOpen || !item?.official_name) {
-      setTrendData([]);
-      return;
-    }
+    if (!trendKey) return;
     let cancelled = false;
     // Warm the chunk alongside the trend request rather than after it, so the
     // download overlaps the ~1.3 s GAS round trip instead of adding to it.
@@ -55,14 +58,18 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
       .catch(() => {
         if (!cancelled) setChart('failed');
       });
-    setTrendLoading(true);
-    fetchProduceTrend(item.official_name, 7)
-      .then(setTrendData)
-      .finally(() => setTrendLoading(false));
+    fetchProduceTrend(trendKey, 7).then(
+      (data) => {
+        if (!cancelled) setTrend({ key: trendKey, data });
+      },
+      () => {
+        if (!cancelled) setTrend({ key: trendKey, data: [] });
+      },
+    );
     return () => {
       cancelled = true;
     };
-  }, [isOpen, item?.official_name]);
+  }, [trendKey]);
 
   const down = item.change_percent < 0;
   const tone = down ? 'text-sage' : 'text-clay';

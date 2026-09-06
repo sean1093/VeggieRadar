@@ -1,0 +1,19 @@
+# Keeps the frontend toolchain and the workflow actions current. The frontend
+# suite also evaluates every backend/*.gs, so a dependency bump that breaks
+# either half is caught by the same CI run.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    groups:
+      # One PR for routine minor/patch bumps; majors stay separate so a
+      # breaking change (Vite 8, React 19, Tailwind 4 were all recent) is
+      # reviewed on its own.
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
