@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchBoard, fetchStaticBoard, isFreshEnough, readCachedBoard, writeCachedBoard } from '../services/api';
 import { describeFreshness, type FreshnessNotice } from '../lib/utils/freshness';
 import { isApiError, type ApiResponse, type BoardResponse, type ProduceItem } from '../types/produce';
@@ -95,47 +95,53 @@ export function useBoard(): Board {
     }
   }, []);
 
-  // Lands the mirror, and decides whether GAS is asked at all. `cached` is
-  // what is already on screen, so a failure has something to degrade onto
-  // even when there is no mirror.
-  const landMirror = useCallback(
-    (mirror: BoardResponse | null, cached: BoardResponse | null) => {
-      if (mirror && isFreshEnough(mirror)) {
-        // Authoritative: the mirror is younger than the backend's own max age,
-        // so GAS would spend an execution to answer with the same prices.
-        // `stale` is false by construction here rather than copied from the
-        // payload, whose flag froze when the file was published.
-        writeCachedBoard(mirror);
-        track('board_loaded', { source: 'static', stale: false, age_bucket: ageBucket(mirror.generated_at) });
-        setStatus({ kind: 'ready', board: mirror, source: 'static' });
-        return;
-      }
+  // One ticket per read. A retry from the banner while the first read is
+  // still in flight would otherwise race it: whichever answer came last would
+  // land, and a slow initial GAS failure could overwrite the retry's fresh
+  // board with the degraded state. Only the newest read may touch the status.
+  const generation = useRef(0);
 
-      // A stale mirror still goes on screen at once — the same trade as the
-      // cache paint — but the read continues to GAS, whose `readBoard` queues
-      // the rebuild that unsticks a dead pipeline. That self-heal is why the
-      // mirror may only ever be a layer in front of GAS, never a replacement.
-      if (mirror) setStatus({ kind: 'ready', board: mirror, source: 'static' });
-
-      // The stale mirror outranks the cache as the fallback: it is what the
-      // shopper is already reading, and swapping in different old prices on a
-      // failed refresh would be a change with nothing behind it.
-      const fallback: Fallback = mirror
-        ? { board: mirror, source: 'static' }
-        : cached
-          ? { board: cached, source: 'cache' }
-          : null;
-      fetchBoard().then((res) => settle(res, fallback));
-    },
-    [settle],
-  );
-
-  // One read of the board, in order (README §2). Both callbacks are stable.
+  // One read of the board, in order (README §2). `cached` is what is already
+  // on screen, so a failure has something to degrade onto even when there is
+  // no mirror. Every state change sits behind a promise on purpose: the mount
+  // effect calls this, and nothing may be set synchronously inside an effect.
   const load = useCallback(
     (cached: BoardResponse | null) => {
-      fetchStaticBoard().then((mirror) => landMirror(mirror, cached));
+      const mine = ++generation.current;
+      fetchStaticBoard().then(async (mirror) => {
+        if (mine !== generation.current) return;
+        if (mirror && isFreshEnough(mirror)) {
+          // Authoritative: the mirror is younger than the backend's own max
+          // age, so GAS would spend an execution to answer with the same
+          // prices. `stale` is false by construction here rather than copied
+          // from the payload, whose flag froze when the file was published.
+          writeCachedBoard(mirror);
+          track('board_loaded', { source: 'static', stale: false, age_bucket: ageBucket(mirror.generated_at) });
+          setStatus({ kind: 'ready', board: mirror, source: 'static' });
+          return;
+        }
+
+        // A stale mirror still goes on screen at once — the same trade as the
+        // cache paint — but the read continues to GAS, whose `readBoard`
+        // queues the rebuild that unsticks a dead pipeline. That self-heal is
+        // why the mirror may only ever be a layer in front of GAS, never a
+        // replacement.
+        if (mirror) setStatus({ kind: 'ready', board: mirror, source: 'static' });
+
+        // The stale mirror outranks the cache as the fallback: it is what the
+        // shopper is already reading, and swapping in different old prices on
+        // a failed refresh would be a change with nothing behind it.
+        const fallback: Fallback = mirror
+          ? { board: mirror, source: 'static' }
+          : cached
+            ? { board: cached, source: 'cache' }
+            : null;
+        const res = await fetchBoard();
+        if (mine !== generation.current) return;
+        settle(res, fallback);
+      });
     },
-    [landMirror],
+    [settle],
   );
 
   // Mount: the cached board is already in the initial state, so the effect

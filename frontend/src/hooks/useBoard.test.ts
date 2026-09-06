@@ -190,6 +190,26 @@ describe('useBoard', () => {
     expect(result.current.status).toEqual({ kind: 'error', message: '無法載入今日菜價，請稍後再試' });
   });
 
+  it('lets a retry win over a first read that is still in flight', async () => {
+    // The banner's 重試 can be pressed while the mount read is still waiting
+    // on GAS. The slow first answer — here a failure — must not land on top
+    // of the retry's board.
+    const first = Promise.withResolvers<ApiResponse>();
+    const second = Promise.withResolvers<ApiResponse>();
+    fetchBoardMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const { result } = renderHook(() => useBoard());
+    await act(async () => {});
+    expect(result.current.status).toEqual({ kind: 'loading' });
+
+    act(() => result.current.reload());
+    const recovered = board('2026-09-03');
+    await act(async () => second.resolve(recovered));
+    expect(result.current.status).toEqual({ kind: 'ready', board: recovered, source: 'gas' });
+
+    await act(async () => first.resolve(FAILURE));
+    expect(result.current.status).toEqual({ kind: 'ready', board: recovered, source: 'gas' });
+  });
+
   it('reads the mirror once and revalidates once per mount', async () => {
     renderHook(() => useBoard());
     await act(async () => {});
