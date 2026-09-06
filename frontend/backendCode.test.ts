@@ -1947,6 +1947,26 @@ describe('refreshBoardCache — plausibility guard', () => {
     expect(props.has('veggie_last_refresh_fail')).toBe(false);
   });
 
+  it('replaces a good verdict when the next build comes back empty', () => {
+    const { api, props } = loadBackend({}, moaByDate(rootRows(GUARD_DEFS.slice(0, 30))));
+    api.refreshBoardCache();
+    expect(api.handleDiag().last_validation.ok).toBe(true);
+
+    // MOA answers nothing at all: no probe date, no board. diag must not keep
+    // reporting the previous run's `ok: true` under this refresh.
+    const empty = loadBackend();
+    for (const [k, v] of props) empty.props.set(k, v);
+    empty.api.refreshBoardCache();
+
+    expect(empty.api.handleDiag().last_validation).toMatchObject({
+      ok: false,
+      reasons: ['近期查無交易資料'],
+      suspects: [],
+    });
+    expect(empty.props.get('veggie_last_refresh_fail')).toMatch(/ 近期查無交易資料$/);
+    expect(empty.props.has('veggie_board_rejected_chunks')).toBe(false); // nothing to inspect
+  });
+
   it('reduces an implausible failure to a category for anonymous diag callers', () => {
     const { api } = loadBackend();
     expect(api.redactFailure('2026-09-02T00:10:00.000Z implausible: count 40 < 60% of previous 94'))

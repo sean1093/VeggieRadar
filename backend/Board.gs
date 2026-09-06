@@ -189,37 +189,39 @@ function readChunkedProp(prefix, countKey) {
 function refreshBoardCache() {
   var board = buildBoard();
   var props = PropertiesService.getScriptProperties();
-  if (board.items && board.items.length) {
-    var verdict = validateBoard(board, parseStoredBoard(readDurableBoard()));
-    props.setProperty(LAST_VALIDATION_PROP, JSON.stringify({
-      at: new Date().toISOString(),
-      ok: verdict.ok,
-      reasons: verdict.reasons,
-      suspects: verdict.suspects
-    }));
-    if (verdict.ok) {
-      markSuspects(board, verdict.suspects);
-      storeBoard(board);
-      updateHistory(board);
-      props.setProperty(LAST_OK_PROP, board.generated_at + ' ' + board.roc_date + ' ' + board.count + ' items');
-      recordRefreshOutcome(true,
-        '看板已重新建立。\n\n' +
-        '交易日：' + board.roc_date + '\n' +
-        '品項數：' + board.count + '\n' +
-        '完成於：' + board.generated_at + '\n');
-    } else {
-      // Kept whole rather than truncated: the numbers MOA answered with are the
-      // only evidence of what went wrong, and the chunk machinery already
+  var verdict = board.items && board.items.length
+    ? validateBoard(board, parseStoredBoard(readDurableBoard()))
+    : { ok: false, reasons: [board.error || 'empty board'], suspects: [] };
+  // Every refresh leaves a verdict, including an empty build: otherwise
+  // `diag` would keep showing the previous run's `ok: true` under a refresh
+  // that produced nothing.
+  props.setProperty(LAST_VALIDATION_PROP, JSON.stringify({
+    at: new Date().toISOString(),
+    ok: verdict.ok,
+    reasons: verdict.reasons,
+    suspects: verdict.suspects
+  }));
+  if (verdict.ok) {
+    markSuspects(board, verdict.suspects);
+    storeBoard(board);
+    updateHistory(board);
+    props.setProperty(LAST_OK_PROP, board.generated_at + ' ' + board.roc_date + ' ' + board.count + ' items');
+    recordRefreshOutcome(true,
+      '看板已重新建立。\n\n' +
+      '交易日：' + board.roc_date + '\n' +
+      '品項數：' + board.count + '\n' +
+      '完成於：' + board.generated_at + '\n');
+  } else {
+    var reason = verdict.reasons.join('; ');
+    if (board.items && board.items.length) {
+      // Kept whole rather than truncated: the numbers MOA answered with are
+      // the only evidence of what went wrong, and the chunk machinery already
       // handles a payload far past the 9 KB per-property cap.
       writeChunkedProp(REJECTED_PROP_PREFIX, REJECTED_PROP_COUNT, JSON.stringify(board));
-      // `recordRefreshOutcome` mails this text after three consecutive
-      // failures, so the reasons reach the operator without a second channel.
-      var implausible = 'implausible: ' + verdict.reasons.join('; ');
-      props.setProperty(LAST_FAIL_PROP, new Date().toISOString() + ' ' + implausible);
-      recordRefreshOutcome(false, implausible);
+      reason = 'implausible: ' + reason;
     }
-  } else {
-    var reason = board.error || 'empty board';
+    // `recordRefreshOutcome` mails this text after three consecutive
+    // failures, so the reasons reach the operator without a second channel.
     props.setProperty(LAST_FAIL_PROP, new Date().toISOString() + ' ' + reason);
     recordRefreshOutcome(false, reason);
   }
