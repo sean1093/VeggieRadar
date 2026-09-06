@@ -79,6 +79,10 @@ export const ProduceItemSchema = z.object({
   // 當日品種分解（批發）。只有 ≥2 個具意義品種（各佔量 ≥10%）時後端才送，
   // 依成交量排序、至多 4 筆。混合均價偏離個別攤位時，抽屜用它拆解。
   varieties: z.optional(z.array(ProduceVarietySchema)),
+  // 後端合理性守門（§2）判定這筆當日成交不可信：例如成交量崩到前一日兩成以下
+  // 卻暴漲，多半是一筆離群交易把均價拉走。價格照實顯示（舊價仍勝於空白），但
+  // 漲跌與「比近月便宜」徽章隱藏，且不寫入 28 天中位數基準。只會是 true。
+  suspect: z.optional(z.literal(true)),
 
   // Optional — only present in some responses / kept for the detail drawer.
   market: z.optional(z.string()),

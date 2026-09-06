@@ -47,10 +47,15 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
   // functional state updater.
   const [chart, setChart] = useState<{ Component: ChartComponent } | 'failed' | null>(null);
 
+  // The backend's plausibility guard flagged today's observation (§2): the
+  // price, the retail band and the varieties still stand — they are measured —
+  // but everything derived from comparing today with another day does not.
+  const suspect = item.suspect === true;
+
   // Which of the drawer's sections this item can show — the signal for
   // whether the variety breakdown and the baseline (§5) are being seen at all.
   const hasVarieties = (item.varieties?.length ?? 0) > 0;
-  const hasBaseline = item.vs_baseline_percent != null;
+  const hasBaseline = !suspect && item.vs_baseline_percent != null;
   const hasRetail = marketPrice(item) != null;
 
   useEffect(() => {
@@ -166,14 +171,17 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
                   : `約 ${item.avg_price.toFixed(1)} 元/公斤`}
               </p>
             </div>
-            <div>
-              <p className="text-xs text-stone">批發較昨日</p>
-              <p className={`mt-1 text-3xl font-semibold tabular-nums leading-none ${tone}`}>
-                {arrow} {Math.abs(item.change_percent).toFixed(1)}%
-              </p>
-              <p className="mt-1 text-xs text-stone">{down ? '便宜了，可以多買' : '變貴了，可考慮替代'}</p>
-            </div>
+            {!suspect && (
+              <div>
+                <p className="text-xs text-stone">批發較昨日</p>
+                <p className={`mt-1 text-3xl font-semibold tabular-nums leading-none ${tone}`}>
+                  {arrow} {Math.abs(item.change_percent).toFixed(1)}%
+                </p>
+                <p className="mt-1 text-xs text-stone">{down ? '便宜了，可以多買' : '變貴了，可考慮替代'}</p>
+              </div>
+            )}
           </div>
+          {suspect && <p className="text-sm text-stone">今日成交異常，暫不顯示漲跌</p>}
 
           {/* Wholesale anchor + how the market estimate is derived from it */}
           {marketMid != null && (
@@ -245,7 +253,7 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
           <div>
             <p className="mb-2 text-xs text-stone">近 7 日價格趨勢（元/公斤）</p>
             {chartArea}
-            {item.baseline_price != null && item.vs_baseline_percent != null && (
+            {!suspect && item.baseline_price != null && item.vs_baseline_percent != null && (
               <p className="mt-2 text-xs text-stone">
                 近一個月批發中位約 {item.baseline_price} 元/台斤，今日批發
                 {item.vs_baseline_percent < 0

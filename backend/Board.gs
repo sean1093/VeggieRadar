@@ -178,14 +178,31 @@ function readChunkedProp(prefix, countKey) {
 }
 
 /**
- * Trigger target — rebuilds and stores the board. An empty build is never
- * stored (a throttled crawl must not wipe a good board), but it is recorded so
- * `?action=diag` can show that refreshes are running and why they yield nothing.
+ * Trigger target — rebuilds the board, then publishes it only if it is
+ * plausible. An empty build is never stored (a throttled crawl must not wipe a
+ * good board) and neither is an implausible one — see `validateBoard`: a board
+ * that fails the guard is kept aside under `REJECTED_PROP_PREFIX` for
+ * inspection, while the cache, the durable props and the price history keep the
+ * board that was already on air. Every outcome is recorded so `?action=diag`
+ * can show that refreshes are running and what they decided.
  */
 function refreshBoardCache() {
   var board = buildBoard();
   var props = PropertiesService.getScriptProperties();
-  if (board.items && board.items.length) {
+  var verdict = board.items && board.items.length
+    ? validateBoard(board, parseStoredBoard(readDurableBoard()))
+    : { ok: false, reasons: [board.error || 'empty board'], suspects: [] };
+  // Every refresh leaves a verdict, including an empty build: otherwise
+  // `diag` would keep showing the previous run's `ok: true` under a refresh
+  // that produced nothing.
+  props.setProperty(LAST_VALIDATION_PROP, JSON.stringify({
+    at: new Date().toISOString(),
+    ok: verdict.ok,
+    reasons: verdict.reasons,
+    suspects: verdict.suspects
+  }));
+  if (verdict.ok) {
+    markSuspects(board, verdict.suspects);
     storeBoard(board);
     updateHistory(board);
     props.setProperty(LAST_OK_PROP, board.generated_at + ' ' + board.roc_date + ' ' + board.count + ' items');
@@ -195,12 +212,32 @@ function refreshBoardCache() {
       '品項數：' + board.count + '\n' +
       '完成於：' + board.generated_at + '\n');
   } else {
-    var reason = board.error || 'empty board';
+    var reason = verdict.reasons.join('; ');
+    if (board.items && board.items.length) {
+      // Kept whole rather than truncated: the numbers MOA answered with are
+      // the only evidence of what went wrong, and the chunk machinery already
+      // handles a payload far past the 9 KB per-property cap.
+      writeChunkedProp(REJECTED_PROP_PREFIX, REJECTED_PROP_COUNT, JSON.stringify(board));
+      reason = 'implausible: ' + reason;
+    }
+    // `recordRefreshOutcome` mails this text after three consecutive
+    // failures, so the reasons reach the operator without a second channel.
     props.setProperty(LAST_FAIL_PROP, new Date().toISOString() + ' ' + reason);
     recordRefreshOutcome(false, reason);
   }
   Logger.log('Board refreshed: ' + (board.count || 0) + ' items for ' + (board.roc_date || 'n/a'));
   return board;
+}
+
+/** Parses a stored board JSON string, or null when it is absent or corrupt. */
+function parseStoredBoard(json) {
+  if (!json) return null;
+  try {
+    return JSON.parse(json);
+  } catch (err) {
+    Logger.log('parseStoredBoard error: ' + err);
+    return null;
+  }
 }
 
 /**

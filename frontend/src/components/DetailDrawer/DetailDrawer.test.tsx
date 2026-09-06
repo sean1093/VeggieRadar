@@ -270,6 +270,39 @@ describe('DetailDrawer', () => {
       expect(onToggleWatch).toHaveBeenCalledWith(withRetail);
     });
   });
+  describe('suspect items', () => {
+    // Flagged by the backend guard: the measured numbers (price, band,
+    // varieties) stay, everything derived from comparing days goes.
+    const flagged: ProduceItem = {
+      ...withRetail,
+      suspect: true,
+      baseline_price: 18.1,
+      vs_baseline_percent: -22.3,
+      varieties: [
+        { name: '改良種', catty_price: 12, retail_price: 41, share_percent: 62 },
+        { name: '初秋', catty_price: 18.9, retail_price: 48, share_percent: 38 },
+      ],
+    };
+
+    it('replaces the change block with one line saying why', () => {
+      render(<DetailDrawer isOpen onClose={() => {}} item={flagged} allProduceItems={mockAllProduceItems} />);
+      expect(screen.getByText('今日成交異常，暫不顯示漲跌')).toBeInTheDocument();
+      expect(screen.queryByText('批發較昨日')).not.toBeInTheDocument();
+      expect(screen.queryByText(/12\.5%/)).not.toBeInTheDocument();
+    });
+
+    it('keeps the price, the band and the varieties — those are measured', () => {
+      render(<DetailDrawer isOpen onClose={() => {}} item={flagged} allProduceItems={mockAllProduceItems} />);
+      expect(screen.getByText('約 44')).toBeInTheDocument();
+      expect(screen.getByText('區間 35–55 元/台斤')).toBeInTheDocument();
+      expect(screen.getByText('初秋')).toBeInTheDocument();
+    });
+
+    it('drops the baseline sentence even though the fields are present', () => {
+      render(<DetailDrawer isOpen onClose={() => {}} item={flagged} allProduceItems={mockAllProduceItems} />);
+      expect(screen.queryByText(/近一個月批發中位/)).not.toBeInTheDocument();
+    });
+  });
 });
 /**
  * recharts is roughly half the initial JS and only this drawer uses it, so it

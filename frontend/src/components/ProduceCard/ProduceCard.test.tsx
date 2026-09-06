@@ -127,4 +127,29 @@ describe('ProduceCard', () => {
       expect(screen.queryByText(/比近月/)).not.toBeInTheDocument();
     });
   });
+  describe('suspect items', () => {
+    // The guard flagged today's observation for this item, so every
+    // comparison-derived signal has to go — while the price stays.
+    const flagged: ProduceItem = { ...down, suspect: true, baseline_price: 18.1, vs_baseline_percent: -22.3 };
+
+    it('keeps the price and the band but drops the change badge', () => {
+      render(<ProduceCard item={flagged} onClick={vi.fn()} />);
+      expect(screen.getByText('約 44')).toBeInTheDocument();
+      expect(screen.getByText('市場 35–55・批發 14.6')).toBeInTheDocument();
+      expect(screen.queryByText(/3\.1%/)).not.toBeInTheDocument();
+      expect(screen.queryByText('便宜了')).not.toBeInTheDocument();
+    });
+
+    it('hides the 比近月便宜 badge it would otherwise have earned', () => {
+      render(<ProduceCard item={flagged} onClick={vi.fn()} />);
+      expect(screen.queryByText(/比近月便宜/)).not.toBeInTheDocument();
+    });
+
+    it('announces 今日成交異常 instead of the change', () => {
+      render(<ProduceCard item={flagged} onClick={vi.fn()} />);
+      expect(screen.getByRole('button', { name: /今日成交異常/ })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /便宜了/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /比近一個月便宜/ })).not.toBeInTheDocument();
+    });
+  });
 });

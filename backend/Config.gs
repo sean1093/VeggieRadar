@@ -109,6 +109,34 @@ var ALERT_SENT_PROP = 'veggie_alert_sent_at';
 
 var ALERT_ACTIVE_PROP = 'veggie_alert_active';
 
+// Plausibility guard (`Validate.gs`). The refresh used to reject exactly one
+// thing — an EMPTY board — so a throttled crawl or a MOA unit change would
+// overwrite 94 good prices with 40 wrong ones, and `updateHistory` would bake
+// the wrong numbers into the 28-day baseline on the way. Every threshold below
+// answers "certainly broken", not "surprising": a rejected board means users
+// keep yesterday's prices, which is itself a real cost, so the guard must never
+// be what hides a thin-but-real trading day.
+var BOARD_MIN_ITEMS = 30;             // absolute floor; a normal day carries ~90–94 of the 104 items defined below
+// The external probe in `.github/workflows/prod-probe.yml` alerts at 60 items.
+// Deliberately a different number for a different question: the probe asks
+// "worth a look?", this asks "certainly broken?", and only the second one
+// withholds data from users.
+var BOARD_MIN_PREV_RATIO = 0.6;       // vs the stored board; seasonal drop-out is < 10 %/day, so losing 40 % is a fetch failure
+var BOARD_JUMP_RATIO = 3;             // ×3 (or ÷3) in one day is not a market move
+var BOARD_MAX_JUMP_SHARE = 0.2;       // ...and a fifth of the board doing it at once is a unit/column change
+var BOARD_SHIFT_MIN_RATIO = 0.5;      // median ratio over common items; outside this the WHOLE board moved
+var BOARD_SHIFT_MAX_RATIO = 2;
+var SUSPECT_CHANGE_PERCENT = 150;     // item level; a crop can double overnight, 2.5× is a data error
+var SUSPECT_VOLUME_RATIO = 0.2;       // ...and only with the volume collapsed too: one outlier trade carrying the average
+var SUSPECT_VARIETY_SHARE = 95;       // a variety holding this much of the volume IS the item
+var SUSPECT_VARIETY_DIVERGENCE = 0.5; // ...so a price this far from the blend means the rows were grouped wrong
+// The rejected board is kept rather than dropped: it is the only evidence of
+// what MOA actually answered. Chunked like the live board — a single property
+// caps at 9 KB and a board is ~40 KB.
+var REJECTED_PROP_PREFIX = 'veggie_board_rejected_chunk_';
+var REJECTED_PROP_COUNT = 'veggie_board_rejected_chunks';
+var LAST_VALIDATION_PROP = 'veggie_last_validation'; // last verdict, published by `diag`
+
 // Per-item wholesale price history, appended by the 4-hourly refresh (zero
 // extra MOA traffic) and seeded once through `?action=backfill`. It powers
 // the "vs the usual price" baseline: the median of up to BASELINE_WINDOW

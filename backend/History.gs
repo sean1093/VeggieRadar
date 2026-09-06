@@ -48,8 +48,11 @@ function withHistoryLock(fn) {
 /**
  * Records one (trading date, price) observation per board item. Idempotent
  * per date: the 4-hourly refresh revisits the same trading day and must
- * replace, not duplicate. Trimming rides on every write — a rolling window
- * needs no separate cleanup job that could silently die.
+ * replace, not duplicate. Items the plausibility guard marked `suspect` are
+ * skipped — a flagged observation must not bend the 28-day median, which is
+ * the baseline every later "cheaper than usual" claim is measured against.
+ * Trimming rides on every write — a rolling window needs no separate cleanup
+ * job that could silently die.
  */
 function updateHistory(board) {
   if (!board || !board.roc_date || !board.items || !board.items.length) return;
@@ -58,6 +61,7 @@ function updateHistory(board) {
       var history = readHistory();
       for (var i = 0; i < board.items.length; i++) {
         var it = board.items[i];
+        if (it.suspect) continue;
         history.items[it.name] = appendObservation(history.items[it.name], board.roc_date, it.avg_price);
       }
       pruneHistory(history);

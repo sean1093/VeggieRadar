@@ -164,6 +164,9 @@ function handleDiag(full, props) {
     refresh_queued: !!CacheService.getScriptCache().get(REFRESH_LOCK_KEY),
     last_refresh_ok: props[LAST_OK_PROP] || null,
     last_refresh_fail: full ? (props[LAST_FAIL_PROP] || null) : redactFailure(props[LAST_FAIL_PROP]),
+    // Public, unlike the raw failure reason: every string in here is ours —
+    // our own rule text and our own item names — never platform or MOA text.
+    last_validation: parseValidation(props[LAST_VALIDATION_PROP]),
     history: historySummary(),
     // Alert state, so a silent mailbox can be told apart from a silent
     // pipeline. The recipient address is deliberately not exposed — diag is a
@@ -190,7 +193,19 @@ function redactFailure(value) {
   var category = 'unknown';
   if (reason.indexOf('近期查無交易資料') !== -1) category = 'no_trade_dates';
   else if (reason.indexOf('empty board') !== -1) category = 'empty_board';
+  else if (reason.indexOf('implausible:') === 0) category = 'implausible';
   return at + ' ' + category;
+}
+
+/** Parsed verdict of the last plausibility check, or null when absent/corrupt. */
+function parseValidation(json) {
+  if (!json) return null;
+  try {
+    return JSON.parse(json);
+  } catch (err) {
+    Logger.log('parseValidation error: ' + err);
+    return null;
+  }
 }
 
 /** Freshness header of the stored board — no items, so it stays cheap to serve. */
