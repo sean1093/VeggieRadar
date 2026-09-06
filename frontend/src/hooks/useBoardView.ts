@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { track } from '../lib/analytics';
-import { pushUrlState, replaceUrlState, useUrlState, type SortMode } from '../lib/urlState';
+import { closeDrawerUrl, pushUrlState, replaceUrlState, useUrlState, type SortMode } from '../lib/urlState';
 import { byValueFirst } from '../lib/utils/value-sort';
 import type { ProduceItem } from '../types/produce';
 
@@ -110,7 +110,7 @@ export function useBoardView(
   }, []);
 
   const select = useCallback((item: ProduceItem) => pushUrlState({ item: item.name }), []);
-  const close = useCallback(() => pushUrlState({ item: null }), []);
+  const close = useCallback(() => closeDrawerUrl(), []);
 
   const selectedItem = useMemo(() => {
     if (!url.item) return null;

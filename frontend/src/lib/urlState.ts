@@ -124,12 +124,14 @@ function write(patch: Partial<UrlState>, mode: 'push' | 'replace'): void {
   // pathname and search are kept: the app is served from /VeggieRadar/, and a
   // campaign parameter belongs to the visit rather than to the view.
   const url = `${location.pathname}${location.search}${hash}`;
-  if (mode === 'push') history.pushState(null, '', url);
+  // The pushed entry is marked so `closeDrawerUrl` can tell it apart from a
+  // deep link that arrived on its own entry.
+  if (mode === 'push') history.pushState({ drawer: true }, '', url);
   else history.replaceState(null, '', url);
   for (const onChange of listeners) onChange();
 }
 
-/** Opening or closing the drawer is a navigation, so it earns a history entry. */
+/** Opening the drawer is a navigation, so it earns a history entry. */
 export function pushUrlState(patch: Partial<UrlState>): void {
   write(patch, 'push');
 }
@@ -141,4 +143,17 @@ export function pushUrlState(patch: Partial<UrlState>): void {
  */
 export function replaceUrlState(patch: Partial<UrlState>): void {
   write(patch, 'replace');
+}
+
+/**
+ * Closing the drawer leaves the entry that opened it, so × and the back key
+ * are the same move: pushing a second "board" entry instead would make Back
+ * reopen the drawer and let every open/close pair pile up two entries. A
+ * deep link opened the drawer on its own entry with nothing of ours behind
+ * it, so that one is rewritten in place.
+ */
+export function closeDrawerUrl(): void {
+  const { history } = window;
+  if ((history.state as { drawer?: boolean } | null)?.drawer) history.back();
+  else write({ item: null }, 'replace');
 }

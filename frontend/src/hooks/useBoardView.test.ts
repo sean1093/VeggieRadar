@@ -1,4 +1,4 @@
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useBoardView, type WatchlistFilter } from './useBoardView';
 import { parseUrlState } from '../lib/urlState';
@@ -151,15 +151,16 @@ describe('useBoardView', () => {
     expect(bare.current.hasBaselines).toBe(false);
   });
 
-  it('holds the row the drawer is showing', () => {
+  it('holds the row the drawer is showing', async () => {
     const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
     expect(result.current.selectedItem).toBeNull();
 
     act(() => result.current.select(RADISH));
     expect(result.current.selectedItem).toBe(RADISH);
 
+    // Closing leaves the drawer's history entry; jsdom traverses on a task.
     act(() => result.current.close());
-    expect(result.current.selectedItem).toBeNull();
+    await waitFor(() => expect(result.current.selectedItem).toBeNull());
   });
 });
 
@@ -168,7 +169,10 @@ describe('useBoardView — the URL is the state', () => {
     localStorage.clear();
     at('');
   });
-  afterEach(() => at(''));
+  afterEach(() => {
+    vi.restoreAllMocks();
+    at('');
+  });
 
   it('restores the drawer, the filter, the order and the query from a link', () => {
     at('#/i/白蘿蔔?q=蘿蔔&f=根莖類&sort=value');
@@ -196,7 +200,7 @@ describe('useBoardView — the URL is the state', () => {
     expect(result.current.visibleItems).toHaveLength(4);
   });
 
-  it('writes the view into the URL — the drawer as an entry, the rest in place', () => {
+  it('writes the view into the URL — the drawer as an entry, the rest in place', async () => {
     const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
 
     act(() => result.current.changeFilter('水果'));
@@ -204,13 +208,34 @@ describe('useBoardView — the URL is the state', () => {
     act(() => result.current.toggleSort());
     expect(window.location.hash).toBe('#/?f=%E6%B0%B4%E6%9E%9C&sort=value');
 
-    const entries = window.history.length;
+    // Filter and sort rewrote the entry in place; the drawer pushed its own,
+    // marked so closing can tell it from a pasted link.
+    expect(window.history.state).toBeNull();
     act(() => result.current.select(BANANA));
     expect(window.location.hash).toBe('#/i/%E9%A6%99%E8%95%89?f=%E6%B0%B4%E6%9E%9C&sort=value');
-    expect(window.history.length).toBe(entries + 1);
+    expect(window.history.state).toEqual({ drawer: true });
 
+    // × is the back key: the drawer's entry is left, not buried under a
+    // second board entry that Back would have to climb over.
+    const back = vi.spyOn(window.history, 'back');
     act(() => result.current.close());
-    expect(window.location.hash).toBe('#/?f=%E6%B0%B4%E6%9E%9C&sort=value');
+    expect(back).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(window.location.hash).toBe('#/?f=%E6%B0%B4%E6%9E%9C&sort=value'));
+    expect(result.current.selectedItem).toBeNull();
+  });
+
+  it('closes a deep-linked drawer in place — there is no entry of ours behind it', () => {
+    at('#/i/香蕉');
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
+    expect(result.current.selectedItem).toBe(BANANA);
+
+    const back = vi.spyOn(window.history, 'back');
+    const entries = window.history.length;
+    act(() => result.current.close());
+    expect(back).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe('#/');
+    expect(window.history.length).toBe(entries);
+    expect(result.current.selectedItem).toBeNull();
   });
 
   it('follows the back key: the drawer closes and the filter comes back', () => {
