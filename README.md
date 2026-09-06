@@ -630,9 +630,14 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
    redeploy the same deployment to publish code:
    `clasp deploy -i <deploymentId> -d "<description>"`.
 2. In the editor, **Project Settings → Script Properties**, add:
-   - `ADMIN_TOKEN` — a long random string (e.g. `openssl rand -base64 32`).
-     It gates `warm&force`, `backfill` and `alerttest` (§2). Keep it out of the
-     repo; the CI deploy reads it from the `GAS_ADMIN_TOKEN` secret (§8).
+   - `ADMIN_TOKEN` — a long random string, e.g. `openssl rand -hex 32`. It
+     travels as a URL query parameter, so it must be URL-safe: hex or
+     base64url only — plain base64 contains `+`, which `e.parameter` decodes
+     to a space and the comparison then fails. An empty value counts as
+     unset (everything refused). It gates `warm&force`, `backfill` and
+     `alerttest` (§2). Keep it out of the repo; the CI deploy reads it from
+     the `GAS_ADMIN_TOKEN` secret (§8). There is one token, with no expiry
+     or scope: rotating it means changing both places.
    - `ALERT_EMAIL` (optional) — where failure alerts go. Unset, alerts go to
      the deploying account.
 3. Run `installDailyTrigger()` once in the editor — it installs the refresh
