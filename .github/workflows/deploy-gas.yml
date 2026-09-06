@@ -70,10 +70,22 @@ jobs:
 
       - name: Queue a board refresh
         # Non-blocking: the endpoint schedules the crawl and returns at once.
+        # `force=1` jumps the 15-minute lock and is honoured only with the
+        # operator token (the ADMIN_TOKEN script property, mirrored in the
+        # GAS_ADMIN_TOKEN secret). Without the secret the call still queues a
+        # refresh, subject to the lock. `-o /dev/null` keeps the response —
+        # which echoes the board summary, never the token — out of the log.
         if: env.HAS_SA == 'true' || env.HAS_TOKEN == 'true'
+        env:
+          GAS_ADMIN_TOKEN: ${{ secrets.GAS_ADMIN_TOKEN }}
         run: |
-          curl -fsSL --max-time 60 \
-            "https://script.google.com/macros/s/$DEPLOYMENT_ID/exec?action=warm&force=1"
+          url="https://script.google.com/macros/s/$DEPLOYMENT_ID/exec?action=warm"
+          if [ -n "$GAS_ADMIN_TOKEN" ]; then
+            url="$url&force=1&token=$GAS_ADMIN_TOKEN"
+          else
+            echo "GAS_ADMIN_TOKEN not set — queuing a refresh without force"
+          fi
+          curl -fsSL --max-time 60 -o /dev/null "$url"
 
       - name: Skip notice
         if: env.HAS_SA != 'true' && env.HAS_TOKEN != 'true'

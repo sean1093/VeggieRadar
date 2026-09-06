@@ -57,13 +57,18 @@ function doGet(e) {
     } else if (action === 'search') {
       payload = handleSearch(params);
     } else if (action === 'warm') {
-      payload = handleWarm(params);
+      // Public without `force`: the 15-minute lock bounds its cost, and the
+      // stale-board self-heal depends on it. `force` jumps that lock, so it
+      // is honoured only for the operator — anyone else gets the plain path.
+      var forced = !!params.force && isAdmin(params);
+      payload = handleWarm(forced ? params : withoutForce(params));
+      payload.forced = forced;
     } else if (action === 'backfill') {
-      payload = handleBackfill(params);
+      payload = isAdmin(params) ? handleBackfill(params) : unauthorized(action);
     } else if (action === 'alerttest') {
-      payload = handleAlertTest();
+      payload = isAdmin(params) ? handleAlertTest() : unauthorized(action);
     } else if (action === 'diag') {
-      payload = handleDiag();
+      payload = handleDiag(isAdmin(params));
     } else {
       payload = readBoard();
     }
@@ -80,6 +85,50 @@ function jsonOut(obj) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
+// --- Operator authentication ---
+
+/**
+ * True when `params.token` matches the `ADMIN_TOKEN` script property. Fails
+ * closed: no property, no token, or a properties outage all mean "not the
+ * operator". The comparison walks every character regardless of where the
+ * strings first differ, so response time cannot be used to guess the token.
+ */
+function isAdmin(params) {
+  var expected;
+  try {
+    expected = PropertiesService.getScriptProperties().getProperty(ADMIN_TOKEN_PROP);
+  } catch (err) {
+    Logger.log('isAdmin: properties unavailable: ' + err);
+    return false;
+  }
+  if (!expected) return false;
+  var given = String((params && params.token) || '');
+  if (given.length !== expected.length) return false;
+  var diff = 0;
+  for (var i = 0; i < expected.length; i++) {
+    diff |= given.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+/**
+ * Refusal payload for an admin action. Deliberately does nothing else — no
+ * mail, no property write — so the refusal path itself cannot be made
+ * expensive. Apps Script cannot set an HTTP status, hence the body flag.
+ */
+function unauthorized(action) {
+  return { type: action, error: 'unauthorized', message: '此操作需要 token 參數' };
+}
+
+/** Copy of `params` without `force`, for the anonymous warm path. */
+function withoutForce(params) {
+  var out = {};
+  for (var key in params) {
+    if (key !== 'force') out[key] = params[key];
+  }
+  return out;
+}
+
 /** `?action=warm` — queues a rebuild and answers immediately. `force=1` jumps the lock. */
 function handleWarm(params) {
   if (params && params.force) CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
@@ -92,8 +141,13 @@ function handleWarm(params) {
   };
 }
 
-/** `?action=diag` — makes refresh liveness observable without opening the GAS console. */
-function handleDiag() {
+/**
+ * `?action=diag` — makes refresh liveness observable without opening the GAS
+ * console. Public, so the last failure is reduced to a category unless the
+ * caller holds the admin token: the raw reason can quote whatever MOA or the
+ * platform answered, and only the operator needs that text.
+ */
+function handleDiag(full) {
   var props = PropertiesService.getScriptProperties().getProperties();
   var handlers = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
   return {
@@ -104,7 +158,7 @@ function handleDiag() {
     triggers: handlers,
     refresh_queued: !!CacheService.getScriptCache().get(REFRESH_LOCK_KEY),
     last_refresh_ok: props[LAST_OK_PROP] || null,
-    last_refresh_fail: props[LAST_FAIL_PROP] || null,
+    last_refresh_fail: full ? (props[LAST_FAIL_PROP] || null) : redactFailure(props[LAST_FAIL_PROP]),
     history: historySummary(),
     // Alert state, so a silent mailbox can be told apart from a silent
     // pipeline. The recipient address is deliberately not exposed — diag is a
@@ -115,6 +169,21 @@ function handleDiag() {
       last_sent: props[ALERT_SENT_PROP] || null,
     },
   };
+}
+
+/**
+ * `LAST_FAIL_PROP` is stored as `<ISO timestamp> <reason>`. Keeps the
+ * timestamp (the operator's "when") and maps the reason to a category.
+ */
+function redactFailure(value) {
+  if (!value) return null;
+  var space = value.indexOf(' ');
+  var at = space === -1 ? value : value.substring(0, space);
+  var reason = space === -1 ? '' : value.substring(space + 1);
+  var category = 'unknown';
+  if (reason.indexOf('近期查無交易資料') !== -1) category = 'no_trade_dates';
+  else if (reason.indexOf('empty board') !== -1) category = 'empty_board';
+  return at + ' ' + category;
 }
 
 /** Freshness header of the stored board — no items, so it stays cheap to serve. */

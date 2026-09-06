@@ -35,7 +35,7 @@ const GS_FILES = readdirSync(BACKEND_DIR).filter((f) => f.endsWith('.gs')).sort(
 const SOURCE = GS_FILES.map((f) => readFileSync(resolve(BACKEND_DIR, f), 'utf8')).join('\n');
 
 /** Loads the backend with stubbed GAS globals. `responses` maps URL → rows. */
-function loadBackend(responses: Record<string, Row[]> = {}) {
+function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<string, unknown> = {}) {
   const logs: string[] = [];
   const props = new Map<string, string>();
   const cache = new Map<string, string>();
@@ -45,6 +45,7 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
   const mails: { to: string; subject: string; body: string }[] = [];
   let mailThrows = false;
   let brokenPropKey: string | null = null;
+  let sessionEmail: string | null = 'owner@example.com';
 
   const respond = (url: string) => {
     fetches.push(url);
@@ -99,6 +100,14 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
     },
     Logger: { log: (m: unknown) => void logs.push(String(m)) },
     Utilities: { sleep: () => {} },
+    Session: {
+      getEffectiveUser: () => ({
+        getEmail: () => {
+          if (sessionEmail === null) throw new Error('session unavailable');
+          return sessionEmail;
+        },
+      }),
+    },
     ContentService: {
       MimeType: { JSON: 'json' },
       createTextOutput: (t: string) => ({ setMimeType: () => ({ body: t }) }),
@@ -136,21 +145,31 @@ function loadBackend(responses: Record<string, Row[]> = {}) {
     'applyBaselines', 'backfillHistory', 'handleBackfill', 'buildBoard',
     'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown', 'handleSearch', 'RETAIL_BAND_ROOT',
     'sendAlert', 'recordRefreshOutcome', 'withAlertLock', 'handleAlertTest',
-    'ALERT_EMAIL', 'ALERT_FAILURE_STREAK', 'ALERT_SILENCE_MS', 'ALERT_COOLDOWN_MS',
+    'ALERT_FAILURE_STREAK', 'ALERT_SILENCE_MS', 'ALERT_COOLDOWN_MS',
     'REFRESH_INTERVAL_HOURS', 'installDailyTrigger', 'refreshBoardCache',
+    'doGet', 'isAdmin', 'alertRecipient', 'redactFailure', 'ADMIN_TOKEN_PROP', 'ALERT_EMAIL_PROP',
   ];
+  const merged: Record<string, unknown> = { ...services, ...overrides };
   const factory = new Function(
-    ...Object.keys(services),
+    ...Object.keys(merged),
     `${SOURCE}\nreturn { ${exported.join(', ')} };`,
   );
+  const api = factory(...Object.values(merged));
   return {
-    api: factory(...Object.values(services)),
+    api,
     logs, props, cache, triggers, fetches, locks, mails,
     breakMail: () => { mailThrows = true; },
     fixMail: () => { mailThrows = false; },
     breakProp: (key: string) => { brokenPropKey = key; },
     contendLock: () => { locks.contended = true; },
+    breakSession: () => { sessionEmail = null; },
+    /** Parsed JSON body of a `doGet` call — the shape a browser would see. */
+    get: (parameter: Record<string, string>) => JSON.parse(factoryOut(parameter).body),
   };
+
+  function factoryOut(parameter: Record<string, string>): { body: string } {
+    return api.doGet({ parameter });
+  }
 }
 
 const row = (CropName: string, Avg_Price: number, Trans_Quantity: number, MarketName = '台北一'): Row =>
@@ -1070,7 +1089,7 @@ describe('failure alerting', () => {
     for (let i = 0; i < api.ALERT_FAILURE_STREAK; i++) api.refreshBoardCache();
 
     expect(mails).toHaveLength(1);
-    expect(mails[0].to).toBe(api.ALERT_EMAIL);
+    expect(mails[0].to).toBe('owner@example.com'); // deployer fallback, see alertRecipient
     expect(mails[0].subject).toContain('連續 3 次更新失敗');
     expect(mails[0].body).toContain('近期查無交易資料'); // the actual reason, not a generic message
   });
@@ -1167,7 +1186,7 @@ describe('failure alerting', () => {
     api.refreshBoardCache();
     const diag = api.handleDiag();
     expect(diag.alert).toEqual({ failure_streak: 1, incident_open: false, last_sent: null });
-    expect(JSON.stringify(diag)).not.toContain(api.ALERT_EMAIL);
+    expect(JSON.stringify(diag)).not.toContain('owner@example.com');
   });
 
   describe('?action=alerttest', () => {
@@ -1197,7 +1216,7 @@ describe('failure alerting', () => {
       // The endpoint is public and unauthenticated, and Apps Script mail
       // errors can quote the recipient address — raw text must never leak.
       expect(JSON.stringify(failed)).not.toContain('mail quota exceeded');
-      expect(JSON.stringify(failed)).not.toContain(api.ALERT_EMAIL);
+      expect(JSON.stringify(failed)).not.toContain('owner@example.com');
       // ...but the raw text is kept for whoever owns the script.
       expect(props.has('veggie_alert_test_failed_at')).toBe(true);
     });
@@ -1346,6 +1365,157 @@ describe('alerting under contention and failure', () => {
  * forever, as opposed to the one-off "nothing was dropped" check that belonged
  * to the migration itself and would rot into a test of a deleted file.
  */
+/** `loadBackend` with one GAS service swapped out. */
+const loadBackendWith = (overrides: Record<string, unknown>) => loadBackend({}, overrides);
+
+describe('operator authentication — isAdmin', () => {
+  it('fails closed while no ADMIN_TOKEN property is set', () => {
+    const { api } = loadBackend();
+    expect(api.isAdmin({ token: '' })).toBe(false);
+    expect(api.isAdmin({ token: 'anything' })).toBe(false);
+    expect(api.isAdmin({})).toBe(false);
+    expect(api.isAdmin(undefined)).toBe(false);
+  });
+
+  it('accepts only the exact token', () => {
+    const { api, props } = loadBackend();
+    props.set(api.ADMIN_TOKEN_PROP, 's3cret-token');
+    expect(api.isAdmin({ token: 's3cret-token' })).toBe(true);
+    expect(api.isAdmin({ token: 's3cret-tokeN' })).toBe(false); // same length, one char off
+    expect(api.isAdmin({ token: 's3cret' })).toBe(false);
+    expect(api.isAdmin({ token: 's3cret-token-and-more' })).toBe(false);
+    expect(api.isAdmin({})).toBe(false);
+  });
+
+  it('treats a properties outage as "not the operator"', () => {
+    const { api, props } = loadBackend();
+    props.set(api.ADMIN_TOKEN_PROP, 's3cret-token');
+    const broken = { getScriptProperties: () => { throw new Error('properties unavailable'); } };
+    // Rebuild the backend with a broken PropertiesService for this one check.
+    const { api: brokenApi } = loadBackendWith({ PropertiesService: broken });
+    expect(brokenApi.isAdmin({ token: 's3cret-token' })).toBe(false);
+  });
+});
+
+describe('doGet — admin gate on operator actions', () => {
+  const TOKEN = 'correct-horse-battery';
+  const withToken = (extra: Record<string, string> = {}) => ({ token: TOKEN, ...extra });
+
+  it('serves the board, search and trend to anyone', () => {
+    const { get } = loadBackend({ 甘藍: [row('甘藍-初秋', 20, 60000)] });
+    expect(get({}).type).toBe('board');
+    expect(get({ action: 'search', query: '高麗菜' }).type).toBe('search');
+    expect(get({ action: 'getTrend', cropName: '甘藍' }).cropName).toBe('甘藍');
+  });
+
+  it('refuses backfill without the token and creates no trigger', () => {
+    const { get, triggers, props } = loadBackend();
+    props.set('ADMIN_TOKEN', TOKEN);
+    const res = get({ action: 'backfill', force: '1' });
+    expect(res).toEqual({ type: 'backfill', error: 'unauthorized', message: '此操作需要 token 參數' });
+    expect(triggers).toEqual([]);
+
+    expect(get({ action: 'backfill', ...withToken() }).queued).toBe(true);
+    expect(triggers.map((t) => t.handler)).toEqual(['backfillHistoryOnce']);
+  });
+
+  it('refuses backfill even with a token while no ADMIN_TOKEN is configured', () => {
+    const { get, triggers } = loadBackend();
+    expect(get({ action: 'backfill', token: TOKEN }).error).toBe('unauthorized');
+    expect(triggers).toEqual([]);
+  });
+
+  it('refuses alerttest without the token and sends nothing', () => {
+    const { get, mails, props } = loadBackend();
+    props.set('ADMIN_TOKEN', TOKEN);
+    expect(get({ action: 'alerttest' }).error).toBe('unauthorized');
+    expect(mails).toHaveLength(0);
+
+    expect(get({ action: 'alerttest', ...withToken() }).sent).toBe(true);
+    expect(mails).toHaveLength(1);
+  });
+
+  it('keeps warm public but honours force only for the operator', () => {
+    const { get, cache, props } = loadBackend();
+    props.set('ADMIN_TOKEN', TOKEN);
+
+    const first = get({ action: 'warm' });
+    expect(first.queued).toBe(true); // anonymous warm still self-heals a stale board
+    expect(first.forced).toBe(false);
+
+    // Locked for 15 minutes now. Anonymous force must NOT jump it …
+    const anon = get({ action: 'warm', force: '1' });
+    expect(anon.queued).toBe(false);
+    expect(anon.forced).toBe(false);
+    expect(cache.has('veggie_refresh_queued')).toBe(true);
+
+    // … the operator can.
+    const admin = get({ action: 'warm', ...withToken({ force: '1' }) });
+    expect(admin.queued).toBe(true);
+    expect(admin.forced).toBe(true);
+  });
+
+  it('refusal writes nothing — no mail, no property, no trigger', () => {
+    const { get, mails, props, triggers } = loadBackend();
+    props.set('ADMIN_TOKEN', TOKEN);
+    const before = new Map(props);
+    get({ action: 'backfill' });
+    get({ action: 'alerttest' });
+    expect(mails).toHaveLength(0);
+    expect(triggers).toEqual([]);
+    expect(props).toEqual(before);
+  });
+
+  it('redacts the last failure reason on diag unless the caller is the operator', () => {
+    const { get, props, api } = loadBackend();
+    props.set('ADMIN_TOKEN', TOKEN);
+    props.set('veggie_last_refresh_fail', '2026-09-01T02:00:00.000Z 近期查無交易資料');
+
+    expect(get({ action: 'diag' }).last_refresh_fail).toBe('2026-09-01T02:00:00.000Z no_trade_dates');
+    expect(get({ action: 'diag', ...withToken() }).last_refresh_fail).toBe('2026-09-01T02:00:00.000Z 近期查無交易資料');
+
+    expect(api.redactFailure(null)).toBeNull();
+    expect(api.redactFailure('2026-09-01T02:00:00.000Z empty board')).toBe('2026-09-01T02:00:00.000Z empty_board');
+    expect(api.redactFailure('2026-09-01T02:00:00.000Z MOA said: 500 <html>…')).toBe('2026-09-01T02:00:00.000Z unknown');
+  });
+});
+
+describe('alert recipient — nothing personal in the source', () => {
+  it('reads the ALERT_EMAIL property first', () => {
+    const { api, props, mails } = loadBackend();
+    props.set(api.ALERT_EMAIL_PROP, 'ops@example.org');
+    expect(api.alertRecipient()).toBe('ops@example.org');
+    api.handleAlertTest();
+    expect(mails[0].to).toBe('ops@example.org');
+  });
+
+  it('falls back to the deploying account', () => {
+    const { api } = loadBackend();
+    expect(api.alertRecipient()).toBe('owner@example.com');
+  });
+
+  it('reports a category when no recipient can be resolved, and never breaks serving', () => {
+    const { api, breakSession, mails, logs } = loadBackend();
+    breakSession();
+    expect(api.alertRecipient()).toBeNull();
+
+    const probe = api.handleAlertTest();
+    expect(probe.sent).toBe(false);
+    expect(probe.reason).toBe('no_recipient');
+    expect(mails).toHaveLength(0);
+
+    // The serving path's silence alert goes through the same resolver; a
+    // missing recipient is logged and swallowed like any other mail failure.
+    api.storeBoard({ type: 'board', roc_date: '115.08.01', generated_at: '2000-01-01T00:00:00.000Z', count: 1, items: [{ name: 'x' }] });
+    expect(api.readBoard().type).toBe('board');
+    expect(logs.some((l) => l.includes('no alert recipient'))).toBe(true);
+  });
+
+  it('keeps every e-mail address out of the backend source', () => {
+    expect(SOURCE).not.toMatch(/[\w.+-]+@[\w-]+\.[\w.]+/);
+  });
+});
+
 describe('backend file layout', () => {
   it('declares every global exactly once across the merged scope', () => {
     // Catches the copy-paste that leaves a function in two files, where Apps
