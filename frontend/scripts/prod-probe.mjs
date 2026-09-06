@@ -46,15 +46,40 @@ const TIMEOUT_MS = 20_000;
 // Two 4-hourly refresh cycles plus the crawl: one missed run is routine and
 // self-heals, two in a row is a pipeline that stopped.
 const MAX_AGE_MS = 8 * 60 * 60 * 1000;
+// A `generated_at` ahead of this clock is corrupt, not fresh; the allowance
+// covers ordinary clock skew between the runner and Google.
+const MAX_SKEW_MS = 5 * 60 * 1000;
 const EXCERPT_CHARS = 500;
 
 const PAGES_URL = withTrailingSlash(process.env.PAGES_URL || 'https://sean1093.github.io/VeggieRadar/');
-const API_BASE_URL = process.env.API_BASE_URL || viteApiBaseUrl();
+// `/exec/` is a different Apps Script path from `/exec`, so a dispatch input
+// pasted with a trailing slash must not turn the probe into a false alarm.
+const API_BASE_URL = (process.env.API_BASE_URL || viteApiBaseUrl()).replace(/\/+$/, '');
 const MIRROR_URL = process.env.MIRROR_URL || `${PAGES_URL}data/board.json`;
 const OUT = process.env.OUT || 'probe-result.json';
 
 function withTrailingSlash(url) {
   return url.endsWith('/') ? url : `${url}/`;
+}
+
+/**
+ * Parses a body that must be a JSON object. `null`, a number or an array are
+ * valid JSON and would pass `JSON.parse`, then throw on the first property
+ * read — and an exception here aborts the probe before it writes its result,
+ * which the workflow deliberately treats as a broken watchdog rather than as
+ * a broken backend. Returns `{ value }` or `{ problem }`.
+ */
+function parseObject(body) {
+  let value;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return { problem: 'non-JSON body' };
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return { problem: `JSON body is ${Array.isArray(value) ? 'an array' : String(value)}, not an object` };
+  }
+  return { value };
 }
 
 /**
@@ -115,6 +140,9 @@ function boardProblem(board) {
   }
   const age = ageMs(board.generated_at);
   if (age === null) return { kind: 'stale', detail: 'generated_at missing or unparsable' };
+  if (age < -MAX_SKEW_MS) {
+    return { kind: 'stale', detail: `generated_at is ${hours(-age)} h in the future — clock or payload corrupt` };
+  }
   if (age > MAX_AGE_MS) {
     return { kind: 'stale', detail: `crawled ${hours(age)} h ago, limit ${hours(MAX_AGE_MS)} h` };
   }
@@ -150,12 +178,9 @@ async function checkMirror() {
   if (res.status === 404) return skipped(name, 'mirror not deployed yet');
   if (res.status !== 200) return failed(name, 'mirror_stale', `HTTP ${res.status}`, res.body);
 
-  let board;
-  try {
-    board = JSON.parse(res.body);
-  } catch {
-    return failed(name, 'mirror_stale', 'non-JSON body', res.body);
-  }
+  const parsed = parseObject(res.body);
+  if (parsed.problem) return failed(name, 'mirror_stale', parsed.problem, res.body);
+  const board = parsed.value;
   const problem = boardProblem(board);
   if (problem) return failed(name, 'mirror_stale', problem.detail, res.body);
   return ok(name, `${board.count} items, crawled ${hours(ageMs(board.generated_at))} h ago`);
@@ -168,15 +193,12 @@ async function checkGasBoard() {
   if (res.error) return failed(name, 'gas_error', `request failed: ${res.error}`);
   if (res.status !== 200) return failed(name, 'gas_error', `HTTP ${res.status}`, res.body);
 
-  let board;
-  try {
-    board = JSON.parse(res.body);
-  } catch {
-    // Apps Script answers 200 with an HTML page for platform-level failures
-    // (over quota, a deploy that never re-consented to its scopes), so the
-    // body is the only thing that tells a healthy backend from a dead one.
-    return failed(name, 'gas_error', 'non-JSON body — GAS platform error page', res.body);
-  }
+  // Apps Script answers 200 with an HTML page for platform-level failures
+  // (over quota, a deploy that never re-consented to its scopes), so the
+  // body is the only thing that tells a healthy backend from a dead one.
+  const parsed = parseObject(res.body);
+  if (parsed.problem) return failed(name, 'gas_error', `${parsed.problem} — GAS platform error page?`, res.body);
+  const board = parsed.value;
   if (board.error) return failed(name, 'gas_error', `backend error: ${board.error}`, res.body);
 
   const problem = boardProblem(board);
@@ -214,16 +236,19 @@ async function checkDiag() {
   if (res.error) return unavailable(failed(name, 'gas_error', `request failed: ${res.error}`));
   if (res.status !== 200) return unavailable(failed(name, 'gas_error', `HTTP ${res.status}`, res.body));
 
-  let diag;
-  try {
-    diag = JSON.parse(res.body);
-  } catch {
-    return unavailable(failed(name, 'gas_error', 'non-JSON body — GAS platform error page', res.body));
+  const parsed = parseObject(res.body);
+  if (parsed.problem) {
+    return unavailable(failed(name, 'gas_error', `${parsed.problem} — GAS platform error page?`, res.body));
   }
+  const diag = parsed.value;
+  // `alert` / `history` are objects by contract; anything else is read as
+  // "unknown" and reported by the condition checks below, never thrown on.
+  const alert = diag.alert && typeof diag.alert === 'object' ? diag.alert : {};
+  const history = diag.history && typeof diag.history === 'object' ? diag.history : {};
 
   const triggers = Array.isArray(diag.triggers) ? diag.triggers : [];
-  const incidentOpen = diag.alert ? diag.alert.incident_open : undefined;
-  const historyItems = diag.history ? diag.history.items : undefined;
+  const incidentOpen = alert.incident_open;
+  const historyItems = history.items;
 
   return [
     ok(name, 'HTTP 200, JSON'),

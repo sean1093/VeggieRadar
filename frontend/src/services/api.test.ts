@@ -162,6 +162,25 @@ describe('fetchBoard — schema contract', () => {
     expect(console.warn).not.toHaveBeenCalled();
     expect(gtag).not.toHaveBeenCalled();
   });
+
+  it('turns a board without an item list into a transient error, once, without retrying', async () => {
+    const api = await loadApi();
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
+    // Every consumer maps over `items`; serving this would crash the UI, and
+    // retrying would spend the backoff on the same body.
+    const { items: _items, ...noItems } = BOARD;
+    void _items;
+    const fetchMock = vi.fn(async () => jsonBody({ ...noItems, items: 'gone' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await api.fetchBoard();
+
+    expect(res).toMatchObject({ error: '無法載入今日菜價，請稍後再試', transient: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(api.readCachedBoard()).toBeNull();
+    expect(gtag).toHaveBeenCalledWith('event', 'board_schema_mismatch', { path: 'items' });
+  });
 });
 
 describe('readCachedBoard — validation', () => {

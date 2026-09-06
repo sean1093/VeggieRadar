@@ -137,7 +137,17 @@ export async function fetchBoard(): Promise<ApiResponse> {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await callApi({ action: 'board' }, BOARD_TIMEOUT_MS);
-      if (!isApiError(res) && res.type === 'board' && res.items.length > 0) {
+      if (isApiError(res) || res.type !== 'board') return res;
+      // A board without an item list is not a board the UI can render — every
+      // consumer maps over `items` — and it is not a transport failure either,
+      // so retrying would only spend the backoff on the same body. Report the
+      // contract break and degrade the way an outage does: the cached board
+      // plus the connection note, never a crash.
+      if (!Array.isArray(res.items)) {
+        reportSchemaMismatch(res);
+        return { error: '無法載入今日菜價，請稍後再試', message: 'board without items', transient: true };
+      }
+      if (res.items.length > 0) {
         // Only boards that carry data are held to the contract: the `warming`
         // placeholder and 「近期查無交易資料」 legitimately ship without a
         // trading date (§3), and reporting those as drift would drown the
