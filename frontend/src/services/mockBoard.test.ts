@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MOCK_BOARD } from './mockBoard';
+import { BoardResponseSchema } from '../types/board.schema';
 
 /**
  * The bundled board is what the app shows with no backend configured, and the
@@ -46,5 +47,19 @@ describe('MOCK_BOARD internal consistency', () => {
       const shown = (item.varieties ?? []).reduce((sum, v) => sum + v.share_percent, 0);
       expect(shown).toBeLessThanOrEqual(100);
     }
+  });
+});
+
+/**
+ * The bundled board is a hand-maintained copy of a real payload, so it is the
+ * one board that can drift away from the contract without any backend
+ * changing — and it is what every offline visit and most component tests
+ * render. Holding it to the same schema as production keeps the demo state
+ * from becoming a fixture nothing else agrees with.
+ */
+describe('MOCK_BOARD contract', () => {
+  it('satisfies the board schema production is validated against', () => {
+    const result = BoardResponseSchema.safeParse(MOCK_BOARD);
+    expect(result.success ? [] : result.error.issues).toEqual([]);
   });
 });

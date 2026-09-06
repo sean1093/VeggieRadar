@@ -23,6 +23,7 @@
  */
 
 import { isApiError, type ApiResponse, type BoardResponse, type SearchResponse } from '../types/produce';
+import { boardMismatch } from '../types/board.schema';
 import { MOCK_BOARD } from './mockBoard';
 import { track } from '../lib/analytics';
 
@@ -111,6 +112,22 @@ function writeCachedBoard(board: BoardResponse): void {
 }
 
 /**
+ * Measures a live board against the executable contract (`types/board.schema.ts`).
+ *
+ * Report-only, on purpose: a renamed field must not blank the board a shopper
+ * is standing in front of, and the UI already treats every derived field as
+ * optional (README §3). So the violation is published — console for whoever is
+ * looking, `board_schema_mismatch` for the rate over time — and the board is
+ * served and cached exactly as it arrived.
+ */
+function reportSchemaMismatch(board: BoardResponse): void {
+  const mismatch = boardMismatch(board);
+  if (!mismatch) return;
+  console.warn('VeggieRadar: board schema mismatch', mismatch.path, mismatch.message);
+  track('board_schema_mismatch', { path: mismatch.path });
+}
+
+/**
  * Loads the daily price board (default view). GAS web apps can return a
  * transient 404 on a cold start, so retry a couple of times before failing.
  * Every good board is persisted for offline/over-quota fallback.
@@ -121,6 +138,11 @@ export async function fetchBoard(): Promise<ApiResponse> {
     try {
       const res = await callApi({ action: 'board' }, BOARD_TIMEOUT_MS);
       if (!isApiError(res) && res.type === 'board' && res.items.length > 0) {
+        // Only boards that carry data are held to the contract: the `warming`
+        // placeholder and 「近期查無交易資料」 legitimately ship without a
+        // trading date (§3), and reporting those as drift would drown the
+        // signal in known-good degraded states.
+        reportSchemaMismatch(res);
         writeCachedBoard(res);
       }
       return res;

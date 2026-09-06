@@ -139,7 +139,9 @@ MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ Frontend (G
   one element inside the detail drawer, so the board — which most visits never
   leave — no longer pays for it (initial JS 560 → 274 kB, gzip 174 → 88 kB).
   The drawer warms the chunk on open, in parallel with the trend request, so
-  the split costs no perceived latency.
+  the split costs no perceived latency. The board schema §3 validates against
+  is the only other runtime addition to that chunk, at 5.7 kB gzip — which is
+  why it uses `zod/mini` rather than the classic API (295 kB / 94 kB today).
 
 ### Two MOA quirks the backend has to defend against
 
@@ -303,6 +305,14 @@ does not justify publishing.
 "Trading date vs. refresh time" in §2 — clients must not present the trading date
 alone as "last updated". `stale: true` means the board is past its max age and a
 rebuild has been queued (`refresh_queued`); the stale board is still served.
+
+`frontend/src/types/board.schema.ts` is the executable form of this contract:
+the client's types are inferred from it, `api.ts` measures every live board
+against it, `backendCode.test.ts` runs the real `buildBoard()` output through
+it, and the production probe (§8) checks the deployed endpoints with it — so a
+field renamed on one side of the wire fails in CI instead of reaching a
+shopper as `undefined`. A client mismatch is reported, never enforced: the
+board still renders (`board_schema_mismatch`, §6).
 
 ### Search
 ```
@@ -565,6 +575,7 @@ wrapper, `src/lib/analytics.ts`. Each event exists to settle a decision:
 | `drawer_opened` | `has_varieties`, `has_baseline`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen |
 | `trend_result` | `outcome` (`ok` / `empty` / `failed`), `reason` | Whether the trend deadline is right; memo hits are not reported |
 | `chunk_failed` | `chunk` | Cost of the code split |
+| `board_schema_mismatch` | `path` | Whether the backend's payload has drifted from the contract in §3 — a nonzero rate means some field is quietly missing from the UI while the board still renders |
 
 What is deliberately **not** sent: the search text (only its outcome and
 length — a search box accepts anything), watched item names (only a count
@@ -697,6 +708,61 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
     rotate it if the secret ever leaks.
 
 > Both deploy workflows need Node 22+: the suite uses `Promise.withResolvers`.
+
+### Monitoring
+
+Every alarm above this line runs **inside** whatever breaks. The failure mail
+(§2) is sent by the same Apps Script project whose deploy, OAuth scopes or
+mail quota is the likely fault, and the frontend hides an outage behind its
+cached board on purpose. `.github/workflows/prod-probe.yml` therefore watches
+production from outside, every 6 hours at :40 — offset from the 4-hourly
+refresh so a probe never lands while a crawl is replacing the board. It runs
+one script, `frontend/scripts/prod-probe.mjs`, which imports the same schema
+the app uses (§3) under Node's type stripping rather than keeping a copy that
+could drift:
+
+| Check | Passes when | Failure category |
+| --- | --- | --- |
+| `pages` | 200, `<title>` still contains 今日菜價, and a `<script type="module">` is present — a Pages deploy that lost its bundle still serves a plausible shell | `pages_down` |
+| `mirror` | `data/board.json` is 200, matches the schema and was crawled < 8 h ago. **A 404 is `skipped`**, not a failure: the static mirror is #13 and not deployed yet | `mirror_stale` |
+| `gas_board` | the body is JSON (Apps Script answers platform errors with HTML and HTTP 200), matches the schema, `stale === false`, `count ≥ 60`, crawled < 8 h ago | `gas_error` / `gas_stale` |
+| `gas_diag` | `?action=diag` answers JSON | `gas_error` |
+| `gas_trigger` | `triggers` includes `refreshBoardCache` | `trigger_missing` |
+| `gas_incident` | `alert.incident_open === false` | `incident_open` |
+| `gas_history` | `history.items ≥ 60` | `history_thin` |
+
+`60` is `BOARD_HEALTHY_ITEMS` in `board.schema.ts`: a typical day publishes
+~90 of ~100 defined items (§1), and MOA throttling a batch shows up as a board
+that is complete enough to serve yet clearly short. It sits deliberately above
+`BOARD_MIN_ITEMS` (30), the hard floor below which the backend refuses to
+publish at all, so degradation is reported while the board still works.
+
+**Freshness is judged on `generated_at` alone — `date` is never compared with
+today.** The trading date legitimately stands still over weekends, holidays and
+typhoon closures (§2, "Trading date vs. refresh time"), so a `date`-based check
+would page a human every Sunday and be ignored by the second one.
+
+A failing run comments on the open issue labelled **`prod-alert`**, and only
+opens `[prod-alert] <categories> since <date>` when there is none (creating the
+label on first use). A fully passing run comments 「recovered」 on that issue
+and closes it. So at most one alert is ever open: a fresh issue every 6 hours
+would bury the first one and train its reader to ignore the label — the same
+reason the e-mail alerting has an incident window. The job also goes red
+whenever the probe did, and appends the summary table to the run's step
+summary. It needs no secret; every endpoint it touches is public (§2).
+
+```bash
+cd frontend
+node --experimental-strip-types scripts/prod-probe.mjs   # writes probe-result.json, exit 1 on any failure
+```
+The flag is required on Node 22.6–22.17 and a no-op from 22.18 on.
+`workflow_dispatch` takes `pages_url` / `api_base_url` inputs, so the alert
+path can be exercised against a deliberately bad URL instead of waiting for a
+real outage.
+
+Not UptimeRobot or a similar service: Actions is already free here, and what
+has to be verified is the schema and the freshness rather than an HTTP 200 —
+a dead pipeline serves a perfectly healthy-looking board.
 
 ---
 
