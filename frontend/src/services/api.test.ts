@@ -195,6 +195,105 @@ describe('readCachedBoard — validation', () => {
   });
 });
 
+/**
+ * The static mirror is the board's first network tier (README §2): same-origin
+ * JSON published with the app, read before GAS is touched at all. Everything
+ * that can be wrong with it — never deployed, a 404, a truncated file, a
+ * contract change the published file predates, a CDN that hangs — has to
+ * collapse to the same null, because the caller's answer to all of them is to
+ * ask GAS instead.
+ */
+describe('fetchStaticBoard — the published mirror', () => {
+  const MIRROR_URL = '/data/board.json';
+
+  it('serves the mirrored board, revalidating rather than reading the HTTP cache', async () => {
+    const api = await loadApi();
+    const fetchMock = vi.fn(async () => jsonBody(BOARD));
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await api.fetchStaticBoard()).toMatchObject({ type: 'board', count: 1 });
+    // The URL never changes, so a cached copy would outlive the board in it.
+    expect(fetchMock).toHaveBeenCalledWith(MIRROR_URL, expect.objectContaining({ cache: 'no-cache' }));
+  });
+
+  it('reads a 404 as "no mirror deployed yet", not as a failure', async () => {
+    const api = await loadApi();
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, text: async () => 'Not Found' })));
+
+    expect(await api.fetchStaticBoard()).toBeNull();
+  });
+
+  it('rejects a body that is not a board', async () => {
+    const api = await loadApi();
+    // A Pages 404 page, or a half-written file: JSON.parse throws, or parses
+    // into something with no items to render.
+    vi.stubGlobal('fetch', vi.fn(async () => htmlBody()));
+    expect(await api.fetchStaticBoard()).toBeNull();
+
+    vi.stubGlobal('fetch', vi.fn(async () => jsonBody({ ...BOARD, items: [] })));
+    expect(await api.fetchStaticBoard()).toBeNull();
+  });
+
+  it('falls through to GAS when the published file predates a contract change', async () => {
+    const api = await loadApi();
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
+    vi.stubGlobal('fetch', vi.fn(async () => jsonBody({ ...BOARD, items: [{ ...BOARD.items[0], catty_price: '14' }] })));
+
+    // Unlike the GAS board — the last resort, served whatever its drift — a
+    // drifted mirror is skipped: a fresher authority is one request away.
+    expect(await api.fetchStaticBoard()).toBeNull();
+    expect(console.warn).toHaveBeenCalledWith(
+      'VeggieRadar: board schema mismatch',
+      'items.0.catty_price',
+      expect.stringContaining('expected number'),
+    );
+    expect(gtag).toHaveBeenCalledWith('event', 'board_schema_mismatch', { path: 'items.0.catty_price' });
+  });
+
+  it('abandons a hung CDN at its own short deadline', async () => {
+    vi.useFakeTimers();
+    const api = await loadApi();
+    const fetchMock = vi.fn((_url: unknown, init?: { signal?: AbortSignal }) => {
+      const { promise, reject } = Promise.withResolvers<never>();
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      return promise;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pending = api.fetchStaticBoard();
+    // 3 s, not the board's 12 s: a mirror that has not answered by then is
+    // only delaying the GAS request its absence makes necessary.
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(await pending).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * `isFreshEnough` is the switch in the whole read order: true means the mirror
+ * answers the visit and GAS is never called.
+ */
+describe('isFreshEnough', () => {
+  const at = (hoursAgo: number) => ({ ...BOARD, generated_at: new Date(Date.now() - hoursAgo * 3_600_000).toISOString() });
+
+  it('trusts a board younger than the backend max age and no older', async () => {
+    const api = await loadApi();
+    expect(api.isFreshEnough(at(1))).toBe(true);
+    expect(api.isFreshEnough(at(5.9))).toBe(true);
+    expect(api.isFreshEnough(at(6.1))).toBe(false);
+    expect(api.isFreshEnough(at(20))).toBe(false);
+  });
+
+  it('refuses to vouch for a board it cannot date', async () => {
+    const api = await loadApi();
+    // Opposite of describeFreshness, which stays quiet: not knowing the age is
+    // a reason to ask GAS, never a reason to tell a shopper the prices are old.
+    expect(api.isFreshEnough({ ...BOARD, generated_at: undefined })).toBe(false);
+    expect(api.isFreshEnough({ ...BOARD, generated_at: 'nope' })).toBe(false);
+  });
+});
+
 describe('searchProduce — transient failures', () => {
   it('marks transport failures transient instead of pretending 查無此品項', async () => {
     const api = await loadApi();
@@ -247,6 +346,17 @@ describe('offline mock mode (no backend configured)', () => {
     expect(res).toMatchObject({ type: 'board' });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(api.readCachedBoard()).toBeNull(); // offline dev needs no fallback cache
+  });
+
+  it('never looks for a mirror it was not deployed with', async () => {
+    const api = await loadMockApi();
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    // `npm run dev` serves from public/, where data/board.json is gitignored:
+    // a request for it would 404 on every load and say nothing useful.
+    expect(await api.fetchStaticBoard()).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('searches the bundled board and reports honest misses', async () => {

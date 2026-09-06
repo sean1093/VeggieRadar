@@ -1,16 +1,25 @@
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { boardItems, useBoard } from './useBoard';
-import { fetchBoard, readCachedBoard } from '../services/api';
+import { fetchBoard, fetchStaticBoard, readCachedBoard, writeCachedBoard } from '../services/api';
+import type * as ApiModule from '../services/api';
 import type { ApiResponse, BoardResponse, ProduceItem } from '../types/produce';
 
-vi.mock('../services/api', () => ({
+// Only the three ways a board arrives are stubbed. `isFreshEnough` stays real,
+// so these tests exercise the actual 6 h rule the read order turns on rather
+// than a mock's opinion of it.
+vi.mock('../services/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof ApiModule>()),
   fetchBoard: vi.fn(),
+  fetchStaticBoard: vi.fn(),
   readCachedBoard: vi.fn(),
+  writeCachedBoard: vi.fn(),
 }));
 
 const fetchBoardMock = vi.mocked(fetchBoard);
+const fetchStaticBoardMock = vi.mocked(fetchStaticBoard);
 const readCachedBoardMock = vi.mocked(readCachedBoard);
+const writeCachedBoardMock = vi.mocked(writeCachedBoard);
 
 const CABBAGE: ProduceItem = {
   code: 'LA1',
@@ -26,6 +35,7 @@ const CABBAGE: ProduceItem = {
 };
 
 const UNREACHABLE = '目前連不上伺服器，顯示上次成功載入的行情';
+const REFRESHING = '資料更新中，稍後重新整理可看到最新行情';
 const FAILURE: ApiResponse = { error: '無法載入今日菜價，請稍後再試', transient: true };
 
 function board(date: string, over: Partial<BoardResponse> = {}): BoardResponse {
@@ -42,9 +52,16 @@ function board(date: string, over: Partial<BoardResponse> = {}): BoardResponse {
   };
 }
 
+/** A board whose last crawl is `hoursAgo` old, judged by the real 6 h rule. */
+function agedBoard(date: string, hoursAgo: number): BoardResponse {
+  return board(date, { generated_at: new Date(Date.now() - hoursAgo * 3_600_000).toISOString() });
+}
+
 describe('useBoard', () => {
   beforeEach(() => {
     readCachedBoardMock.mockReturnValue(null);
+    // No mirror is the pre-#13 world, which the first block of tests pins.
+    fetchStaticBoardMock.mockResolvedValue(null);
     fetchBoardMock.mockResolvedValue(board('2026-09-02'));
   });
 
@@ -71,7 +88,7 @@ describe('useBoard', () => {
 
     await act(async () => resolve(fresh));
     expect(result.current.status).toEqual({ kind: 'ready', board: fresh, source: 'gas' });
-    expect(gtag).toHaveBeenCalledWith('event', 'board_loaded', { stale: false, age_bucket: '<1h' });
+    expect(gtag).toHaveBeenCalledWith('event', 'board_loaded', { source: 'gas', stale: false, age_bucket: '<1h' });
   });
 
   it('starts on the skeleton when nothing is cached', async () => {
@@ -136,7 +153,7 @@ describe('useBoard', () => {
     readCachedBoardMock.mockReturnValue(board('2026-09-01', { stale: true }));
     const { result } = renderHook(() => useBoard());
 
-    expect(result.current.freshness.note).toBe('資料更新中，稍後重新整理可看到最新行情');
+    expect(result.current.freshness.note).toBe(REFRESHING);
     await act(async () => {});
   });
 
@@ -173,9 +190,122 @@ describe('useBoard', () => {
     expect(result.current.status).toEqual({ kind: 'error', message: '無法載入今日菜價，請稍後再試' });
   });
 
-  it('revalidates once per mount', async () => {
+  it('lets a retry win over a first read that is still in flight', async () => {
+    // The banner's 重試 can be pressed while the mount read is still waiting
+    // on GAS. The slow first answer — here a failure — must not land on top
+    // of the retry's board.
+    const first = Promise.withResolvers<ApiResponse>();
+    const second = Promise.withResolvers<ApiResponse>();
+    fetchBoardMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const { result } = renderHook(() => useBoard());
+    await act(async () => {});
+    expect(result.current.status).toEqual({ kind: 'loading' });
+
+    act(() => result.current.reload());
+    const recovered = board('2026-09-03');
+    await act(async () => second.resolve(recovered));
+    expect(result.current.status).toEqual({ kind: 'ready', board: recovered, source: 'gas' });
+
+    await act(async () => first.resolve(FAILURE));
+    expect(result.current.status).toEqual({ kind: 'ready', board: recovered, source: 'gas' });
+  });
+
+  it('reads the mirror once and revalidates once per mount', async () => {
     renderHook(() => useBoard());
     await act(async () => {});
+    expect(fetchStaticBoardMock).toHaveBeenCalledTimes(1);
     expect(fetchBoardMock).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The mirror (README §2) is why the board no longer costs a GAS execution:
+   * a fresh one answers the visit outright, and only a stale or missing one
+   * falls through to the backend — whose `readBoard` then queues the rebuild
+   * that unsticks the pipeline, so the self-heal chain is unchanged.
+   */
+  describe('static mirror', () => {
+    it('serves a fresh mirror and never touches GAS', async () => {
+      const mirror = agedBoard('2026-09-02', 2);
+      fetchStaticBoardMock.mockResolvedValue(mirror);
+      const gtag = vi.fn();
+      vi.stubGlobal('gtag', gtag);
+
+      const { result } = renderHook(() => useBoard());
+
+      await waitFor(() => expect(result.current.status).toEqual({ kind: 'ready', board: mirror, source: 'static' }));
+      expect(fetchBoardMock).not.toHaveBeenCalled();
+      // The board on screen becomes this browser's offline fallback too, so a
+      // later visit with no network still has today's prices.
+      expect(writeCachedBoardMock).toHaveBeenCalledWith(mirror);
+      expect(gtag).toHaveBeenCalledWith('event', 'board_loaded', {
+        source: 'static',
+        stale: false,
+        age_bucket: '1-6h',
+      });
+    });
+
+    it('paints a stale mirror at once, then lets GAS overwrite it', async () => {
+      // A mirror this old means the scheduled deploy stopped running: the file
+      // still claims `stale: false`, and the age is what contradicts it.
+      const mirror = agedBoard('2026-09-01', 20);
+      const fresh = board('2026-09-02');
+      fetchStaticBoardMock.mockResolvedValue(mirror);
+      const { promise, resolve } = Promise.withResolvers<ApiResponse>();
+      fetchBoardMock.mockReturnValue(promise);
+
+      const { result } = renderHook(() => useBoard());
+
+      await waitFor(() => expect(result.current.status).toEqual({ kind: 'ready', board: mirror, source: 'static' }));
+      expect(result.current.freshness.note).toBe(REFRESHING);
+      expect(fetchBoardMock).toHaveBeenCalledTimes(1);
+      expect(writeCachedBoardMock).not.toHaveBeenCalled();
+
+      await act(async () => resolve(fresh));
+      expect(result.current.status).toEqual({ kind: 'ready', board: fresh, source: 'gas' });
+      // GAS answered, so the board is no longer the one being explained away.
+      expect(result.current.freshness.note).not.toBe(REFRESHING);
+    });
+
+    it('keeps the stale mirror on screen when GAS is down as well', async () => {
+      const mirror = agedBoard('2026-09-01', 20);
+      // The browser also has an older localStorage copy; the mirror wins the
+      // fallback because it is what the shopper is already reading, and
+      // swapping in different old prices on a failure explains nothing.
+      readCachedBoardMock.mockReturnValue(board('2026-08-30'));
+      fetchStaticBoardMock.mockResolvedValue(mirror);
+      fetchBoardMock.mockResolvedValue(FAILURE);
+      const gtag = vi.fn();
+      vi.stubGlobal('gtag', gtag);
+
+      const { result } = renderHook(() => useBoard());
+
+      await waitFor(() =>
+        expect(result.current.status).toEqual({
+          kind: 'degraded',
+          board: mirror,
+          source: 'static',
+          reason: UNREACHABLE,
+        }),
+      );
+      expect(boardItems(result.current.status)).toEqual([CABBAGE]);
+      // `served: 'static'` is a different incident from `cache`: the mirror
+      // going stale means the scheduled deploy stopped too.
+      expect(gtag).toHaveBeenCalledWith('event', 'board_fallback', { served: 'static' });
+    });
+
+    it('follows the same order on reload', async () => {
+      fetchBoardMock.mockResolvedValue(FAILURE);
+      const { result } = renderHook(() => useBoard());
+      await waitFor(() => expect(result.current.status.kind).toBe('error'));
+      expect(fetchBoardMock).toHaveBeenCalledTimes(1);
+
+      // The retry lands after a deploy republished the mirror.
+      const mirror = agedBoard('2026-09-02', 1);
+      fetchStaticBoardMock.mockResolvedValue(mirror);
+
+      await act(async () => result.current.reload());
+      expect(result.current.status).toEqual({ kind: 'ready', board: mirror, source: 'static' });
+      expect(fetchBoardMock).toHaveBeenCalledTimes(1); // no second GAS call
+    });
   });
 });

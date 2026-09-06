@@ -172,10 +172,12 @@ async function checkMirror() {
   const name = 'mirror';
   const res = await get(MIRROR_URL);
   if (res.error) return failed(name, 'mirror_stale', `request failed: ${res.error}`);
-  // The static mirror is #13 and not deployed yet. Absent is not broken —
-  // failing on it would hold the alert issue permanently open and train its
-  // reader to ignore the one alert that matters.
-  if (res.status === 404) return skipped(name, 'mirror not deployed yet');
+  // A deploy that could obtain neither a fresh board nor the previously
+  // published mirror ships without one on purpose (README §2): absent is a
+  // degraded state, not a broken one, and `gas_board` below covers the
+  // visitors it sends to the backend. Failing here would hold the alert issue
+  // permanently open and train its reader to ignore the one alert that matters.
+  if (res.status === 404) return skipped(name, 'no mirror published');
   if (res.status !== 200) return failed(name, 'mirror_stale', `HTTP ${res.status}`, res.body);
 
   const parsed = parseObject(res.body);

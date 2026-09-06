@@ -25,3 +25,8 @@ dist-ssr
 
 # Test coverage output (npm run test:coverage)
 coverage
+
+# The static board mirror (README §2). The Pages deploy fetches it from the
+# backend into the artifact, so it exists at build time and never in git —
+# six commits a day of derived prices would bury the actual history.
+public/data/

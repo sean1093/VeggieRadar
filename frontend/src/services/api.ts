@@ -8,6 +8,11 @@
  * (local dev / offline), the app falls back to bundled sample data so the UI
  * is still fully explorable.
  *
+ * Read order for the board (README §2): the localStorage copy paints first,
+ * then the static mirror published next to the app on Pages, and only a
+ * missing or stale mirror reaches GAS. `useBoard` owns that order; this module
+ * owns the three ways to obtain a board.
+ *
  * Degraded-mode contract (GAS has hard quotas — 30 simultaneous executions,
  * a daily URLFetch budget — and fails in awkward ways when it hits them):
  *
@@ -24,6 +29,7 @@
 
 import { isApiError, type ApiResponse, type BoardResponse, type SearchResponse } from '../types/produce';
 import { boardMismatch } from '../types/board.schema';
+import { boardAgeMs, BOARD_MAX_AGE_MS } from '../lib/utils/freshness';
 import { MOCK_BOARD } from './mockBoard';
 import { track } from '../lib/analytics';
 
@@ -44,6 +50,10 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string | undefined;
 const BOARD_TIMEOUT_MS = 12_000;
 const SEARCH_TIMEOUT_MS = 15_000;
 const TREND_TIMEOUT_MS = 15_000;
+// The mirror is same-origin static JSON on a CDN, so it either answers in
+// tens of milliseconds or is not going to help: a longer deadline would only
+// delay the GAS request that a missing mirror needs.
+const STATIC_BOARD_TIMEOUT_MS = 3_000;
 
 const BOARD_CACHE_KEY = 'veggieradar_last_board_v1';
 
@@ -102,7 +112,11 @@ export function readCachedBoard(): BoardResponse | null {
   }
 }
 
-function writeCachedBoard(board: BoardResponse): void {
+/**
+ * Persists a board as the offline/over-quota fallback. Best-effort: private
+ * mode and a full quota both throw, and neither is worth failing a load over.
+ */
+export function writeCachedBoard(board: BoardResponse): void {
   if (!API_BASE_URL) return;
   try {
     localStorage.setItem(BOARD_CACHE_KEY, JSON.stringify(board));
@@ -112,19 +126,80 @@ function writeCachedBoard(board: BoardResponse): void {
 }
 
 /**
- * Measures a live board against the executable contract (`types/board.schema.ts`).
+ * Whether a board is current enough to serve without asking GAS at all
+ * (`BOARD_MAX_AGE_MS`, the backend's own threshold). Pure, and exported
+ * because the read order in `useBoard` turns on it.
  *
- * Report-only, on purpose: a renamed field must not blank the board a shopper
- * is standing in front of, and the UI already treats every derived field as
- * optional (README §3). So the violation is published — console for whoever is
- * looking, `board_schema_mismatch` for the rate over time — and the board is
- * served and cached exactly as it arrived.
+ * An unusable `generated_at` counts as not fresh — deliberately the opposite
+ * of `describeFreshness`, which stays quiet then. Being unable to date a board
+ * is a reason to ask the authority, but not a reason to tell a shopper the
+ * prices are old.
  */
-function reportSchemaMismatch(board: BoardResponse): void {
+export function isFreshEnough(board: BoardResponse, now: number = Date.now()): boolean {
+  const age = boardAgeMs(board.generated_at, now);
+  return age !== null && age <= BOARD_MAX_AGE_MS;
+}
+
+/**
+ * Measures a live board against the executable contract (`types/board.schema.ts`)
+ * and says whether it broke it.
+ *
+ * Report-only for the GAS board, on purpose: a renamed field must not blank
+ * the board a shopper is standing in front of, and the UI already treats every
+ * derived field as optional (README §3). So the violation is published —
+ * console for whoever is looking, `board_schema_mismatch` for the rate over
+ * time — and the board is served and cached exactly as it arrived. The mirror
+ * is the one caller that acts on the return value, because there it means the
+ * published file predates a contract change and a fresher authority (GAS) is
+ * still one request away.
+ */
+function reportSchemaMismatch(board: BoardResponse): boolean {
   const mismatch = boardMismatch(board);
-  if (!mismatch) return;
+  if (!mismatch) return false;
   console.warn('VeggieRadar: board schema mismatch', mismatch.path, mismatch.message);
   track('board_schema_mismatch', { path: mismatch.path });
+  return true;
+}
+
+/**
+ * The board mirror this app is deployed with (`<base>data/board.json`, README
+ * §2), or null when there is no usable one.
+ *
+ * The board is 99 % of the traffic and was 99 % of the GAS executions, all of
+ * them cache reads that a static file serves from the same CDN as the app —
+ * for ~50 ms instead of a ~2 s round trip, and without touching the
+ * 30-simultaneous-execution ceiling or a cold start's 404.
+ *
+ * Every failure collapses to null (no mirror deployed yet, a 404, a truncated
+ * or non-JSON body, a payload that broke the contract, the deadline), because
+ * the caller's answer to all of them is the same: ask GAS.
+ */
+export async function fetchStaticBoard(): Promise<BoardResponse | null> {
+  // Offline dev has the bundled board and no Pages deploy behind it.
+  if (!API_BASE_URL) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), STATIC_BOARD_TIMEOUT_MS);
+  try {
+    // `no-cache` revalidates rather than reading the HTTP cache: the URL never
+    // changes, so a cached copy would otherwise outlive the board inside it.
+    const response = await fetch(`${import.meta.env.BASE_URL}data/board.json`, {
+      cache: 'no-cache',
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const board = JSON.parse(await response.text()) as BoardResponse;
+    // A board without items is not a board the UI can render, and an empty
+    // one is what a half-written mirror would look like.
+    if (!board || board.type !== 'board' || !Array.isArray(board.items) || board.items.length === 0) {
+      return null;
+    }
+    if (reportSchemaMismatch(board)) return null;
+    return board;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
