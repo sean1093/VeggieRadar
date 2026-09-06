@@ -45,7 +45,6 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   const mails: { to: string; subject: string; body: string }[] = [];
   let mailThrows = false;
   let brokenPropKey: string | null = null;
-  let sessionEmail: string | null = 'owner@example.com';
 
   const respond = (url: string) => {
     fetches.push(url);
@@ -100,14 +99,6 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     },
     Logger: { log: (m: unknown) => void logs.push(String(m)) },
     Utilities: { sleep: () => {} },
-    Session: {
-      getEffectiveUser: () => ({
-        getEmail: () => {
-          if (sessionEmail === null) throw new Error('session unavailable');
-          return sessionEmail;
-        },
-      }),
-    },
     ContentService: {
       MimeType: { JSON: 'json' },
       createTextOutput: (t: string) => ({ setMimeType: () => ({ body: t }) }),
@@ -155,6 +146,10 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     `${SOURCE}\nreturn { ${exported.join(', ')} };`,
   );
   const api = factory(...Object.values(merged));
+  // The recipient is configuration, not code: seed it the way an operator
+  // would, so the alert suites exercise the send path. Suites that need an
+  // unconfigured recipient delete it.
+  props.set('ALERT_EMAIL', 'owner@example.com');
   return {
     api,
     logs, props, cache, triggers, fetches, locks, mails,
@@ -162,7 +157,6 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     fixMail: () => { mailThrows = false; },
     breakProp: (key: string) => { brokenPropKey = key; },
     contendLock: () => { locks.contended = true; },
-    breakSession: () => { sessionEmail = null; },
     /** Parsed JSON body of a `doGet` call — the shape a browser would see. */
     get: (parameter: Record<string, string>) => JSON.parse(factoryOut(parameter).body),
   };
@@ -1089,7 +1083,7 @@ describe('failure alerting', () => {
     for (let i = 0; i < api.ALERT_FAILURE_STREAK; i++) api.refreshBoardCache();
 
     expect(mails).toHaveLength(1);
-    expect(mails[0].to).toBe('owner@example.com'); // deployer fallback, see alertRecipient
+    expect(mails[0].to).toBe('owner@example.com'); // the seeded ALERT_EMAIL property
     expect(mails[0].subject).toContain('連續 3 次更新失敗');
     expect(mails[0].body).toContain('近期查無交易資料'); // the actual reason, not a generic message
   });
@@ -1185,7 +1179,7 @@ describe('failure alerting', () => {
     const { api } = loadBackend();
     api.refreshBoardCache();
     const diag = api.handleDiag();
-    expect(diag.alert).toEqual({ failure_streak: 1, incident_open: false, last_sent: null });
+    expect(diag.alert).toEqual({ failure_streak: 1, incident_open: false, last_sent: null, recipient_configured: true });
     expect(JSON.stringify(diag)).not.toContain('owner@example.com');
   });
 
@@ -1481,23 +1475,29 @@ describe('doGet — admin gate on operator actions', () => {
 });
 
 describe('alert recipient — nothing personal in the source', () => {
-  it('reads the ALERT_EMAIL property first', () => {
+  it('reads the ALERT_EMAIL property', () => {
     const { api, props, mails } = loadBackend();
     props.set(api.ALERT_EMAIL_PROP, 'ops@example.org');
     expect(api.alertRecipient()).toBe('ops@example.org');
     api.handleAlertTest();
     expect(mails[0].to).toBe('ops@example.org');
+    expect(api.handleDiag().alert.recipient_configured).toBe(true);
   });
 
-  it('falls back to the deploying account', () => {
-    const { api } = loadBackend();
-    expect(api.alertRecipient()).toBe('owner@example.com');
+  it('has no Session fallback — that scope is not in the manifest', () => {
+    // `Session.getEffectiveUser()` needs userinfo.email; appsscript.json pins
+    // an explicit scope list without it, and adding one forces re-consent.
+    // The stubbed globals deliberately omit Session, so any use would throw.
+    expect(SOURCE).not.toContain('Session.');
+    const manifest = JSON.parse(readFileSync(resolve(BACKEND_DIR, 'appsscript.json'), 'utf8'));
+    expect(manifest.oauthScopes).not.toContain('https://www.googleapis.com/auth/userinfo.email');
   });
 
-  it('reports a category when no recipient can be resolved, and never breaks serving', () => {
-    const { api, breakSession, mails, logs } = loadBackend();
-    breakSession();
+  it('reports a category when no recipient is configured, and never breaks serving', () => {
+    const { api, props, mails, logs } = loadBackend();
+    props.delete(api.ALERT_EMAIL_PROP);
     expect(api.alertRecipient()).toBeNull();
+    expect(api.handleDiag().alert.recipient_configured).toBe(false);
 
     const probe = api.handleAlertTest();
     expect(probe.sent).toBe(false);

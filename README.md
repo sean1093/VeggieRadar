@@ -211,10 +211,14 @@ observation.
 Alerting swallows every error by design: it sits on both the refresh and the
 serving path, and no mail-quota, properties or lock failure may take the board
 down with it. `diag` reports `alert.failure_streak` / `alert.incident_open` /
-`alert.last_sent` — never the address, since `diag` is public. The recipient
-is not in the source either: `alertRecipient()` reads the `ALERT_EMAIL` script
-property and falls back to the deploying account, which is the maintainer by
-construction. `?action=alerttest` needs the operator token; its limiter stays
+`alert.last_sent` / `alert.recipient_configured` — never the address, since
+`diag` is public. The recipient is not in the source either: `alertRecipient()`
+reads the `ALERT_EMAIL` script property, and that property is **required** —
+there is deliberately no fallback to the deploying account's e-mail, because
+reading it needs the `userinfo.email` scope the manifest does not grant, and
+adding a scope forces re-consent before the Web App runs again. Unset, every
+mail fails as `no_recipient` and `diag` shows `recipient_configured: false`.
+`?action=alerttest` needs the operator token; its limiter stays
 as defence in depth and is a durable timestamp rather than a cache key, since
 cache eviction would otherwise re-open the endpoint.
 
@@ -333,7 +337,7 @@ GET {WEB_APP_URL}/exec?action=diag[&token=…]
 → { "type": "diag", "board": { "generated_at": ..., "stale": false },
      "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null,
      "history": { "items": 97, "min_days": 1, "max_days": 24 },
-     "alert": { "failure_streak": 0, "incident_open": false, "last_sent": null } }
+     "alert": { "failure_streak": 0, "incident_open": false, "last_sent": null, "recipient_configured": true } }
 
 GET {WEB_APP_URL}/exec?action=alerttest&token=…
 → { "type": "alerttest", "sent": true, "message": "已寄出測試信" }
@@ -552,7 +556,7 @@ wrapper, `src/lib/analytics.ts`. Each event exists to settle a decision:
 
 | Event | Params | Decision it informs |
 | --- | --- | --- |
-| `board_loaded` | `source` (`network`), `stale`, `age_bucket` | Baseline for every ratio below |
+| `board_loaded` | `stale`, `age_bucket` | Baseline for every ratio below; a `source` dimension arrives with the static mirror (#13) |
 | `board_fallback` | `served` (`cache` / `none`) | Fallback rate → the static-mirror work in #13 |
 | `search_result` | `outcome` (`local_hit` / `remote_hit` / `not_found` / `transient`), `query_length` | Live-miss and busy rates → the search index in #21; whether the 15 s deadline holds |
 | `sort_changed` | `mode` | 划算優先 adoption → 「今日推薦」 (§9) |
@@ -631,15 +635,18 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
    `clasp deploy -i <deploymentId> -d "<description>"`.
 2. In the editor, **Project Settings → Script Properties**, add:
    - `ADMIN_TOKEN` — a long random string, e.g. `openssl rand -hex 32`. It
-     travels as a URL query parameter, so it must be URL-safe: hex or
-     base64url only — plain base64 contains `+`, which `e.parameter` decodes
-     to a space and the comparison then fails. An empty value counts as
-     unset (everything refused). It gates `warm&force`, `backfill` and
-     `alerttest` (§2). Keep it out of the repo; the CI deploy reads it from
-     the `GAS_ADMIN_TOKEN` secret (§8). There is one token, with no expiry
-     or scope: rotating it means changing both places.
-   - `ALERT_EMAIL` (optional) — where failure alerts go. Unset, alerts go to
-     the deploying account.
+     gates `warm&force`, `backfill` and `alerttest` (§2); an empty value
+     counts as unset (everything refused). It travels as a URL query
+     parameter: the CI deploy URL-encodes it, but when you paste it into a
+     browser or a hand-written `curl` a value containing `+`, `&` or `#` is
+     mangled before it reaches `e.parameter` — hex avoids the question. Keep
+     it out of the repo; CI reads it from the `GAS_ADMIN_TOKEN` secret (§8).
+     There is one token, with no expiry or scope: rotating it means changing
+     both places.
+   - `ALERT_EMAIL` — **required**: where failure alerts go. Unset, no alert
+     can be sent (`diag` shows `recipient_configured: false`, and
+     `?action=alerttest` answers `no_recipient`). See §2 for why there is no
+     fallback to the deploying account.
 3. Run `installDailyTrigger()` once in the editor — it installs the refresh
    trigger on `REFRESH_INTERVAL_HOURS` and warms the board so the first visitor
    never hits a cold crawl. Confirm with `?action=diag`: `triggers` must list
@@ -673,8 +680,12 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   without that step `/exec` keeps serving old code — and then queues a board
   refresh via `?action=warm&force=1&token=…`, reading the token from the
   `GAS_ADMIN_TOKEN` secret (the same value as the `ADMIN_TOKEN` script
-  property, §7); without that secret it still queues a refresh, just subject to
-  the 15-minute lock. It authenticates to Apps Script with **one** of two repo
+  property, §7). Apps Script always answers HTTP 200, so the step checks the
+  body: `forced: false` with the secret set means the secret and the script
+  property have drifted apart, and the job fails there rather than let the
+  new deploy serve the old board. Without the secret it still queues a
+  refresh, just subject to the 15-minute lock. It authenticates to Apps Script
+  with **one** of two repo
   secrets (Settings → Secrets and variables → Actions), and skips the deploy
   with a notice when neither is set:
   - `GCP_SA_KEY` (recommended): a GCP service-account JSON key, base64-encoded,

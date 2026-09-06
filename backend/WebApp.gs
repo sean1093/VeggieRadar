@@ -68,7 +68,9 @@ function doGet(e) {
     } else if (action === 'alerttest') {
       payload = isAdmin(params) ? handleAlertTest() : unauthorized(action);
     } else if (action === 'diag') {
-      payload = handleDiag(isAdmin(params));
+      // One properties round trip serves both the token check and the report.
+      var props = PropertiesService.getScriptProperties().getProperties();
+      payload = handleDiag(isAdmin(params, props), props);
     } else {
       payload = readBoard();
     }
@@ -91,12 +93,15 @@ function jsonOut(obj) {
  * True when `params.token` matches the `ADMIN_TOKEN` script property. Fails
  * closed: no property, no token, or a properties outage all mean "not the
  * operator". The comparison walks every character regardless of where the
- * strings first differ, so response time cannot be used to guess the token.
+ * strings first differ, so response time cannot be used to guess the token
+ * (its length is the one thing it does reveal, which is fine for a random
+ * 64-character value). `props` lets a caller that already holds the property
+ * map skip the second round trip.
  */
-function isAdmin(params) {
+function isAdmin(params, props) {
   var expected;
   try {
-    expected = PropertiesService.getScriptProperties().getProperty(ADMIN_TOKEN_PROP);
+    expected = props ? props[ADMIN_TOKEN_PROP] : PropertiesService.getScriptProperties().getProperty(ADMIN_TOKEN_PROP);
   } catch (err) {
     Logger.log('isAdmin: properties unavailable: ' + err);
     return false;
@@ -147,8 +152,8 @@ function handleWarm(params) {
  * caller holds the admin token: the raw reason can quote whatever MOA or the
  * platform answered, and only the operator needs that text.
  */
-function handleDiag(full) {
-  var props = PropertiesService.getScriptProperties().getProperties();
+function handleDiag(full, props) {
+  props = props || PropertiesService.getScriptProperties().getProperties();
   var handlers = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
   return {
     type: 'diag',
@@ -167,6 +172,8 @@ function handleDiag(full) {
       failure_streak: parseInt(props[ALERT_STREAK_PROP] || '0', 10) || 0,
       incident_open: props[ALERT_ACTIVE_PROP] === '1',
       last_sent: props[ALERT_SENT_PROP] || null,
+      // Whether a mail could go anywhere at all — the address itself stays out.
+      recipient_configured: !!props[ALERT_EMAIL_PROP],
     },
   };
 }

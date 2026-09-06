@@ -73,19 +73,31 @@ jobs:
         # `force=1` jumps the 15-minute lock and is honoured only with the
         # operator token (the ADMIN_TOKEN script property, mirrored in the
         # GAS_ADMIN_TOKEN secret). Without the secret the call still queues a
-        # refresh, subject to the lock. `-o /dev/null` keeps the response —
-        # which echoes the board summary, never the token — out of the log.
+        # refresh, subject to the lock.
+        #
+        # Apps Script always answers HTTP 200, so `-f` proves nothing: the
+        # body is checked instead. `forced: false` with the secret set means
+        # the secret and the script property have drifted apart — fail loudly
+        # here rather than let the new deploy serve the old board for another
+        # 15 minutes. The body carries the board summary, never the token.
         if: env.HAS_SA == 'true' || env.HAS_TOKEN == 'true'
         env:
           GAS_ADMIN_TOKEN: ${{ secrets.GAS_ADMIN_TOKEN }}
         run: |
-          url="https://script.google.com/macros/s/$DEPLOYMENT_ID/exec?action=warm"
+          base="https://script.google.com/macros/s/$DEPLOYMENT_ID/exec"
           if [ -n "$GAS_ADMIN_TOKEN" ]; then
-            url="$url&force=1&token=$GAS_ADMIN_TOKEN"
+            body=$(curl -fsSL --max-time 60 -G "$base" \
+              --data-urlencode action=warm --data-urlencode force=1 \
+              --data-urlencode "token=$GAS_ADMIN_TOKEN")
+            echo "$body" | jq -e '.type == "warm" and .forced == true' > /dev/null \
+              || { echo "::error::warm was not accepted as the operator — GAS_ADMIN_TOKEN and the ADMIN_TOKEN script property differ, or doGet failed: $body"; exit 1; }
           else
             echo "GAS_ADMIN_TOKEN not set — queuing a refresh without force"
+            body=$(curl -fsSL --max-time 60 -G "$base" --data-urlencode action=warm)
+            echo "$body" | jq -e '.type == "warm"' > /dev/null \
+              || { echo "::error::warm did not answer as expected: $body"; exit 1; }
           fi
-          curl -fsSL --max-time 60 -o /dev/null "$url"
+          echo "$body" | jq -c '{queued, forced, message}'
 
       - name: Skip notice
         if: env.HAS_SA != 'true' && env.HAS_TOKEN != 'true'

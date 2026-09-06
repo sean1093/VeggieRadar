@@ -90,8 +90,8 @@ var LAST_FAIL_PROP = 'veggie_last_refresh_fail';
 // state, they all run inside one script-lock section — see `withAlertLock`.
 //
 // The recipient is NOT a constant: it is read from the ScriptProperties key
-// below, falling back to the deploying account (`alertRecipient`). A personal
-// address has no business in a public repository.
+// below (`alertRecipient`) and must be set — a personal address has no
+// business in a public repository. `diag` reports whether it is configured.
 var ALERT_EMAIL_PROP = 'ALERT_EMAIL';
 
 var ALERT_FAILURE_STREAK = 3;                      // consecutive failed refreshes ≈ half a day stale

@@ -90,11 +90,9 @@ function App() {
           setBoard([]);
         }
       } else if (res.type === 'board') {
-        track('board_loaded', {
-          source: 'network',
-          stale: !!res.stale,
-          age_bucket: ageBucket(res.generated_at),
-        });
+        // `source` arrives with the static mirror (#13), when there is a
+        // second value for it to take; a constant dimension is dead weight.
+        track('board_loaded', { stale: !!res.stale, age_bucket: ageBucket(res.generated_at) });
         applyBoard(res);
       }
       setLoading(false);

@@ -103,22 +103,19 @@ function sendAlert(subject, body) {
 }
 
 /**
- * Where alerts go: the `ALERT_EMAIL` script property when set, otherwise the
- * account the Web App runs as (it executes as the deployer, who is the
- * maintainer). Null when neither is available — the callers treat that as a
- * send failure, never as a reason to write the address anywhere.
+ * Where alerts go: the `ALERT_EMAIL` script property, or null when it is
+ * unset or unreadable — the callers treat null as a send failure, never as a
+ * reason to write an address anywhere. There is deliberately no fallback to
+ * the deploying account's session e-mail: reading it needs the
+ * `userinfo.email` scope, the manifest pins an explicit scope list without
+ * it, and adding a scope forces the deploying owner to re-consent before the
+ * Web App runs again.
  */
 function alertRecipient() {
   try {
-    var configured = PropertiesService.getScriptProperties().getProperty(ALERT_EMAIL_PROP);
-    if (configured) return configured;
+    return PropertiesService.getScriptProperties().getProperty(ALERT_EMAIL_PROP) || null;
   } catch (err) {
     Logger.log('alertRecipient: properties unavailable: ' + err);
-  }
-  try {
-    return Session.getEffectiveUser().getEmail() || null;
-  } catch (err) {
-    Logger.log('alertRecipient: session unavailable: ' + err);
     return null;
   }
 }

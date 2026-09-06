@@ -166,7 +166,14 @@ export async function fetchProduceTrend(cropName: string, days: number): Promise
     const data = (await fetchJson(
       { action: 'getTrend', cropName: trimmed, days: String(days) },
       TREND_TIMEOUT_MS,
-    )) as { trend?: unknown };
+    )) as { trend?: unknown; error?: unknown };
+    // doGet answers a thrown handler with `{ error }` and HTTP 200. That is a
+    // backend failure, not a crop without data — the two must not share a
+    // bucket, or an outage reads as "no 7-day trend".
+    if (data.error) {
+      track('trend_result', { outcome: 'failed', reason: 'backend' });
+      return [];
+    }
     const trend = Array.isArray(data.trend)
       ? data.trend.filter((n: unknown): n is number => typeof n === 'number')
       : [];

@@ -99,7 +99,7 @@ describe('App — backend unreachable', () => {
 
     render(<App />);
     await screen.findByText('高麗菜');
-    expect(gtag).toHaveBeenCalledWith('event', 'board_loaded', { source: 'network', stale: false, age_bucket: '<1h' });
+    expect(gtag).toHaveBeenCalledWith('event', 'board_loaded', { stale: false, age_bucket: '<1h' });
 
     fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '龍鬚菜' } });
     fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
