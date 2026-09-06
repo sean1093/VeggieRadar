@@ -8,6 +8,13 @@ on:
     paths:
       - 'frontend/**'
       - '.github/workflows/deploy-pages.yml'
+  # The board mirror (README §2) is only as fresh as the last deploy, so the
+  # deploy runs on the backend's cadence: 20 minutes after the 4-hourly
+  # refresh trigger, late enough to fetch a board that has already been
+  # rebuilt rather than the one being replaced. Six extra deploys a day sits
+  # far below Pages' soft limit of 10 per hour.
+  schedule:
+    - cron: '20 */4 * * *'
   workflow_dispatch:
 
 # Allow the workflow to publish to GitHub Pages.
@@ -47,6 +54,51 @@ jobs:
       - name: Run tests
         # Deploys must never outrun the suite — a red test blocks the publish.
         run: npm run test:run
+
+      - name: Fetch board mirror
+        # Publishes `data/board.json` next to the app so the board — 99 % of
+        # the traffic — is read from the same CDN instead of costing a GAS
+        # execution and a cold start (README §2). The URL is read from the
+        # committed `frontend/.env`: `/exec` is public by construction, since
+        # the browser calls it and Vite inlines it into the bundle.
+        #
+        # A GAS outage must never block a code deploy, so every failure here
+        # falls back: first to the mirror already published (stale prices the
+        # client will still send to GAS), then to no mirror at all (the client
+        # goes straight to GAS, exactly as it did before this step existed).
+        run: |
+          set -uo pipefail
+          api_base="$(sed -n 's/^[[:space:]]*VITE_API_BASE_URL[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*$/\1/p' .env)"
+          mkdir -p public/data
+          mirror=none
+          reason=
+
+          if [ -z "$api_base" ]; then
+            reason='VITE_API_BASE_URL missing from frontend/.env'
+          elif ! curl -fsSL --max-time 30 "${api_base}?action=board" -o /tmp/board.json; then
+            reason='GAS fetch failed (curl)'
+          elif ! verdict="$(node --experimental-strip-types scripts/validate-board.mjs /tmp/board.json 2>&1)"; then
+            reason="$verdict"
+          else
+            cp /tmp/board.json public/data/board.json
+            mirror=fresh
+            reason="$verdict"
+          fi
+
+          if [ "$mirror" = none ]; then
+            # The published mirror is this workflow's own last output, already
+            # validated when it was written. It is deliberately NOT re-validated
+            # here: it is reused *because* it is the best available, and its age
+            # is the one thing this branch already knows is wrong.
+            if curl -fsSL --max-time 30 https://sean1093.github.io/VeggieRadar/data/board.json -o public/data/board.json; then
+              mirror='reused (stale)'
+            else
+              rm -f public/data/board.json
+              reason="$reason; no published mirror to reuse — the client falls back to GAS"
+            fi
+          fi
+
+          printf 'mirror: %s\n\nreason: %s\n' "$mirror" "$reason" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build (embeds VITE_API_BASE_URL from frontend/.env)
         run: npm run build

@@ -19,7 +19,10 @@ export interface BoardFreshness {
   date?: string;
   /** When the backend last crawled (ISO timestamp). */
   generatedAt?: string;
-  /** Backend flag: the board is past its max age and a rebuild is queued. */
+  /**
+   * Backend flag: the board is past its max age and a rebuild is queued.
+   * It can only *add* staleness — never vouch for freshness. See below.
+   */
   stale?: boolean;
 }
 
@@ -31,6 +34,20 @@ export interface FreshnessNotice {
 }
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Board age past which the prices are no longer presented as current. Mirrors
+ * `BOARD_MAX_AGE_MS` in `backend/Config.gs`: the same 6 h, chosen there to sit
+ * above the 4-hourly refresh cadence plus the crawl, so a healthy board never
+ * reports itself stale in the minutes before a scheduled run.
+ */
+export const BOARD_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+/** Milliseconds since the backend crawled the board, or null when unknowable. */
+export function boardAgeMs(generatedAt: string | undefined, now: number = Date.now()): number | null {
+  const built = Date.parse(generatedAt || '');
+  return Number.isNaN(built) ? null : now - built;
+}
 
 const pad = (n: number) => String(n).padStart(2, '0');
 
@@ -46,7 +63,15 @@ export function describeFreshness(board: BoardFreshness, now: Date = new Date())
   // A stale board is still served (old prices beat no prices), but its age can
   // no longer be explained by market closures, so say so plainly rather than
   // blaming 休市 for a broken refresh.
-  if (board.stale) {
+  //
+  // Staleness is COMPUTED from `generatedAt`, not read from the payload: the
+  // static mirror (README §2) is a file, and the `stale: false` frozen into it
+  // when it was published keeps claiming freshness for as long as Pages serves
+  // it. The backend's flag is still honoured on top — it knows about a queued
+  // rebuild, and an unparsable timestamp leaves nothing to compute — but it can
+  // only add staleness, never vouch for it.
+  const age = boardAgeMs(board.generatedAt, now.getTime());
+  if (board.stale || (age !== null && age > BOARD_MAX_AGE_MS)) {
     return { note: '資料更新中，稍後重新整理可看到最新行情', checkedAt };
   }
   if (!board.date) return { note: null, checkedAt };

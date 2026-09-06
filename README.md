@@ -66,11 +66,19 @@ actually being quoted when one crop trades at two very different prices.
 ## 2. Architecture
 
 ```
-MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ Frontend (GitHub Pages)
-  (single-date and       board   → CacheService + chunked     paints the cached
-   range queries)                  ScriptProperties           board first, then
-                         history → chunked ScriptProperties   revalidates
-                                   (28 trading days → baseline)
+MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ CacheService + chunked
+  (single-date and       board   → the day's prices              ScriptProperties
+   range queries)        history → 28 trading days → baseline (§5)
+                                                                      │
+                                                            GET /exec │
+                                                                      ▼
+Frontend (GitHub Pages) ◀── validate ◀── GitHub Actions (deploy-pages, cron :20 / 4 h)
+  data/board.json, published inside the bundle's own artifact
+        │
+        ▼
+Browser: localStorage (paints first) ──▶ data/board.json ──▶ GAS /exec
+                                         authoritative          only when the mirror
+                                         while < 6 h old        is stale or missing
 ```
 
 - **Data source:** Taiwan MOA "Agricultural Products Wholesale Market Transactions"
@@ -212,20 +220,74 @@ and the drawer's baseline sentence, replacing the drawer's change block with
 ### GAS quotas are the real scaling limit
 
 Two Apps Script limits bite long before anything else: **30 simultaneous
-executions** per account and the daily `UrlFetchApp` budget. The board is a
-cache read, so it was never the risk — the per-user actions were:
+executions** per account and the daily `UrlFetchApp` budget. The board was a
+cache read rather than a crawl, so it never spent MOA quota — but at ~99 % of
+the traffic it was almost every *execution*, which is the limit that queues
+requests behind each other. The static mirror below takes that path off Apps
+Script entirely; these were the per-user actions:
 
 | Path | Before | Now |
 | --- | --- | --- |
 | Trend (one drawer open) | 7 sequential fetches + 480 ms of sleeps, 5–10 s holding an execution slot | 1 range query, then a shared cache: ~1 crawl per crop per hour for *all* users (1.3 s warm) |
 | Search miss | up to 16 probe fetches plus the queries | probe cached 1 h → 7.8 s warm instead of ~31 s |
-| Board | served from cache | unchanged, plus the client-side localStorage fallback |
+| Board | one execution per visit, served from cache | **no execution at all** while the static mirror is fresh (below); GAS only for a stale or missing mirror |
 
 History writes (`updateHistory`, `backfillHistory`) run inside a `LockService`
 critical section: the 4-hourly refresh and a queued backfill genuinely can
 overlap, and a read-modify-write race would silently drop observations. The
 backfill crawls every window *before* taking the lock, so the critical section
 lasts milliseconds.
+
+### Static board mirror
+
+`data/board.json` is published *inside the frontend's own Pages artifact* by
+`deploy-pages.yml`, and the client reads it before it considers GAS at all:
+**localStorage → `data/board.json` → GAS `/exec`**.
+
+Three reasons, none of which the client-side fallback could reach:
+
+- **Executions.** The board is ~99 % of the traffic and was ~99 % of the
+  executions, all of them cache reads. Thirty of them can run at once per
+  account; the rest queue, which is how a busy minute turned into a 12 s
+  deadline expiring on someone's phone. A static file on the same CDN as the
+  app has no such ceiling.
+- **Cold start.** An Apps Script Web App that has not run recently answers the
+  first request with a transient 404 — the reason `fetchBoard` retries three
+  times. Static JSON has no warm-up.
+- **Surviving a dead backend.** The localStorage fallback only helps a browser
+  that has already loaded the board once. The mirror is the last good board for
+  *every* visitor, including a first-time one arriving while GAS is down.
+
+The mirror is fetched 20 minutes after the backend's 4-hourly refresh and
+published by the same build that ships the bundle, so it trails the backend by
+~20 minutes plus a build (~2 min). For a board of wholesale *closing* prices,
+published once a day after market close, that lag is invisible.
+
+**A mirror is a file, and a file cannot know it went stale.** The `stale: false`
+and `age_ms` inside it froze the moment it was written, so the client recomputes
+the age from `generated_at` against the backend's own `BOARD_MAX_AGE_MS` (6 h,
+mirrored in `src/lib/utils/freshness.ts`): under it, the mirror answers the
+visit outright and is written to localStorage; over it, the prices still paint
+immediately and the read continues to GAS. **The self-heal chain is therefore
+unchanged** — a stale mirror sends the client to `/exec`, whose `readBoard`
+queues the rebuild exactly as before. The mirror is a layer in front of GAS,
+never a replacement for it.
+
+What each failure does, in the order the client meets them:
+
+| Failure | Client |
+| --- | --- |
+| No mirror deployed yet (404) | the pre-mirror path: GAS, with the localStorage fallback |
+| Mirror is a truncated file, an error page, or breaks the §3 contract | reports `board_schema_mismatch` and asks GAS |
+| Mirror does not answer within 3 s | asks GAS — a CDN that slow is only delaying the request its absence makes necessary |
+| Mirror is stale **and** GAS is down | the stale mirror stays on screen with the connection note (`board_fallback`, `served: 'static'`) |
+
+The publish side is symmetric: a mirror is only overwritten by a payload that
+passes `frontend/scripts/validate-board.mjs` (the §3 contract, ≥ 60 items,
+crawled < 8 h ago, every item priced), and a failed fetch or a rejected board
+re-publishes the *previous* mirror rather than failing the deploy — a code
+change must not be blocked by a backend outage, and an unvalidated file would
+serve wrong prices for four hours (§8).
 
 ### Alerting: a broken pipeline has to reach a human
 
@@ -346,6 +408,13 @@ does not justify publishing.
 "Trading date vs. refresh time" in §2 — clients must not present the trading date
 alone as "last updated". `stale: true` means the board is past its max age and a
 rebuild has been queued (`refresh_queued`); the stale board is still served.
+
+The same payload is mirrored as a static file at
+`https://sean1093.github.io/VeggieRadar/data/board.json`, which the client
+reads *before* `/exec` (§2). It is the response of one past `?action=board`
+call, byte for byte — including `age_ms` and `stale`, which are therefore
+frozen at publish time and must be recomputed from `generated_at` by anything
+reading the file.
 
 `frontend/src/types/board.schema.ts` is the executable form of this contract:
 the client's types are inferred from it, `api.ts` measures every live board
@@ -612,8 +681,8 @@ wrapper, `src/lib/analytics.ts`. Each event exists to settle a decision:
 
 | Event | Params | Decision it informs |
 | --- | --- | --- |
-| `board_loaded` | `stale`, `age_bucket` | Baseline for every ratio below; a `source` dimension arrives with the static mirror (#13) |
-| `board_fallback` | `served` (`cache` / `none`) | Fallback rate → the static-mirror work in #13 |
+| `board_loaded` | `source` (`static` / `gas`), `stale`, `age_bucket` | Baseline for every ratio below; `source` is how the mirror's share of the reads is measured — the number that says whether GAS still carries the board (§2). A cache paint sends nothing: it is not yet a load |
+| `board_fallback` | `served` (`static` / `cache` / `none`) | Fallback rate. `static` means the mirror went stale *and* GAS is down — a pipeline incident; `cache` is one browser's own copy saving one visit |
 | `search_result` | `outcome` (`local_hit` / `remote_hit` / `not_found` / `transient`), `query_length` | Live-miss and busy rates → the search index in #21; whether the 15 s deadline holds |
 | `sort_changed` | `mode` | 划算優先 adoption → 「今日推薦」 (§9) |
 | `filter_changed` | `filter` | Which categories and 關注 get used |
@@ -731,6 +800,26 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   the default branch runs the tests, builds `frontend/` and publishes to Pages. In
   the repo, set **Settings → Pages → Source: GitHub Actions**. Live at
   `https://<user>.github.io/VeggieRadar/` (`vite.config.ts` `base` is `/VeggieRadar/`).
+  It also runs on `schedule: '20 */4 * * *'`, because the static board mirror
+  (§2) is only as fresh as the last deploy: 20 minutes past the hour catches a
+  board the backend's own 4-hourly trigger has already rebuilt rather than the
+  one being replaced. Six extra deploys a day sits far below Pages' soft limit
+  of ten per hour, and `concurrency: pages` still keeps one deploy at a time.
+  The **Fetch board mirror** step runs after the suite and before the build:
+  it `curl`s `?action=board` (the URL read from the committed `frontend/.env`,
+  so no secret), validates it with
+  `node --experimental-strip-types scripts/validate-board.mjs`, and copies it
+  to `frontend/public/data/board.json` — which `frontend/.gitignore` covers,
+  since the file belongs in the artifact and not in the history. **The step
+  never fails the job**: a failed fetch or a rejected board re-publishes the
+  mirror already on Pages, and if that is missing too the site deploys without
+  one and the client goes straight to GAS. Every run records which of the three
+  happened in its step summary:
+  ```
+  mirror: fresh | reused (stale) | none
+
+  reason: board ok: 94 items, traded 2026-09-03, crawled 3.3 h ago
+  ```
 - **Backend → Apps Script** via `.github/workflows/deploy-gas.yml` (optional):
   otherwise deploy manually with `clasp` (§7). The workflow runs lint and the
   backend regression tests, pushes, **redeploys the pinned `DEPLOYMENT_ID`** —
@@ -753,6 +842,12 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
     `~/.clasprc.json` after `clasp login`. It is your personal OAuth grant, so
     rotate it if the secret ever leaks.
 
+> A board rebuilt out of band — after `warm`, or after a backfill — reaches the
+> mirror only on the next scheduled deploy, up to four hours later. Running
+> `deploy-pages` by `workflow_dispatch` refreshes it immediately; visitors see
+> the new prices either way, since a mirror older than 6 h sends the client to
+> GAS (§2).
+
 > Both deploy workflows need Node 22+: the suite uses `Promise.withResolvers`.
 
 ### Monitoring
@@ -770,7 +865,7 @@ could drift:
 | Check | Passes when | Failure category |
 | --- | --- | --- |
 | `pages` | 200, `<title>` still contains 今日菜價, and a `<script type="module">` is present — a Pages deploy that lost its bundle still serves a plausible shell | `pages_down` |
-| `mirror` | `data/board.json` is 200, matches the schema and was crawled < 8 h ago. **A 404 is `skipped`**, not a failure: the static mirror is #13 and not deployed yet | `mirror_stale` |
+| `mirror` | `data/board.json` is 200, matches the schema and was crawled < 8 h ago — the same bound the publish-side validator applies (§2). **A 404 stays `skipped`**, not a failure: a deploy that could obtain no mirror at all publishes without one on purpose, and the visitors it sends to GAS are covered by `gas_board` below | `mirror_stale` |
 | `gas_board` | the body is JSON (Apps Script answers platform errors with HTML and HTTP 200), matches the schema, `stale === false`, `count ≥ 60`, crawled < 8 h ago | `gas_error` / `gas_stale` |
 | `gas_diag` | `?action=diag` answers JSON | `gas_error` |
 | `gas_trigger` | `triggers` includes `refreshBoardCache` | `trigger_missing` |

@@ -45,6 +45,14 @@ async function loadApp() {
   return mod.default;
 }
 
+/**
+ * No static mirror published yet (README §2), which is what makes these tests
+ * about the *backend*: with a mirror on Pages the board would never reach GAS
+ * and there would be no unhealthy backend to degrade from.
+ */
+const NO_MIRROR = { ok: false, status: 404, text: async () => 'Not Found' };
+const isMirror = (url: unknown) => String(url).includes('data/board.json');
+
 beforeEach(() => {
   localStorage.clear();
   vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -87,6 +95,7 @@ describe('App — backend unreachable', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: unknown) => {
+        if (isMirror(url)) return NO_MIRROR;
         if (String(url).includes('action=search')) {
           return Promise.reject(new TypeError('network down'));
         }
@@ -99,7 +108,7 @@ describe('App — backend unreachable', () => {
 
     render(<App />);
     await screen.findByText('高麗菜');
-    expect(gtag).toHaveBeenCalledWith('event', 'board_loaded', { stale: false, age_bucket: '<1h' });
+    expect(gtag).toHaveBeenCalledWith('event', 'board_loaded', { source: 'gas', stale: false, age_bucket: '<1h' });
 
     fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '龍鬚菜' } });
     fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
@@ -122,7 +131,8 @@ describe('App — recovery via the banner retry', () => {
     let backendUp = false;
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => {
+      vi.fn(async (url: unknown) => {
+        if (isMirror(url)) return NO_MIRROR;
         if (!backendUp) return Promise.reject(new TypeError('network down'));
         return { ok: true, status: 200, text: async () => JSON.stringify(RECOVERED_BOARD) };
       }),
