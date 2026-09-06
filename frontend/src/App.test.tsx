@@ -51,11 +51,20 @@ describe('App (board-first)', () => {
     expect(within(list).getByText('高麗菜')).toBeInTheDocument();
     expect(within(list).queryByText('香蕉')).not.toBeInTheDocument();
   });
-  it('shows an honest empty state when a remote search finds nothing', async () => {
+  it('keeps the board on screen during a remote search, then states the miss honestly', async () => {
     render(<App />);
     await screen.findByText('高麗菜');
     fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '龍鬚菜' } });
     fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
+
+    // A query in flight is no reason to blank prices a shopper already has,
+    // and 查無此品項 must not flash before the backend has answered. Typing
+    // stays possible throughout; only the submit button waits.
+    expect(screen.getByText('查詢中…')).toBeInTheDocument();
+    expect(screen.getByText('高麗菜')).toBeInTheDocument();
+    expect(screen.queryByText('查無此品項')).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/搜尋蔬果/)).toBeEnabled();
+
     expect(await screen.findByText('查無此品項')).toBeInTheDocument();
     expect(screen.getByText(/找不到「龍鬚菜」/)).toBeInTheDocument();
   });

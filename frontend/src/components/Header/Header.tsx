@@ -3,10 +3,11 @@ import React, { useState } from 'react';
 interface HeaderProps {
   onSearch: (query: string) => void;
   onClear?: () => void;
-  loading?: boolean;
+  /** A live query is in flight. Only the submit button waits for it. */
+  searching?: boolean;
 }
 
-const Header: React.FC<HeaderProps> = ({ onSearch, onClear, loading = false }) => {
+const Header: React.FC<HeaderProps> = ({ onSearch, onClear, searching = false }) => {
   const [value, setValue] = useState('');
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -34,8 +35,7 @@ const Header: React.FC<HeaderProps> = ({ onSearch, onClear, loading = false }) =
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder="搜尋蔬果（例如：高麗菜、番茄）"
-            disabled={loading}
-            className="min-w-0 flex-1 bg-transparent py-2 text-base text-ink placeholder:text-stone outline-none disabled:opacity-50"
+            className="min-w-0 flex-1 bg-transparent py-2 text-base text-ink placeholder:text-stone outline-none"
           />
           {value && (
             <button
@@ -49,10 +49,10 @@ const Header: React.FC<HeaderProps> = ({ onSearch, onClear, loading = false }) =
           )}
           <button
             type="submit"
-            disabled={loading}
+            disabled={searching}
             className="shrink-0 text-sm text-sage hover:text-ink disabled:opacity-50 transition-colors"
           >
-            {loading ? '查詢中' : '搜尋'}
+            {searching ? '查詢中' : '搜尋'}
           </button>
         </form>
       </div>

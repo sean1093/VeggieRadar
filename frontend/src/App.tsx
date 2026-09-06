@@ -1,286 +1,95 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
 import Header from './components/Header/Header';
+import BoardCaption from './components/BoardCaption/BoardCaption';
 import ProduceList from './components/ProduceGrid/ProduceList';
 import ProduceFilter from './components/ProduceFilter/ProduceFilter';
 import DetailDrawer from './components/DetailDrawer/DetailDrawer';
 import EmptyState from './components/EmptyState/EmptyState';
 import ErrorMessage from './components/ErrorMessage/ErrorMessage';
-import { fetchBoard, readCachedBoard, searchProduce } from './services/api';
+import { boardItems, useBoard } from './hooks/useBoard';
+import { itemsFor, useSearch } from './hooks/useSearch';
+import { useBoardView } from './hooks/useBoardView';
 import { useWatchlist } from './hooks/useWatchlist';
-import { describeFreshness, type FreshnessNotice } from './lib/utils/freshness';
-import { isApiError, type ApiResponse, type BoardResponse, type ProduceItem } from './types/produce';
-import { byValueFirst } from './lib/utils/value-sort';
-import { ageBucket, track } from './lib/analytics';
+import type { ProduceItem } from './types/produce';
 import './App.css';
 
-const freshnessOf = (res: BoardResponse): FreshnessNotice =>
-  describeFreshness({ date: res.date, generatedAt: res.generated_at, stale: res.stale });
-
+/**
+ * Composition only. Three hooks own the state — the board lifecycle, the
+ * query, and how the board is presented — and each exposes a discriminated
+ * status, so this file never has to spell out which combination of booleans
+ * means what.
+ */
 function App() {
-  // The last good board, read once. It paints before the network answers, so
-  // a slow or over-quota backend never holds the UI on a skeleton, and it
-  // decides whether a failed fetch degrades (old prices, a note) or errors.
-  const [initialCache] = useState(readCachedBoard);
-  const [board, setBoard] = useState<ProduceItem[]>(() => initialCache?.items ?? []);
-  const [boardDate, setBoardDate] = useState(() => initialCache?.date ?? '');
-  const [freshness, setFreshness] = useState<FreshnessNotice>(() =>
-    initialCache ? freshnessOf(initialCache) : { note: null, checkedAt: null },
-  );
-  const [loading, setLoading] = useState(initialCache === null);
-  const [error, setError] = useState<string | null>(null);
-  // Set when the backend is unreachable and the board on screen came from the
-  // localStorage fallback — old prices beat a blank page, but must say so.
-  const [connectionNote, setConnectionNote] = useState<string | null>(null);
-  // Transport-level search failure. Kept apart from empty results so a busy
-  // backend is never presented as 查無此品項.
-  const [searchError, setSearchError] = useState<string | null>(null);
-  // Board order. 'category' is the curated definition order; 'value' puts the
-  // items furthest below their own monthly baseline first — the "just show me
-  // what is worth buying" mode for standing at the market. Persisted so the
-  // choice survives the daily revisit.
-  const [sortMode, setSortMode] = useState<'category' | 'value'>(() => {
-    try {
-      return localStorage.getItem('veggieradar_sort_v1') === 'value' ? 'value' : 'category';
-    } catch {
-      return 'category';
-    }
-  });
-  const changeSort = (mode: 'category' | 'value') => {
-    setSortMode(mode);
-    track('sort_changed', { mode });
-    try {
-      localStorage.setItem('veggieradar_sort_v1', mode);
-    } catch {
-      // Private mode — keep the in-memory choice.
-    }
-  };
-
-  const [query, setQuery] = useState('');
-  const [remoteResults, setRemoteResults] = useState<ProduceItem[] | null>(null);
-  const [searching, setSearching] = useState(false);
-
-  const [activeFilter, setActiveFilter] = useState('all');
-  const changeFilter = (value: string) => {
-    setActiveFilter(value);
-    track('filter_changed', { filter: value });
-  };
-  const [selectedItem, setSelectedItem] = useState<ProduceItem | null>(null);
-  const { count: watchCount, isWatched, toggle } = useWatchlist();
-  const toggleWatch = (item: ProduceItem) => toggle(item.official_name);
-
-  const applyBoard = useCallback((res: BoardResponse) => {
-    setBoard(res.items);
-    setBoardDate(res.date);
-    setFreshness(freshnessOf(res));
-  }, []);
-
-  // Lands the backend's answer on top of whatever is on screen. `hadCache`
-  // decides how a failure degrades: old prices plus a note beat a blank page.
-  const settle = useCallback(
-    (res: ApiResponse, hadCache: boolean) => {
-      if (isApiError(res)) {
-        // How often the fallback carries a visit is the number behind the
-        // static-mirror decision; `served` says whether there was anything
-        // to fall back on.
-        track('board_fallback', { served: hadCache ? 'cache' : 'none' });
-        if (hadCache) {
-          setConnectionNote('目前連不上伺服器，顯示上次成功載入的行情');
-        } else {
-          setError(res.error);
-          setBoard([]);
-        }
-      } else if (res.type === 'board') {
-        // `source` arrives with the static mirror (#13), when there is a
-        // second value for it to take; a constant dimension is dead weight.
-        track('board_loaded', { stale: !!res.stale, age_bucket: ageBucket(res.generated_at) });
-        applyBoard(res);
-      }
-      setLoading(false);
-    },
-    [applyBoard],
-  );
-
-  // Mount: the cached board is already in the initial state, so the effect
-  // only revalidates — nothing is set synchronously inside it. Both
-  // dependencies are stable, so this runs once.
-  useEffect(() => {
-    fetchBoard().then((res) => settle(res, initialCache !== null));
-  }, [settle, initialCache]);
-
-  // Retry, from the error screen or the connection note. Re-reads the cache
-  // because a successful fetch since mount has refreshed it.
-  const loadBoard = () => {
-    const cached = readCachedBoard();
-    if (cached) {
-      applyBoard(cached);
-      setLoading(false);
-    } else {
-      setLoading(true);
-    }
-    setError(null);
-    setConnectionNote(null);
-    fetchBoard().then((res) => settle(res, cached !== null));
-  };
-
-  // Search: filter the board locally for instant feedback; fall back to a live
-  // backend query only when nothing matches locally.
-  const handleSearch = async (raw: string) => {
-    const q = raw.trim();
-    setQuery(q);
-    setRemoteResults(null);
-    setSearchError(null);
-    setActiveFilter('all'); // a reset, not a choice — not tracked as filter_changed
-    if (!q) return;
-
-    const ql = q.toLowerCase();
-    const localHit = board.some(
-      (it) => it.name.toLowerCase().includes(ql) || it.official_name.includes(q),
-    );
-    // Outcome and length only — never the text; a search box accepts anything.
-    const report = (outcome: 'local_hit' | 'remote_hit' | 'not_found' | 'transient') =>
-      track('search_result', { outcome, query_length: q.length });
-    if (localHit) {
-      report('local_hit');
-      return;
-    }
-
-    setSearching(true);
-    const res = await searchProduce(q);
-    if (isApiError(res)) {
-      if (res.transient) setSearchError(res.error);
-      setRemoteResults([]);
-      report(res.transient ? 'transient' : 'not_found');
-    } else {
-      setRemoteResults(res.items);
-      report(res.items.length ? 'remote_hit' : 'not_found');
-    }
-    setSearching(false);
-  };
-
-  const clearSearch = () => {
-    setQuery('');
-    setRemoteResults(null);
-    setSearchError(null);
-  };
-
-  const baseItems = useMemo<ProduceItem[]>(() => {
-    if (!query) return board;
-    const ql = query.toLowerCase();
-    const local = board.filter(
-      (it) => it.name.toLowerCase().includes(ql) || it.official_name.includes(query),
-    );
-    if (local.length) return local;
-    return remoteResults ?? [];
-  }, [query, board, remoteResults]);
-
-  const filterOptions = useMemo(() => {
-    const cats = Array.from(new Set(baseItems.map((it) => it.category)));
-    return [
-      { label: watchCount > 0 ? `★ 關注 ${watchCount}` : '★ 關注', value: 'watch' },
-      { label: '全部', value: 'all' },
-      ...cats.map((c) => ({ label: c, value: c })),
-    ];
-  }, [baseItems, watchCount]);
-
-  const visibleItems = useMemo(() => {
-    let items = baseItems;
-    if (activeFilter === 'watch') items = items.filter((it) => isWatched(it.official_name));
-    else if (activeFilter !== 'all') items = items.filter((it) => it.category === activeFilter);
-    if (sortMode === 'value') {
-      // Stable sort; items without a finite baseline sink to the bottom in
-      // their original curated order rather than pretending to be ranked.
-      items = [...items].sort(byValueFirst);
-    }
-    return items;
-  }, [baseItems, activeFilter, isWatched, sortMode]);
-
-  const hasBaselines = useMemo(
-    () => baseItems.some((it) => Number.isFinite(it.vs_baseline_percent)),
-    [baseItems],
-  );
-
-  const busy = loading || searching;
+  const { status, freshness, reload } = useBoard();
+  const board = boardItems(status);
+  const search = useSearch(board);
+  const watchlist = useWatchlist();
+  const view = useBoardView(itemsFor(search.status, board), watchlist);
+  const searching = search.status.kind === 'searching';
+  const toggleWatch = (item: ProduceItem) => watchlist.toggle(item.official_name);
 
   return (
     <div className="min-h-[100dvh] bg-paper">
-      <Header onSearch={handleSearch} onClear={clearSearch} loading={busy} />
+      {/* A new query widens the board back to 全部 before it runs. */}
+      <Header onSearch={(q) => { view.resetFilter(); search.search(q); }} onClear={search.clear} searching={searching} />
 
       <main className="mx-auto max-w-2xl px-4 pb-[env(safe-area-inset-bottom)]">
-        {!error && (
-          <section className="pt-6 pb-5">
-            <h2 className="text-2xl font-semibold tracking-tight text-ink">
-              {query ? `搜尋「${query}」` : '今日菜價'}
-            </h2>
-            {boardDate && (
-              <p className="mt-1 text-sm text-stone">
-                資料日期 {boardDate}・批發市場收盤均價
-                {freshness.checkedAt && <span className="text-stone">・更新於 {freshness.checkedAt}</span>}
-              </p>
-            )}
-            {freshness.note && <p className="mt-1 text-xs text-clay">{freshness.note}</p>}
-            {connectionNote && (
-              <p className="mt-1 text-xs text-clay">
-                {connectionNote}
-                <button onClick={loadBoard} className="ml-2 underline underline-offset-2">
-                  重試
-                </button>
-              </p>
-            )}
-            <p className="mt-1 text-xs text-stone">
-              價格以每台斤（600&nbsp;克）計。<span className="text-sage">↓ 便宜</span>・<span className="text-clay">↑ 變貴</span>
-            </p>
-            <p className="mt-1 text-xs text-stone">
-              大字為傳統市場零售推估（批發價加攤販常見加成），非實際報價；漲跌以批發價計。
-            </p>
-          </section>
-        )}
-
-        {error && <ErrorMessage error={error} query={query} onRetry={loadBoard} />}
-
-        {!error && (
+        {status.kind === 'error' ? (
+          <ErrorMessage error={status.message} query={search.query} onRetry={reload} />
+        ) : (
           <>
-            {filterOptions.length > 1 && (
+            <BoardCaption
+              title={search.query ? `搜尋「${search.query}」` : '今日菜價'}
+              date={status.kind === 'loading' ? '' : status.board.date}
+              freshness={freshness}
+              degradedReason={status.kind === 'degraded' ? status.reason : null}
+              onRetry={reload}
+              searching={searching}
+            />
+
+            {view.filterOptions.length > 1 && (
               <div className="pb-5">
-                <ProduceFilter options={filterOptions} activeFilter={activeFilter} onFilterChange={changeFilter} />
-                {hasBaselines && (
+                <ProduceFilter options={view.filterOptions} activeFilter={view.activeFilter} onFilterChange={view.changeFilter} />
+                {view.hasBaselines && (
                   <div className="mx-auto flex max-w-2xl justify-end pt-2">
                     <button
-                      onClick={() => changeSort(sortMode === 'value' ? 'category' : 'value')}
-                      aria-pressed={sortMode === 'value'}
+                      onClick={view.toggleSort}
+                      aria-pressed={view.sortMode === 'value'}
                       className="text-xs text-stone transition-colors hover:text-ink"
                     >
                       排序：
-                      {sortMode === 'value' ? <span className="font-medium text-sage">划算優先</span> : '分類'}
+                      {view.sortMode === 'value' ? <span className="font-medium text-sage">划算優先</span> : '分類'}
                     </button>
                   </div>
                 )}
               </div>
             )}
 
-            {busy && <ProduceList items={[]} loading onCardClick={setSelectedItem} />}
+            {status.kind === 'loading' && <ProduceList items={[]} loading onCardClick={view.select} />}
 
-            {!busy && visibleItems.length > 0 && (
+            {view.visibleItems.length > 0 && (
               <ProduceList
-                items={visibleItems}
-                onCardClick={setSelectedItem}
-                isWatched={isWatched}
+                items={view.visibleItems}
+                onCardClick={view.select}
+                isWatched={watchlist.isWatched}
                 onToggleWatch={toggleWatch}
               />
             )}
-            {!busy && searchError && (
-              <ErrorMessage error={searchError} query={query} onRetry={() => handleSearch(query)} />
+
+            {search.status.kind === 'transient' && (
+              <ErrorMessage error={search.status.message} query={search.query} onRetry={() => search.search(search.query)} />
             )}
 
-            {!busy && !searchError && visibleItems.length === 0 && activeFilter === 'watch' && (
-              <EmptyState message="還沒有關注的品項" suggestion="點卡片左側的 ☆ 加入關注，方便每天追蹤。" />
-            )}
-
-            {!busy && !searchError && visibleItems.length === 0 && activeFilter !== 'watch' && (
-              <EmptyState
-                message="查無此品項"
-                suggestion={query ? `找不到「${query}」，試試：高麗菜、番茄、蔥。` : '目前沒有菜價資料。'}
-              />
-            )}
+            {status.kind !== 'loading' &&
+              search.status.kind !== 'transient' &&
+              view.visibleItems.length === 0 &&
+              (view.activeFilter === 'watch' ? (
+                <EmptyState message="還沒有關注的品項" suggestion="點卡片左側的 ☆ 加入關注，方便每天追蹤。" />
+              ) : (
+                <EmptyState
+                  message="查無此品項"
+                  suggestion={search.query ? `找不到「${search.query}」，試試：高麗菜、番茄、蔥。` : '目前沒有菜價資料。'}
+                />
+              ))}
 
             <p className="py-8 text-center text-xs text-stone">
               資料來源：農業部批發市場交易行情開放資料
@@ -288,13 +97,13 @@ function App() {
           </>
         )}
       </main>
-      {selectedItem && (
+      {view.selectedItem && (
         <DetailDrawer
-          isOpen={!!selectedItem}
-          onClose={() => setSelectedItem(null)}
-          item={selectedItem}
+          isOpen={!!view.selectedItem}
+          onClose={view.close}
+          item={view.selectedItem}
           allProduceItems={board}
-          watched={isWatched(selectedItem.official_name)}
+          watched={watchlist.isWatched(view.selectedItem.official_name)}
           onToggleWatch={toggleWatch}
         />
       )}
