@@ -10,6 +10,7 @@ import { useWatchlist } from './hooks/useWatchlist';
 import { describeFreshness, type FreshnessNotice } from './lib/utils/freshness';
 import { isApiError, type ApiResponse, type BoardResponse, type ProduceItem } from './types/produce';
 import { byValueFirst } from './lib/utils/value-sort';
+import { ageBucket, track } from './lib/analytics';
 import './App.css';
 
 const freshnessOf = (res: BoardResponse): FreshnessNotice =>
@@ -46,6 +47,7 @@ function App() {
   });
   const changeSort = (mode: 'category' | 'value') => {
     setSortMode(mode);
+    track('sort_changed', { mode });
     try {
       localStorage.setItem('veggieradar_sort_v1', mode);
     } catch {
@@ -58,6 +60,10 @@ function App() {
   const [searching, setSearching] = useState(false);
 
   const [activeFilter, setActiveFilter] = useState('all');
+  const changeFilter = (value: string) => {
+    setActiveFilter(value);
+    track('filter_changed', { filter: value });
+  };
   const [selectedItem, setSelectedItem] = useState<ProduceItem | null>(null);
   const { count: watchCount, isWatched, toggle } = useWatchlist();
   const toggleWatch = (item: ProduceItem) => toggle(item.official_name);
@@ -73,6 +79,10 @@ function App() {
   const settle = useCallback(
     (res: ApiResponse, hadCache: boolean) => {
       if (isApiError(res)) {
+        // How often the fallback carries a visit is the number behind the
+        // static-mirror decision; `served` says whether there was anything
+        // to fall back on.
+        track('board_fallback', { served: hadCache ? 'cache' : 'none' });
         if (hadCache) {
           setConnectionNote('目前連不上伺服器，顯示上次成功載入的行情');
         } else {
@@ -80,6 +90,11 @@ function App() {
           setBoard([]);
         }
       } else if (res.type === 'board') {
+        track('board_loaded', {
+          source: 'network',
+          stale: !!res.stale,
+          age_bucket: ageBucket(res.generated_at),
+        });
         applyBoard(res);
       }
       setLoading(false);
@@ -116,22 +131,30 @@ function App() {
     setQuery(q);
     setRemoteResults(null);
     setSearchError(null);
-    setActiveFilter('all');
+    setActiveFilter('all'); // a reset, not a choice — not tracked as filter_changed
     if (!q) return;
 
     const ql = q.toLowerCase();
     const localHit = board.some(
       (it) => it.name.toLowerCase().includes(ql) || it.official_name.includes(q),
     );
-    if (localHit) return;
+    // Outcome and length only — never the text; a search box accepts anything.
+    const report = (outcome: 'local_hit' | 'remote_hit' | 'not_found' | 'transient') =>
+      track('search_result', { outcome, query_length: q.length });
+    if (localHit) {
+      report('local_hit');
+      return;
+    }
 
     setSearching(true);
     const res = await searchProduce(q);
     if (isApiError(res)) {
       if (res.transient) setSearchError(res.error);
       setRemoteResults([]);
+      report(res.transient ? 'transient' : 'not_found');
     } else {
       setRemoteResults(res.items);
+      report(res.items.length ? 'remote_hit' : 'not_found');
     }
     setSearching(false);
   };
@@ -220,7 +243,7 @@ function App() {
           <>
             {filterOptions.length > 1 && (
               <div className="pb-5">
-                <ProduceFilter options={filterOptions} activeFilter={activeFilter} onFilterChange={setActiveFilter} />
+                <ProduceFilter options={filterOptions} activeFilter={activeFilter} onFilterChange={changeFilter} />
                 {hasBaselines && (
                   <div className="mx-auto flex max-w-2xl justify-end pt-2">
                     <button

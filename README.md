@@ -351,7 +351,7 @@ console, and how you confirm history coverage after a backfill.
 | `backfill`, `alerttest` | ❌ `unauthorized` | ✅ |
 | `diag` | ✅ failure reason as a category | ✅ raw failure reason |
 
-`token` must equal the `ADMIN_TOKEN` script property; see §2 and §6.
+`token` must equal the `ADMIN_TOKEN` script property; see §2 and §7.
 
 ---
 
@@ -543,7 +543,36 @@ breakdown lets a shopper see through such a day.
 
 ---
 
-## 6. Local development
+## 6. Analytics
+
+`index.html` loads GA4. Page views alone could not answer the questions the
+roadmap keeps deferring on ("does anyone use 划算優先?") or size the degraded
+modes §2 describes, so the app sends a small set of events through one typed
+wrapper, `src/lib/analytics.ts`. Each event exists to settle a decision:
+
+| Event | Params | Decision it informs |
+| --- | --- | --- |
+| `board_loaded` | `source` (`network`), `stale`, `age_bucket` | Baseline for every ratio below |
+| `board_fallback` | `served` (`cache` / `none`) | Fallback rate → the static-mirror work in #13 |
+| `search_result` | `outcome` (`local_hit` / `remote_hit` / `not_found` / `transient`), `query_length` | Live-miss and busy rates → the search index in #21; whether the 15 s deadline holds |
+| `sort_changed` | `mode` | 划算優先 adoption → 「今日推薦」 (§9) |
+| `filter_changed` | `filter` | Which categories and 關注 get used |
+| `watch_toggled` | `on`, `count_bucket` | Whether a watchlist summary is worth building |
+| `drawer_opened` | `has_varieties`, `has_baseline`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen |
+| `trend_result` | `outcome` (`ok` / `empty` / `failed`), `reason` | Whether the trend deadline is right; memo hits are not reported |
+| `chunk_failed` | `chunk` | Cost of the code split |
+
+What is deliberately **not** sent: the search text (only its outcome and
+length — a search box accepts anything), watched item names (only a count
+bucket), and anything else that could identify a person. Ages and counts are
+bucketed so GA4 can aggregate them. `track()` is a no-op without `gtag`
+(tests, offline, ad blockers) and swallows a throwing `gtag`: analytics can
+never take the board down. Geography needs no event — GA4's built-in city
+dimension is what decides the regional board (#23).
+
+---
+
+## 7. Local development
 
 ### Frontend
 ```bash
@@ -564,7 +593,7 @@ npm run test:run       # vitest once — includes backendCode.test.ts, which loa
 npm test               # vitest in watch mode
 npm run test:coverage  # v8 coverage report
 ```
-241 tests at ~97% statement / ~90% branch coverage. `vitest.config.ts` pins
+250 tests at ~97% statement / ~90% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -603,7 +632,7 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
 2. In the editor, **Project Settings → Script Properties**, add:
    - `ADMIN_TOKEN` — a long random string (e.g. `openssl rand -base64 32`).
      It gates `warm&force`, `backfill` and `alerttest` (§2). Keep it out of the
-     repo; the CI deploy reads it from the `GAS_ADMIN_TOKEN` secret (§7).
+     repo; the CI deploy reads it from the `GAS_ADMIN_TOKEN` secret (§8).
    - `ALERT_EMAIL` (optional) — where failure alerts go. Unset, alerts go to
      the deploying account.
 3. Run `installDailyTrigger()` once in the editor — it installs the refresh
@@ -621,7 +650,7 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
 
 ---
 
-## 7. Deployment
+## 8. Deployment
 
 - **CI** via `.github/workflows/ci.yml`: every pull request runs ESLint, the
   suite and a typecheck/build. Pushes are gated inside the deploy workflows
@@ -634,12 +663,12 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   the repo, set **Settings → Pages → Source: GitHub Actions**. Live at
   `https://<user>.github.io/VeggieRadar/` (`vite.config.ts` `base` is `/VeggieRadar/`).
 - **Backend → Apps Script** via `.github/workflows/deploy-gas.yml` (optional):
-  otherwise deploy manually with `clasp` (§6). The workflow runs lint and the
+  otherwise deploy manually with `clasp` (§7). The workflow runs lint and the
   backend regression tests, pushes, **redeploys the pinned `DEPLOYMENT_ID`** —
   without that step `/exec` keeps serving old code — and then queues a board
   refresh via `?action=warm&force=1&token=…`, reading the token from the
   `GAS_ADMIN_TOKEN` secret (the same value as the `ADMIN_TOKEN` script
-  property, §6); without that secret it still queues a refresh, just subject to
+  property, §7); without that secret it still queues a refresh, just subject to
   the 15-minute lock. It authenticates to Apps Script with **one** of two repo
   secrets (Settings → Secrets and variables → Actions), and skips the deploy
   with a notice when neither is set:
@@ -655,13 +684,13 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
 
 ---
 
-## 8. Roadmap
+## 9. Roadmap
 
 - Per-variety baselines. Today's baseline is blended across varieties (blend vs.
   blend is self-consistent, and the median resists mix rotation), while the
   variety breakdown is same-day only.
 - A rules-based 「今日推薦」 strip on top of the board — deliberately deferred
-  until the 划算優先 sort proves the demand.
+  until the 划算優先 sort proves the demand (`sort_changed`, §6).
 - Recalibrate the retail markups periodically against the Taichung daily feed;
   the current constants were fitted on data through 2026-08.
 - Per-region retail bands (the calibration feeds are Taichung + Taipei only).

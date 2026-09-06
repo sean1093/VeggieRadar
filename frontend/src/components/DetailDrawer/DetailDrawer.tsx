@@ -9,6 +9,7 @@ import {
 import type { ProduceItem } from '../../types/produce';
 import { fetchProduceTrend } from '../../services/api';
 import { marketPrice } from '../../lib/utils/market-price';
+import { track } from '../../lib/analytics';
 
 // recharts is ~half the initial JS and serves exactly one element inside this
 // drawer, so it is fetched on demand — a board-first app whose visits mostly
@@ -46,6 +47,17 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
   // functional state updater.
   const [chart, setChart] = useState<{ Component: ChartComponent } | 'failed' | null>(null);
 
+  // Which of the drawer's sections this item can show — the signal for
+  // whether the variety breakdown and the baseline (§5) are being seen at all.
+  const hasVarieties = (item.varieties?.length ?? 0) > 0;
+  const hasBaseline = item.vs_baseline_percent != null;
+  const hasRetail = marketPrice(item) != null;
+
+  useEffect(() => {
+    if (!trendKey) return;
+    track('drawer_opened', { has_varieties: hasVarieties, has_baseline: hasBaseline, has_retail: hasRetail });
+  }, [trendKey, hasVarieties, hasBaseline, hasRetail]);
+
   useEffect(() => {
     if (!trendKey) return;
     let cancelled = false;
@@ -56,6 +68,7 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
         if (!cancelled) setChart({ Component: mod.default });
       })
       .catch(() => {
+        track('chunk_failed', { chunk: 'trend_chart' });
         if (!cancelled) setChart('failed');
       });
     fetchProduceTrend(trendKey, 7).then(
