@@ -50,6 +50,22 @@ const marketRanked: ProduceItem[] = [
 ];
 
 describe('DetailDrawer', () => {
+  it('reports which sections the opened item can show', () => {
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
+    try {
+      render(<DetailDrawer isOpen={true} onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
+      expect(gtag).toHaveBeenCalledWith('event', 'drawer_opened', {
+        has_varieties: false,
+        has_baseline: false,
+        has_retail: true,
+      });
+      expect(gtag).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('does not render when isOpen is false', () => {
     render(<DetailDrawer isOpen={false} onClose={() => {}} item={mockProduceItem} allProduceItems={mockAllProduceItems} />);
     expect(screen.queryByTestId('detail-drawer')).not.toBeInTheDocument();

@@ -102,18 +102,30 @@ MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ Frontend (G
   - `doGet?action=getTrend&cropName=<name>&days=7` — **one** MOA range query
     (`days` clamped to 14), cached per crop per day and shared by every visitor,
     so drawer traffic stops scaling with users.
-  - `doGet?action=warm` — queues a rebuild and returns immediately (`force=1`
-    jumps the once-per-15-minutes lock). The crawl takes minutes, so it runs in a
-    one-off trigger rather than on the request.
-  - `doGet?action=backfill` — one-time seeding of the price history via range
-    queries (`force=1` jumps a one-hour lock); also a one-off trigger, same
-    reason.
+  - `doGet?action=warm` — queues a rebuild and returns immediately. The crawl
+    takes minutes, so it runs in a one-off trigger rather than on the request.
+    `force=1` jumps the once-per-15-minutes lock and is honoured only with the
+    operator token (below); anyone else gets the plain, lock-bounded path.
+  - `doGet?action=backfill&token=…` — one-time seeding of the price history
+    via range queries (`force=1` jumps a one-hour lock); also a one-off
+    trigger, same reason. Operator only.
   - `doGet?action=diag` — board freshness, installed triggers, the last refresh
     outcome, history coverage and alert state, so a stalled pipeline is
-    diagnosable without the GAS console.
-  - `doGet?action=alerttest` — sends one probe mail (rate-limited to one per
-    hour) so the alerting channel can be verified without waiting for an
-    outage; it never touches incident state.
+    diagnosable without the GAS console. Public; the last failure's raw reason
+    is reduced to a category unless the token is supplied.
+  - `doGet?action=alerttest&token=…` — sends one probe mail (rate-limited to
+    one per hour) so the alerting channel can be verified without waiting for
+    an outage; it never touches incident state. Operator only.
+
+  **Operator token.** The Web App is anonymous by necessity — browsers call it
+  — but `warm&force`, `backfill` and `alerttest` each start a crawl or a mail on
+  demand. Left open, `force=1` alone lets anyone bypass the lock and burn a few
+  hundred `UrlFetchApp` calls per hit until the daily quota is gone and the
+  board stops updating. Those actions therefore require `&token=` to equal the
+  `ADMIN_TOKEN` script property (`isAdmin`, a constant-time comparison that
+  fails closed when the property is unset). A refusal is a plain
+  `{ "error": "unauthorized" }` that writes nothing, so the refusal path cannot
+  itself be made expensive. Nothing a shopper uses needs the token.
   - Prices are volume-weighted averages across markets; items below 200 kg traded
     are filtered; the latest day with real trades is found automatically.
 - **Frontend (`frontend/`):** React + Vite + TypeScript + Tailwind + shadcn/ui.
@@ -199,10 +211,16 @@ observation.
 Alerting swallows every error by design: it sits on both the refresh and the
 serving path, and no mail-quota, properties or lock failure may take the board
 down with it. `diag` reports `alert.failure_streak` / `alert.incident_open` /
-`alert.last_sent` — never the address, since `diag` is public. The
-`?action=alerttest` limiter is a durable timestamp rather than a cache key,
-since cache eviction would otherwise re-open a public, unauthenticated endpoint
-immediately.
+`alert.last_sent` / `alert.recipient_configured` — never the address, since
+`diag` is public. The recipient is not in the source either: `alertRecipient()`
+reads the `ALERT_EMAIL` script property, and that property is **required** —
+there is deliberately no fallback to the deploying account's e-mail, because
+reading it needs the `userinfo.email` scope the manifest does not grant, and
+adding a scope forces re-consent before the Web App runs again. Unset, every
+mail fails as `no_recipient` and `diag` shows `recipient_configured: false`.
+`?action=alerttest` needs the operator token; its limiter stays
+as defence in depth and is a durable timestamp rather than a cache key, since
+cache eviction would otherwise re-open the endpoint.
 
 `MailApp` needs the `script.send_mail` scope, now declared explicitly in
 `appsscript.json`. Changing scopes requires the deploying owner to re-consent,
@@ -307,20 +325,21 @@ MOA traffic.
 
 ### Refresh, backfill & diagnostics
 ```
-GET {WEB_APP_URL}/exec?action=warm[&force=1]
-→ { "type": "warm", "queued": true, "message": "已排入背景更新，約一分鐘後生效", "board": { ... } }
+GET {WEB_APP_URL}/exec?action=warm[&force=1&token=…]
+→ { "type": "warm", "queued": true, "forced": false, "message": "已排入背景更新，約一分鐘後生效", "board": { ... } }
 
-GET {WEB_APP_URL}/exec?action=backfill[&force=1]
+GET {WEB_APP_URL}/exec?action=backfill&token=…[&force=1]
 → { "type": "backfill", "queued": true, "message": "已排入背景回填，約數分鐘後生效",
      "history": { "items": 97, "min_days": 1, "max_days": 24 } }
+→ { "type": "backfill", "error": "unauthorized", "message": "此操作需要 token 參數" }   # wrong or missing token
 
-GET {WEB_APP_URL}/exec?action=diag
+GET {WEB_APP_URL}/exec?action=diag[&token=…]
 → { "type": "diag", "board": { "generated_at": ..., "stale": false },
      "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null,
      "history": { "items": 97, "min_days": 1, "max_days": 24 },
-     "alert": { "failure_streak": 0, "incident_open": false, "last_sent": null } }
+     "alert": { "failure_streak": 0, "incident_open": false, "last_sent": null, "recipient_configured": true } }
 
-GET {WEB_APP_URL}/exec?action=alerttest
+GET {WEB_APP_URL}/exec?action=alerttest&token=…
 → { "type": "alerttest", "sent": true, "message": "已寄出測試信" }
 ```
 `warm` and `backfill` both queue their crawl in a one-off trigger and answer at
@@ -328,6 +347,15 @@ once — the crawls take minutes and would blow the Web App response window.
 `backfill` is idempotent per trading date, so re-running only fills gaps. `diag`
 is how you tell "markets closed" from "refresh pipeline dead" without the GAS
 console, and how you confirm history coverage after a backfill.
+
+| Action | Anonymous | With `token` |
+| --- | --- | --- |
+| `board`, `search`, `getTrend` | ✅ | — |
+| `warm` | ✅ (`force` ignored, `forced: false`) | ✅ `force` honoured |
+| `backfill`, `alerttest` | ❌ `unauthorized` | ✅ |
+| `diag` | ✅ failure reason as a category | ✅ raw failure reason |
+
+`token` must equal the `ADMIN_TOKEN` script property; see §2 and §7.
 
 ---
 
@@ -519,7 +547,36 @@ breakdown lets a shopper see through such a day.
 
 ---
 
-## 6. Local development
+## 6. Analytics
+
+`index.html` loads GA4. Page views alone could not answer the questions the
+roadmap keeps deferring on ("does anyone use 划算優先?") or size the degraded
+modes §2 describes, so the app sends a small set of events through one typed
+wrapper, `src/lib/analytics.ts`. Each event exists to settle a decision:
+
+| Event | Params | Decision it informs |
+| --- | --- | --- |
+| `board_loaded` | `stale`, `age_bucket` | Baseline for every ratio below; a `source` dimension arrives with the static mirror (#13) |
+| `board_fallback` | `served` (`cache` / `none`) | Fallback rate → the static-mirror work in #13 |
+| `search_result` | `outcome` (`local_hit` / `remote_hit` / `not_found` / `transient`), `query_length` | Live-miss and busy rates → the search index in #21; whether the 15 s deadline holds |
+| `sort_changed` | `mode` | 划算優先 adoption → 「今日推薦」 (§9) |
+| `filter_changed` | `filter` | Which categories and 關注 get used |
+| `watch_toggled` | `on`, `count_bucket` | Whether a watchlist summary is worth building |
+| `drawer_opened` | `has_varieties`, `has_baseline`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen |
+| `trend_result` | `outcome` (`ok` / `empty` / `failed`), `reason` | Whether the trend deadline is right; memo hits are not reported |
+| `chunk_failed` | `chunk` | Cost of the code split |
+
+What is deliberately **not** sent: the search text (only its outcome and
+length — a search box accepts anything), watched item names (only a count
+bucket), and anything else that could identify a person. Ages and counts are
+bucketed so GA4 can aggregate them. `track()` is a no-op without `gtag`
+(tests, offline, ad blockers) and swallows a throwing `gtag`: analytics can
+never take the board down. Geography needs no event — GA4's built-in city
+dimension is what decides the regional board (#23).
+
+---
+
+## 7. Local development
 
 ### Frontend
 ```bash
@@ -540,7 +597,7 @@ npm run test:run       # vitest once — includes backendCode.test.ts, which loa
 npm test               # vitest in watch mode
 npm run test:coverage  # v8 coverage report
 ```
-208 tests at ~97% statement / ~90% branch coverage. `vitest.config.ts` pins
+250 tests at ~97% statement / ~90% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -567,7 +624,7 @@ got committed once.
 ignored (`git check-ignore`) rather than pattern-matching the ignore file:
 only git implements gitignore semantics, including the `!frontend/.env`
 negation that keeps the one intentional env file tracked. It also asserts that
-nothing credential-shaped, and no dependency or build output, is tracked.
+nothing credential-shaped, and no dependency, build or coverage output, is tracked.
 
 ### Backend (Google Apps Script)
 Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
@@ -576,49 +633,80 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
    `clasp push` only moves HEAD — the `/exec` URL serves a pinned version, so
    redeploy the same deployment to publish code:
    `clasp deploy -i <deploymentId> -d "<description>"`.
-2. Run `installDailyTrigger()` once in the editor — it installs the refresh
+2. In the editor, **Project Settings → Script Properties**, add:
+   - `ADMIN_TOKEN` — a long random string, e.g. `openssl rand -hex 32`. It
+     gates `warm&force`, `backfill` and `alerttest` (§2); an empty value
+     counts as unset (everything refused). It travels as a URL query
+     parameter: the CI deploy URL-encodes it, but when you paste it into a
+     browser or a hand-written `curl` a value containing `+`, `&` or `#` is
+     mangled before it reaches `e.parameter` — hex avoids the question. Keep
+     it out of the repo; CI reads it from the `GAS_ADMIN_TOKEN` secret (§8).
+     There is one token, with no expiry or scope: rotating it means changing
+     both places.
+   - `ALERT_EMAIL` — **required**: where failure alerts go. Unset, no alert
+     can be sent (`diag` shows `recipient_configured: false`, and
+     `?action=alerttest` answers `no_recipient`). See §2 for why there is no
+     fallback to the deploying account.
+3. Run `installDailyTrigger()` once in the editor — it installs the refresh
    trigger on `REFRESH_INTERVAL_HOURS` and warms the board so the first visitor
    never hits a cold crawl. Confirm with `?action=diag`: `triggers` must list
    `refreshBoardCache`. Running it also grants the mail scope the alerting
-   needs; `?action=alerttest` confirms a mail actually arrives.
-3. Hit `?action=backfill` once to seed the baseline history (the crawl takes a
-   few minutes), then confirm `diag.history.items` is non-zero. Until it is, the
-   board simply ships without baseline fields and the UI hides the badge and the
-   划算優先 sort.
-4. Put the Web App `/exec` URL in `frontend/.env` as `VITE_API_BASE_URL`.
+   needs; `?action=alerttest&token=…` confirms a mail actually arrives.
+4. Hit `?action=backfill&token=…` once to seed the baseline history (the crawl
+   takes a few minutes), then confirm `diag.history.items` is non-zero. Until it
+   is, the board simply ships without baseline fields and the UI hides the badge
+   and the 划算優先 sort.
+5. Put the Web App `/exec` URL in `frontend/.env` as `VITE_API_BASE_URL`.
 
 > The MOA API needs no key.
 
 ---
 
-## 7. Deployment
+## 8. Deployment
 
-- **CI** via `.github/workflows/ci.yml`: every pull request runs the suite plus
-  a typecheck/build. Pushes are gated inside the deploy workflows themselves
-  (both run the suite before publishing), so a red test blocks either surface
-  without duplicating the run.
+- **CI** via `.github/workflows/ci.yml`: every pull request runs ESLint, the
+  suite and a typecheck/build. Pushes are gated inside the deploy workflows
+  themselves (both run lint and the suite before publishing), so a red check
+  blocks either surface without duplicating the run. Dependabot
+  (`.github/dependabot.yml`) opens weekly PRs for the frontend toolchain and
+  the workflow actions; those PRs run the same gate.
 - **Frontend → GitHub Pages** via `.github/workflows/deploy-pages.yml`: pushing to
   the default branch runs the tests, builds `frontend/` and publishes to Pages. In
   the repo, set **Settings → Pages → Source: GitHub Actions**. Live at
   `https://<user>.github.io/VeggieRadar/` (`vite.config.ts` `base` is `/VeggieRadar/`).
 - **Backend → Apps Script** via `.github/workflows/deploy-gas.yml` (optional):
-  set repo secrets `GCP_SA_KEY` (or `CLASP_TOKEN`); otherwise deploy manually with
-  `clasp`. See `clasp_instructions.md`. The workflow runs the backend regression
-  tests, pushes, **redeploys the pinned `DEPLOYMENT_ID`** — without that step
-  `/exec` keeps serving old code — and then queues a board refresh via
-  `?action=warm&force=1`.
+  otherwise deploy manually with `clasp` (§7). The workflow runs lint and the
+  backend regression tests, pushes, **redeploys the pinned `DEPLOYMENT_ID`** —
+  without that step `/exec` keeps serving old code — and then queues a board
+  refresh via `?action=warm&force=1&token=…`, reading the token from the
+  `GAS_ADMIN_TOKEN` secret (the same value as the `ADMIN_TOKEN` script
+  property, §7). Apps Script always answers HTTP 200, so the step checks the
+  body: `forced: false` with the secret set means the secret and the script
+  property have drifted apart, and the job fails there rather than let the
+  new deploy serve the old board. Without the secret it still queues a
+  refresh, just subject to the 15-minute lock. It authenticates to Apps Script
+  with **one** of two repo
+  secrets (Settings → Secrets and variables → Actions), and skips the deploy
+  with a notice when neither is set:
+  - `GCP_SA_KEY` (recommended): a GCP service-account JSON key, base64-encoded,
+    for an account that has edit access to the Apps Script project. The
+    workflow decodes it into `gcp-sa-key.json` inside the checkout, which the
+    root `.gitignore` covers for exactly that reason.
+  - `CLASP_TOKEN` (simpler, less safe): the `refresh_token` from your local
+    `~/.clasprc.json` after `clasp login`. It is your personal OAuth grant, so
+    rotate it if the secret ever leaks.
 
 > Both deploy workflows need Node 22+: the suite uses `Promise.withResolvers`.
 
 ---
 
-## 8. Roadmap
+## 9. Roadmap
 
 - Per-variety baselines. Today's baseline is blended across varieties (blend vs.
   blend is self-consistent, and the median resists mix rotation), while the
   variety breakdown is same-day only.
 - A rules-based 「今日推薦」 strip on top of the board — deliberately deferred
-  until the 划算優先 sort proves the demand.
+  until the 划算優先 sort proves the demand (`sort_changed`, §6).
 - Recalibrate the retail markups periodically against the Taichung daily feed;
   the current constants were fitted on data through 2026-08.
 - Per-region retail bands (the calibration feeds are Taichung + Taipei only).
@@ -627,4 +715,4 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
 - Line Bot lookups (`doPost` is reserved).
 
 ## License
-MIT (to be added).
+[MIT](LICENSE).

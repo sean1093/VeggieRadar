@@ -15,7 +15,7 @@
  * like `!frontend/.env`. Only git implements gitignore semantics.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
@@ -73,9 +73,25 @@ describe('credential hygiene', () => {
     expect(suspicious).toEqual([]);
   });
 
-  it('tracks no dependency or build output', () => {
+  it('tracks no dependency, build or coverage output', () => {
     const tracked = execFileSync('git', ['ls-files'], { cwd: repoRoot, encoding: 'utf8' }).split('\n');
-    expect(tracked.filter((f) => f.includes('node_modules/') || f.startsWith('dist/'))).toEqual([]);
+    // 45 files of `npm run test:coverage` output were once committed from
+    // frontend/coverage — generated, churning on every run, and useless in
+    // review. Same treatment as node_modules and dist.
+    const generated = tracked.filter(
+      (f) => /(^|\/)(node_modules|dist|coverage)\//.test(f) || /(^|\/)(clover\.xml|coverage-final\.json|lcov\.info)$/.test(f),
+    );
+    expect(generated).toEqual([]);
+    expect(isIgnored('frontend/coverage/index.html')).toBe(true);
+  });
+
+  it('has no stray shadcn output outside src', () => {
+    // `npx shadcn add` with a mis-resolved alias once wrote a second
+    // components/ui/dialog.tsx to a literal `frontend/@/` directory — an
+    // outdated duplicate importing a dependency the project does not have.
+    const tracked = execFileSync('git', ['ls-files'], { cwd: repoRoot, encoding: 'utf8' }).split('\n');
+    expect(tracked.filter((f) => f.startsWith('frontend/@/'))).toEqual([]);
+    expect(existsSync(resolve(repoRoot, 'frontend/@'))).toBe(false);
   });
 
   it('keeps secrets out of the env file that ships to browsers', () => {

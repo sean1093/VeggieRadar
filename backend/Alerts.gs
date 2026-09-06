@@ -63,7 +63,7 @@ function recordRefreshOutcome(ok, detail) {
       // Send BEFORE clearing. Clearing first would close the incident even
       // when the mail failed, so the next healthy refresh would skip the
       // all-clear and leave the reader believing the app is still broken.
-      MailApp.sendEmail(ALERT_EMAIL, '[VeggieRadar] 已恢復正常', detail + '\n診斷：' + diagUrl() + '\n');
+      sendAlertMail('[VeggieRadar] 已恢復正常', detail + '\n診斷：' + diagUrl() + '\n');
       props.deleteProperty(ALERT_ACTIVE_PROP);
       props.deleteProperty(ALERT_SENT_PROP);
       return 'recovered';
@@ -74,8 +74,7 @@ function recordRefreshOutcome(ok, detail) {
     if (streak < ALERT_FAILURE_STREAK) return 'counted';
     if (withinCooldown(props)) return 'cooldown';
 
-    MailApp.sendEmail(
-      ALERT_EMAIL,
+    sendAlertMail(
       '[VeggieRadar] 連續 ' + streak + ' 次更新失敗',
       '看板更新連續失敗，使用者看到的行情正在變舊。\n\n' +
       '連續失敗次數：' + streak + '\n' +
@@ -97,10 +96,35 @@ function sendAlert(subject, body) {
   return withAlertLock(function () {
     var props = PropertiesService.getScriptProperties();
     if (withinCooldown(props)) return false;
-    MailApp.sendEmail(ALERT_EMAIL, subject, body);
+    sendAlertMail(subject, body);
     openIncident(props);
     return true;
   }) === true;
+}
+
+/**
+ * Where alerts go: the `ALERT_EMAIL` script property, or null when it is
+ * unset or unreadable — the callers treat null as a send failure, never as a
+ * reason to write an address anywhere. There is deliberately no fallback to
+ * the deploying account's session e-mail: reading it needs the
+ * `userinfo.email` scope, the manifest pins an explicit scope list without
+ * it, and adding a scope forces the deploying owner to re-consent before the
+ * Web App runs again.
+ */
+function alertRecipient() {
+  try {
+    return PropertiesService.getScriptProperties().getProperty(ALERT_EMAIL_PROP) || null;
+  } catch (err) {
+    Logger.log('alertRecipient: properties unavailable: ' + err);
+    return null;
+  }
+}
+
+/** Every alert mail goes through here so the recipient is resolved in one place. */
+function sendAlertMail(subject, body) {
+  var to = alertRecipient();
+  if (!to) throw new Error('no alert recipient: set the ' + ALERT_EMAIL_PROP + ' script property');
+  MailApp.sendEmail(to, subject, body);
 }
 
 /**
@@ -140,6 +164,7 @@ function diagUrl() {
 function classifyMailError(err) {
   var text = String((err && err.message) || err || '');
   Logger.log('alerttest mail failure: ' + text);
+  if (/no alert recipient/i.test(text)) return 'no_recipient';
   if (/permission|authoriz|scope|consent/i.test(text)) return 'mail_scope_unauthorised';
   if (/quota|limit|exceeded/i.test(text)) return 'mail_quota_exhausted';
   if (/invalid|recipient|address/i.test(text)) return 'recipient_rejected';
@@ -148,9 +173,9 @@ function classifyMailError(err) {
 
 /**
  * `?action=alerttest` — proves the mail scope is actually authorised, the one
- * thing tests cannot verify. Both limiters are DURABLE timestamps, not cache
- * keys: cache eviction would otherwise re-open this public, unauthenticated
- * endpoint immediately. Incident state is deliberately untouched, so a probe
+ * thing tests cannot verify. The router admits it only with the admin token;
+ * both limiters below stay as defence in depth and are DURABLE timestamps,
+ * not cache keys, so cache eviction cannot re-open the endpoint. Incident state is deliberately untouched, so a probe
  * never fakes or suppresses a real alert.
  *
  * A FAILED probe consumes no mail quota, so it arms a short backoff rather
@@ -164,8 +189,7 @@ function handleAlertTest() {
       if (withinWindow(props.getProperty(ALERT_TEST_PROP), ALERT_TEST_INTERVAL_MS)) return { state: 'locked' };
       if (withinWindow(props.getProperty(ALERT_TEST_FAIL_PROP), ALERT_TEST_FAIL_BACKOFF_MS)) return { state: 'backoff' };
       try {
-        MailApp.sendEmail(
-          ALERT_EMAIL,
+        sendAlertMail(
           '[VeggieRadar] 測試信（非故障）',
           '這是一封測試信，用來確認警報信管道可用。收到代表故障時你也會收到通知。\n\n診斷：' + diagUrl() + '\n');
       } catch (err) {

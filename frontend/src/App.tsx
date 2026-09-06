@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Header from './components/Header/Header';
 import ProduceList from './components/ProduceGrid/ProduceList';
 import ProduceFilter from './components/ProduceFilter/ProduceFilter';
@@ -8,15 +8,25 @@ import ErrorMessage from './components/ErrorMessage/ErrorMessage';
 import { fetchBoard, readCachedBoard, searchProduce } from './services/api';
 import { useWatchlist } from './hooks/useWatchlist';
 import { describeFreshness, type FreshnessNotice } from './lib/utils/freshness';
-import { isApiError, type BoardResponse, type ProduceItem } from './types/produce';
+import { isApiError, type ApiResponse, type BoardResponse, type ProduceItem } from './types/produce';
 import { byValueFirst } from './lib/utils/value-sort';
+import { ageBucket, track } from './lib/analytics';
 import './App.css';
 
+const freshnessOf = (res: BoardResponse): FreshnessNotice =>
+  describeFreshness({ date: res.date, generatedAt: res.generated_at, stale: res.stale });
+
 function App() {
-  const [board, setBoard] = useState<ProduceItem[]>([]);
-  const [boardDate, setBoardDate] = useState('');
-  const [freshness, setFreshness] = useState<FreshnessNotice>({ note: null, checkedAt: null });
-  const [loading, setLoading] = useState(true);
+  // The last good board, read once. It paints before the network answers, so
+  // a slow or over-quota backend never holds the UI on a skeleton, and it
+  // decides whether a failed fetch degrades (old prices, a note) or errors.
+  const [initialCache] = useState(readCachedBoard);
+  const [board, setBoard] = useState<ProduceItem[]>(() => initialCache?.items ?? []);
+  const [boardDate, setBoardDate] = useState(() => initialCache?.date ?? '');
+  const [freshness, setFreshness] = useState<FreshnessNotice>(() =>
+    initialCache ? freshnessOf(initialCache) : { note: null, checkedAt: null },
+  );
+  const [loading, setLoading] = useState(initialCache === null);
   const [error, setError] = useState<string | null>(null);
   // Set when the backend is unreachable and the board on screen came from the
   // localStorage fallback — old prices beat a blank page, but must say so.
@@ -37,6 +47,7 @@ function App() {
   });
   const changeSort = (mode: 'category' | 'value') => {
     setSortMode(mode);
+    track('sort_changed', { mode });
     try {
       localStorage.setItem('veggieradar_sort_v1', mode);
     } catch {
@@ -49,19 +60,56 @@ function App() {
   const [searching, setSearching] = useState(false);
 
   const [activeFilter, setActiveFilter] = useState('all');
+  const changeFilter = (value: string) => {
+    setActiveFilter(value);
+    track('filter_changed', { filter: value });
+  };
   const [selectedItem, setSelectedItem] = useState<ProduceItem | null>(null);
   const { count: watchCount, isWatched, toggle } = useWatchlist();
   const toggleWatch = (item: ProduceItem) => toggle(item.official_name);
 
-  const applyBoard = (res: BoardResponse) => {
+  const applyBoard = useCallback((res: BoardResponse) => {
     setBoard(res.items);
     setBoardDate(res.date);
-    setFreshness(describeFreshness({ date: res.date, generatedAt: res.generated_at, stale: res.stale }));
-  };
+    setFreshness(freshnessOf(res));
+  }, []);
 
+  // Lands the backend's answer on top of whatever is on screen. `hadCache`
+  // decides how a failure degrades: old prices plus a note beat a blank page.
+  const settle = useCallback(
+    (res: ApiResponse, hadCache: boolean) => {
+      if (isApiError(res)) {
+        // How often the fallback carries a visit is the number behind the
+        // static-mirror decision; `served` says whether there was anything
+        // to fall back on.
+        track('board_fallback', { served: hadCache ? 'cache' : 'none' });
+        if (hadCache) {
+          setConnectionNote('目前連不上伺服器，顯示上次成功載入的行情');
+        } else {
+          setError(res.error);
+          setBoard([]);
+        }
+      } else if (res.type === 'board') {
+        // `source` arrives with the static mirror (#13), when there is a
+        // second value for it to take; a constant dimension is dead weight.
+        track('board_loaded', { stale: !!res.stale, age_bucket: ageBucket(res.generated_at) });
+        applyBoard(res);
+      }
+      setLoading(false);
+    },
+    [applyBoard],
+  );
+
+  // Mount: the cached board is already in the initial state, so the effect
+  // only revalidates — nothing is set synchronously inside it. Both
+  // dependencies are stable, so this runs once.
+  useEffect(() => {
+    fetchBoard().then((res) => settle(res, initialCache !== null));
+  }, [settle, initialCache]);
+
+  // Retry, from the error screen or the connection note. Re-reads the cache
+  // because a successful fetch since mount has refreshed it.
   const loadBoard = () => {
-    // Paint the last good board immediately and refresh in the background, so
-    // a slow or over-quota backend never holds the UI on a skeleton.
     const cached = readCachedBoard();
     if (cached) {
       applyBoard(cached);
@@ -71,22 +119,8 @@ function App() {
     }
     setError(null);
     setConnectionNote(null);
-    fetchBoard().then((res) => {
-      if (isApiError(res)) {
-        if (cached) {
-          setConnectionNote('目前連不上伺服器，顯示上次成功載入的行情');
-        } else {
-          setError(res.error);
-          setBoard([]);
-        }
-      } else if (res.type === 'board') {
-        applyBoard(res);
-      }
-      setLoading(false);
-    });
+    fetchBoard().then((res) => settle(res, cached !== null));
   };
-
-  useEffect(loadBoard, []);
 
   // Search: filter the board locally for instant feedback; fall back to a live
   // backend query only when nothing matches locally.
@@ -95,22 +129,30 @@ function App() {
     setQuery(q);
     setRemoteResults(null);
     setSearchError(null);
-    setActiveFilter('all');
+    setActiveFilter('all'); // a reset, not a choice — not tracked as filter_changed
     if (!q) return;
 
     const ql = q.toLowerCase();
     const localHit = board.some(
       (it) => it.name.toLowerCase().includes(ql) || it.official_name.includes(q),
     );
-    if (localHit) return;
+    // Outcome and length only — never the text; a search box accepts anything.
+    const report = (outcome: 'local_hit' | 'remote_hit' | 'not_found' | 'transient') =>
+      track('search_result', { outcome, query_length: q.length });
+    if (localHit) {
+      report('local_hit');
+      return;
+    }
 
     setSearching(true);
     const res = await searchProduce(q);
     if (isApiError(res)) {
       if (res.transient) setSearchError(res.error);
       setRemoteResults([]);
+      report(res.transient ? 'transient' : 'not_found');
     } else {
       setRemoteResults(res.items);
+      report(res.items.length ? 'remote_hit' : 'not_found');
     }
     setSearching(false);
   };
@@ -199,7 +241,7 @@ function App() {
           <>
             {filterOptions.length > 1 && (
               <div className="pb-5">
-                <ProduceFilter options={filterOptions} activeFilter={activeFilter} onFilterChange={setActiveFilter} />
+                <ProduceFilter options={filterOptions} activeFilter={activeFilter} onFilterChange={changeFilter} />
                 {hasBaselines && (
                   <div className="mx-auto flex max-w-2xl justify-end pt-2">
                     <button

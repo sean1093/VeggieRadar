@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { countBucket, track } from '../lib/analytics';
 
 const STORAGE_KEY = 'veggie:watchlist:v1';
 
@@ -29,11 +30,18 @@ export function useWatchlist() {
     }
   }, [ids]);
 
-  const toggle = useCallback((id: string) => {
-    setIds((current) =>
-      current.includes(id) ? current.filter((x) => x !== id) : [...current, id],
-    );
-  }, []);
+  const toggle = useCallback(
+    (id: string) => {
+      const on = !ids.includes(id);
+      // Usage, not identity: whether people build a list and how big — never
+      // which produce is on it.
+      track('watch_toggled', { on, count_bucket: countBucket(ids.length + (on ? 1 : -1)) });
+      setIds((current) =>
+        current.includes(id) ? current.filter((x) => x !== id) : [...current, id],
+      );
+    },
+    [ids],
+  );
 
   const isWatched = useCallback((id: string) => ids.includes(id), [ids]);
 

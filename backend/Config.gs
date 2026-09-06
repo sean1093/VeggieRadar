@@ -8,48 +8,17 @@
  * beats scattering them next to their first use.
  */
 
-/**
- * Google Apps Script (GAS) backend for VeggieRadar — Board-First Architecture
- *
- * Goal: shoppers open the app and instantly see today's common produce prices
- *       at a glance — green when cheaper, clay when pricier — plus an estimated
- *       traditional-market retail band they can use while standing at the stall.
- *
- * How it works:
- *   - A time-trigger (`refreshBoardCache`) pre-warms a cached board so users
- *     never pay the crawl latency.
- *   - `doGet` (default) returns the cached board instantly, tagged with
- *     `generated_at` (when the backend last crawled) so the client can tell
- *     "markets were closed" apart from "our pipeline is dead". A board older
- *     than `BOARD_MAX_AGE_MS` schedules a background rebuild on the spot, so a
- *     dead trigger self-heals instead of freezing the app on an old date.
- *   - `doGet?action=search&query=<name>` filters the board / falls back to a live query.
- *   - `doGet?action=getTrend&cropName=<name>&days=7` returns a price trend,
- *     served from a shared cache and crawled with ONE range query.
- *   - `doGet?action=warm` queues a rebuild and returns immediately.
- *   - `doGet?action=backfill` queues a one-time history seed for baselines.
- *   - `doGet?action=diag` reports board freshness and trigger state.
- *
- * Data source: Taiwan MOA wholesale market transactions (open data, no key required).
- *   Endpoint : https://data.moa.gov.tw/api/v1/AgriProductsTransType/
- *   Dates    : ROC calendar, e.g. 115.08.26
- *   Prices   : NT$ / kg
- *
- * Two MOA quirks drive the shape of this file:
- *
- *   1. `CropName` is matched as a SUBSTRING of the full `<root>-<variety>` name,
- *      not as a prefix. Querying `蔥` returns 洋蔥 (onion) and 大蒜-蔥蒜; querying
- *      `蘿蔔` returns 胡蘿蔔 (carrot); querying `胡瓜` returns 花胡瓜 (小黃瓜).
- *      Every board item therefore declares the exact `root` it wants, plus an
- *      optional variety include/exclude, and rows are filtered locally.
- *
- *   2. On a day a market is closed — including today before the closing prices
- *      publish — MOA returns placeholder rows with `CropName: "休市"` and zeroed
- *      price/quantity. Those rows must never count as "this date has data".
- */
-
 // --- Configuration ---
 var AGRICULTURE_API_URL = 'https://data.moa.gov.tw/api/v1/AgriProductsTransType/';
+
+// Operator actions. The Web App is anonymous by necessity (browsers call it),
+// but `warm&force=1`, `backfill` and `alerttest` each start a crawl or a mail
+// on demand — `force` alone lets anyone bypass the 15-minute lock and burn
+// hundreds of UrlFetch calls per hit until the daily quota is gone and the
+// board stops updating. Those actions therefore require `&token=` to match
+// the ScriptProperties value under this key (set it once in the editor; it
+// never enters the repo). Unset means every admin action is refused.
+var ADMIN_TOKEN_PROP = 'ADMIN_TOKEN';
 
 var MIN_TRADE_VOLUME = 200;      // kg; filters out sparse trades for one item
 var PROBE_MIN_VOLUME = 50000;    // kg; a real island-wide trading day for the probe crop
@@ -119,7 +88,11 @@ var LAST_FAIL_PROP = 'veggie_last_refresh_fail';
 // is wrapped so alerting can never break serving or a refresh.
 // Because every one of those decisions is a read-modify-write on shared
 // state, they all run inside one script-lock section — see `withAlertLock`.
-var ALERT_EMAIL = 'sean1093@gmail.com';
+//
+// The recipient is NOT a constant: it is read from the ScriptProperties key
+// below (`alertRecipient`) and must be set — a personal address has no
+// business in a public repository. `diag` reports whether it is configured.
+var ALERT_EMAIL_PROP = 'ALERT_EMAIL';
 
 var ALERT_FAILURE_STREAK = 3;                      // consecutive failed refreshes ≈ half a day stale
 var ALERT_SILENCE_MS = 12 * 60 * 60 * 1000;        // board age that means nothing is running

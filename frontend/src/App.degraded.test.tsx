@@ -60,6 +60,8 @@ describe('App — backend unreachable', () => {
   it('serves the cached board with an honest banner instead of a blank error page', async () => {
     localStorage.setItem('veggieradar_last_board_v1', JSON.stringify(CACHED_BOARD));
     vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(new TypeError('network down'))));
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
     const App = await loadApp();
 
     render(<App />);
@@ -75,6 +77,10 @@ describe('App — backend unreachable', () => {
     expect(screen.getByRole('button', { name: '重試' })).toBeInTheDocument();
     expect(screen.queryByText('無法載入今日菜價，請稍後再試')).not.toBeInTheDocument();
     expect(screen.getByText('高麗菜')).toBeInTheDocument();
+    // The fallback is counted — how often it carries a visit is the number
+    // behind the static-mirror decision.
+    expect(gtag).toHaveBeenCalledWith('event', 'board_fallback', { served: 'cache' });
+    expect(gtag).not.toHaveBeenCalledWith('event', 'board_loaded', expect.anything());
   }, 10000);
 
   it('shows a busy notice for search transport failures — never 查無此品項', async () => {
@@ -87,16 +93,22 @@ describe('App — backend unreachable', () => {
         return { ok: true, status: 200, text: async () => JSON.stringify(CACHED_BOARD) };
       }),
     );
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
     const App = await loadApp();
 
     render(<App />);
     await screen.findByText('高麗菜');
+    expect(gtag).toHaveBeenCalledWith('event', 'board_loaded', { stale: false, age_bucket: '<1h' });
 
     fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '龍鬚菜' } });
     fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
 
     expect(await screen.findByText('服務忙碌中，請稍後再試')).toBeInTheDocument();
     expect(screen.queryByText('查無此品項')).not.toBeInTheDocument();
+    // Counted as transient, and the query text itself never leaves the page.
+    expect(gtag).toHaveBeenCalledWith('event', 'search_result', { outcome: 'transient', query_length: 3 });
+    expect(JSON.stringify(gtag.mock.calls)).not.toContain('龍鬚菜');
   });
 });
 describe('App — recovery via the banner retry', () => {

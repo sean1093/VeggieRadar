@@ -24,6 +24,7 @@
 
 import { isApiError, type ApiResponse, type BoardResponse, type SearchResponse } from '../types/produce';
 import { MOCK_BOARD } from './mockBoard';
+import { track } from '../lib/analytics';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string | undefined;
 
@@ -165,10 +166,20 @@ export async function fetchProduceTrend(cropName: string, days: number): Promise
     const data = (await fetchJson(
       { action: 'getTrend', cropName: trimmed, days: String(days) },
       TREND_TIMEOUT_MS,
-    )) as { trend?: unknown };
+    )) as { trend?: unknown; error?: unknown };
+    // doGet answers a thrown handler with `{ error }` and HTTP 200. That is a
+    // backend failure, not a crop without data — the two must not share a
+    // bucket, or an outage reads as "no 7-day trend".
+    if (data.error) {
+      track('trend_result', { outcome: 'failed', reason: 'backend' });
+      return [];
+    }
     const trend = Array.isArray(data.trend)
       ? data.trend.filter((n: unknown): n is number => typeof n === 'number')
       : [];
+    // Reported only for real requests (memo hits above are free), so the
+    // ratio tells whether the 15 s deadline is still the right one.
+    track('trend_result', { outcome: trend.length ? 'ok' : 'empty' });
     if (trend.length) {
       if (trendCache.size >= TREND_CACHE_MAX) {
         const oldest = trendCache.keys().next().value;
@@ -177,7 +188,11 @@ export async function fetchProduceTrend(cropName: string, days: number): Promise
       trendCache.set(key, trend);
     }
     return trend;
-  } catch {
+  } catch (error) {
+    track('trend_result', {
+      outcome: 'failed',
+      reason: error instanceof Error && error.name === 'AbortError' ? 'timeout' : 'error',
+    });
     return [];
   }
 }
