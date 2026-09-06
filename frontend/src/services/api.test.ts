@@ -116,6 +116,73 @@ describe('fetchBoard — persistence and normalisation', () => {
   });
 });
 
+/**
+ * The backend is untyped Apps Script, so a renamed or re-typed field arrives
+ * as valid JSON and reaches the UI as `undefined`. The board is measured
+ * against `types/board.schema.ts` for exactly that, and the measurement is
+ * REPORT-ONLY: prices on screen in front of a stall beat a blank page over a
+ * field the UI may not even use.
+ */
+describe('fetchBoard — schema contract', () => {
+  const drifted = {
+    ...BOARD,
+    // `catty_price` promises 元/台斤 as a number; a string renders as nothing.
+    items: [{ ...BOARD.items[0], catty_price: '14' }],
+  };
+
+  it('serves and caches a drifted board, reporting the mismatch instead of blocking it', async () => {
+    const api = await loadApi();
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
+    vi.stubGlobal('fetch', vi.fn(async () => jsonBody(drifted)));
+
+    const res = await api.fetchBoard();
+
+    expect(res).toMatchObject({ type: 'board', count: 1 });
+    expect(api.readCachedBoard()?.items[0]?.name).toBe('高麗菜');
+    expect(console.warn).toHaveBeenCalledTimes(1);
+    expect(console.warn).toHaveBeenCalledWith(
+      'VeggieRadar: board schema mismatch',
+      'items.0.catty_price',
+      expect.stringContaining('expected number'),
+    );
+    expect(gtag).toHaveBeenCalledWith('event', 'board_schema_mismatch', { path: 'items.0.catty_price' });
+  });
+
+  it('stays silent on a conforming board', async () => {
+    const api = await loadApi();
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
+    // An additive backend field is not drift: an old client must keep working
+    // against a newer board (README §3).
+    vi.stubGlobal('fetch', vi.fn(async () => jsonBody({ ...BOARD, refresh_queued: true })));
+
+    await api.fetchBoard();
+
+    expect(console.warn).not.toHaveBeenCalled();
+    expect(gtag).not.toHaveBeenCalled();
+  });
+
+  it('turns a board without an item list into a transient error, once, without retrying', async () => {
+    const api = await loadApi();
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
+    // Every consumer maps over `items`; serving this would crash the UI, and
+    // retrying would spend the backoff on the same body.
+    const { items: _items, ...noItems } = BOARD;
+    void _items;
+    const fetchMock = vi.fn(async () => jsonBody({ ...noItems, items: 'gone' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await api.fetchBoard();
+
+    expect(res).toMatchObject({ error: '無法載入今日菜價，請稍後再試', transient: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(api.readCachedBoard()).toBeNull();
+    expect(gtag).toHaveBeenCalledWith('event', 'board_schema_mismatch', { path: 'items' });
+  });
+});
+
 describe('readCachedBoard — validation', () => {
   it.each([
     ['garbage', 'not json'],

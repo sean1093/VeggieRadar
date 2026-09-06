@@ -25,4 +25,8 @@ dist/
 # Scratch data for the offline retail calibration (derived, re-downloadable).
 .calibration/
 
+# The production probe's result file (§8 Monitoring), written wherever the
+# probe is run from — frontend/ locally, the workspace root in CI.
+probe-result.json
+
 .DS_Store

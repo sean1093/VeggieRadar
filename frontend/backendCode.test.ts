@@ -13,6 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { BoardResponseSchema } from './src/types/board.schema';
 
 type Row = {
   CropName: string;
@@ -884,6 +885,24 @@ describe('buildBoard — baseline join', () => {
     const cabbage = board.items.find((it: { name: string }) => it.name === '高麗菜');
     expect(cabbage.baseline_price).toBe(15); // 25 元/公斤 × 0.6
     expect(cabbage.vs_baseline_percent).toBe(-20); // 20 vs 25
+  });
+
+  /**
+   * The frontend↔backend contract, checked against the real `buildBoard()`
+   * output rather than a fixture of what it is believed to return. Both sides
+   * of the wire live in this repo and only this assertion connects them: a
+   * renamed or re-typed field on the Apps Script side is valid JSON that
+   * reaches the UI as `undefined`, which is a silent, shipped bug. Zod's
+   * issues are asserted (not just `success`) so a failure names the field.
+   */
+  it('emits a payload the frontend board schema accepts', () => {
+    const { api } = loadBackend({ 甘藍: [row('甘藍-初秋', 20, 60000)] });
+    const series: [string, number][] = [];
+    for (let i = 12; i >= 1; i--) series.push([rocDate(i), 25]);
+    api.writeHistory({ version: 1, items: { 高麗菜: series } });
+
+    const result = BoardResponseSchema.safeParse(api.buildBoard());
+    expect(result.success ? [] : result.error.issues).toEqual([]);
   });
 
   it('surfaces history coverage through diag', () => {

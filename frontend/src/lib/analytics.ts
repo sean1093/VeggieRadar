@@ -28,7 +28,8 @@ export type EventName =
   | 'watch_toggled'
   | 'drawer_opened'
   | 'trend_result'
-  | 'chunk_failed';
+  | 'chunk_failed'
+  | 'board_schema_mismatch';
 
 export type EventParams = Record<string, string | number | boolean>;
 

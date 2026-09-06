@@ -1,0 +1,143 @@
+name: Production probe
+
+# Watches production from OUTSIDE it. Every other alarm this project has runs
+# inside the thing that breaks: the failure mail is sent by the same Apps
+# Script project whose deploy, scopes or mail quota is the likely fault, and
+# the frontend hides outages behind its cached board on purpose. So this job
+# calls the public endpoints as a visitor would, holds them to the schema in
+# frontend/src/types/board.schema.ts and to a freshness bound, and turns a
+# violation into exactly one open `prod-alert` issue.
+#
+# Every 6 hours at :40 — offset from the backend's 4-hourly refresh so a probe
+# never lands in the minutes while a crawl is replacing the board.
+on:
+  schedule:
+    - cron: '40 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      pages_url:
+        description: 'Pages URL to probe (blank = production). Point it at a bad URL to exercise the alert path.'
+        required: false
+      api_base_url:
+        description: 'GAS /exec URL to probe (blank = VITE_API_BASE_URL from frontend/.env)'
+        required: false
+
+permissions:
+  issues: write
+  contents: read
+
+# Never let two probes decide the incident state at once: both would find no
+# open issue and file one each.
+concurrency:
+  group: prod-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # The probe owns the verdict but not the reporting: it exits non-zero and
+      # always writes its result file, and the step below decides what a human
+      # is told. `continue-on-error` keeps the failure from skipping that.
+      - name: Probe production
+        id: probe
+        continue-on-error: true
+        working-directory: frontend
+        env:
+          PAGES_URL: ${{ inputs.pages_url }}
+          API_BASE_URL: ${{ inputs.api_base_url }}
+          OUT: ${{ github.workspace }}/probe-result.json
+        run: |
+          node --experimental-strip-types scripts/prod-probe.mjs && code=0 || code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Report and manage the prod-alert issue
+        uses: actions/github-script@v7
+        env:
+          RESULT_PATH: ${{ github.workspace }}/probe-result.json
+          PROBE_EXIT_CODE: ${{ steps.probe.outputs.exit_code }}
+        with:
+          script: |
+            const fs = require('fs');
+            const LABEL = 'prod-alert';
+            const { owner, repo } = context.repo;
+
+            let result;
+            try {
+              result = JSON.parse(fs.readFileSync(process.env.RESULT_PATH, 'utf8'));
+            } catch (error) {
+              // No result file means the probe itself could not run (bad Node
+              // flag, missing dependency). That is a broken watchdog, not a
+              // healthy production, so it must be loud and must not touch the
+              // incident state.
+              core.setFailed(`probe wrote no result (exit ${process.env.PROBE_EXIT_CODE}): ${error.message}`);
+              return;
+            }
+
+            await core.summary.addRaw(result.summary_md).write();
+
+            // One open issue, ever: a new issue every 6 hours would bury the
+            // first one and train its reader to ignore the label.
+            const { data: openAlerts } = await github.rest.issues.listForRepo({
+              owner, repo, labels: LABEL, state: 'open', per_page: 1,
+            });
+            const existing = openAlerts[0];
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const stamp = `${result.checked_at.slice(0, 16).replace('T', ' ')} UTC`;
+
+            if (result.ok) {
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number,
+                  body: `**recovered** — ${stamp}\n\n${result.summary_md}\n\n[Probe run](${runUrl})`,
+                });
+                await github.rest.issues.update({
+                  owner, repo, issue_number: existing.number,
+                  state: 'closed', state_reason: 'completed',
+                });
+                core.info(`closed #${existing.number}`);
+              }
+              core.info('all checks passed');
+              return;
+            }
+
+            const categories = [...new Set(
+              result.checks.filter((c) => c.status === 'failed').map((c) => c.category),
+            )].join(', ');
+            const body = `**${categories}** — ${stamp}\n\n${result.summary_md}\n\n[Probe run](${runUrl})`;
+
+            if (existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+              core.info(`commented on #${existing.number}`);
+            } else {
+              try {
+                await github.rest.issues.createLabel({
+                  owner, repo, name: LABEL, color: 'b60205',
+                  description: 'Production probe found a contract or freshness violation',
+                });
+              } catch {
+                // Already exists — the first alert of the repo's life creates it.
+              }
+              const { data: created } = await github.rest.issues.create({
+                owner, repo,
+                title: `[prod-alert] ${categories} since ${result.checked_at.slice(0, 10)}`,
+                body, labels: [LABEL],
+              });
+              core.info(`opened #${created.number}`);
+            }
+
+            core.setFailed(`production probe failed: ${categories}`);
