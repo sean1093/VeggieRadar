@@ -133,8 +133,14 @@ export function useSearch(board: ProduceItem[]): Search {
     setPhase(IDLE);
   }, []);
 
+  // The live board always wins. The input is never disabled, so a query can
+  // be submitted while the board is still loading: it misses an EMPTY board,
+  // enters `searching`, and the revalidation may then deliver the very item
+  // asked for. Whatever the backend answers afterwards — a hit, a miss or
+  // 服務忙碌中 — must not hide rows that are now on screen. (Analytics keep
+  // the outcome the request actually had; the UI shows the truth.)
   const status = useMemo<SearchStatus>(
-    () => (phase.kind === 'local' ? { kind: 'local', items: local } : phase),
+    () => (local.length || phase.kind === 'local' ? { kind: 'local', items: local } : phase),
     [phase, local],
   );
 

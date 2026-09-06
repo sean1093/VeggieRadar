@@ -176,6 +176,28 @@ describe('useSearch', () => {
     await act(async () => resolve(found([CHAYOTE])));
     expect(result.current.status).toEqual({ kind: 'idle' });
   });
+
+  it('lets a board that arrives mid-search win over the backend answer', async () => {
+    // The input is never disabled, so this is the first-visit sequence: type
+    // before the board has loaded, miss the empty board, then the board lands
+    // with the item — and only then does the backend answer 查無此品項.
+    const { promise, resolve } = Promise.withResolvers<ApiResponse>();
+    searchProduceMock.mockReturnValue(promise);
+    const { result, rerender } = renderHook(({ board }) => useSearch(board), {
+      initialProps: { board: [] as ProduceItem[] },
+    });
+
+    await act(async () => {
+      result.current.search('高麗菜');
+    });
+    expect(result.current.status).toEqual({ kind: 'searching' });
+
+    rerender({ board: BOARD });
+    expect(result.current.status).toEqual({ kind: 'local', items: [CABBAGE] });
+
+    await act(async () => resolve({ error: '查無此品項', items: [] }));
+    expect(result.current.status).toEqual({ kind: 'local', items: [CABBAGE] });
+  });
 });
 
 describe('itemsFor', () => {
