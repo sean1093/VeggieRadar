@@ -151,6 +151,41 @@ Browser: localStorage (paints first) ──▶ data/board.json ──▶ GAS /ex
   is the only other runtime addition to that chunk, at 5.7 kB gzip — which is
   why it uses `zod/mini` rather than the classic API (295 kB / 94 kB today).
 
+  **Installable, and openable with no signal.** `vite-plugin-pwa` (1.3.0, which
+  does support Vite 8) emits a Workbox service worker plus the manifest, so the
+  app installs to a home screen and launches standalone. The worker precaches
+  the **shell only** — `index.html`, the hashed JS/CSS, the icons and the
+  manifest, ~655 KiB — because that is what was missing offline: the last board
+  was already in localStorage, but the app that renders it came off the network,
+  so airplane mode meant a white page. The prices still come from localStorage;
+  the worker adds nothing to that path.
+
+  What is deliberately **not** cached is as important. The GAS `/exec` endpoint
+  is `NetworkOnly`: Apps Script answers platform errors with an HTML page and
+  HTTP 200, so a single bad moment stored under that URL would be served as
+  "the board" until the cache was evicted — and the localStorage fallback is a
+  strictly better answer anyway. `gtag` is `NetworkOnly` too (analytics must
+  never be replayed from a cache, and never block a load), and the 78 kB
+  social-card image is excluded, since only LINE and Facebook ever fetch it.
+  Two things do get a runtime cache: the static board mirror
+  (`data/board.json`, stale-while-revalidate, one entry) and Google Fonts
+  (cache-first, 10 entries / a year). Navigations fall back to the precached
+  shell, except under `data/` — answering a JSON request with HTML would hand
+  the fetch a document to parse as a board.
+
+  **Updates are offered, never taken.** `registerType: 'prompt'`, so a new
+  deploy installs and waits; one line appears at the bottom
+  (「已更新，重新整理看新版」) and the worker takes over only when the user taps
+  重新整理. An automatic reload would tear the drawer out of the hands of
+  someone reading a price in front of a stall, and hashed filenames plus the
+  prompt bound the risk of a stale worker to "at most one version behind".
+  `稍後` only hides the line; the update lands on the next natural load. The
+  worker is its own file, so the initial JS carries only the registration and
+  that one line (+0.8 kB gzip); `workbox-window` is a lazily imported chunk.
+  While `navigator.onLine` is false the degraded board's 重試 reads 離線中 —
+  the button stays tappable, since that flag describes the interface, not the
+  internet.
+
 ### Two MOA quirks the backend has to defend against
 
 Both caused wrong numbers on the live board before being fixed; `frontend/backendCode.test.ts`
@@ -722,6 +757,8 @@ npm run test:run       # vitest once — includes backendCode.test.ts, which loa
                        # every ../backend/*.gs with stubbed GAS services
 npm test               # vitest in watch mode
 npm run test:coverage  # v8 coverage report
+./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
+                       # only after the brand mark changes — the PNGs are committed
 ```
 250 tests at ~97% statement / ~90% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
@@ -917,7 +954,6 @@ a dead pipeline serves a perfectly healthy-looking board.
 - Recalibrate the retail markups periodically against the Taichung daily feed;
   the current constants were fitted on data through 2026-08.
 - Per-region retail bands (the calibration feeds are Taichung + Taipei only).
-- PWA install to home screen (pending a `vite-plugin-pwa` build compatible with Vite 8).
 - Per-market / per-region filtering.
 - Line Bot lookups (`doPost` is reserved).
 
