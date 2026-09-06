@@ -1,0 +1,24 @@
+{
+  // Node runs these files with `--experimental-strip-types`, which erases
+  // annotations without ever consulting a compiler. `erasableSyntaxOnly` is
+  // what makes that safe: it rejects enums, namespaces and parameter
+  // properties at typecheck time instead of letting them fail at runtime.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src", "test"]
+}
