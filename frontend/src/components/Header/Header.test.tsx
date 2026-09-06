@@ -34,4 +34,14 @@ describe('Header', () => {
     // The clear button only exists while there is something to clear.
     expect(screen.queryByRole('button', { name: '清除搜尋' })).not.toBeInTheDocument();
   });
+
+  it('keeps the field typeable while a query is in flight — only the submit button waits', () => {
+    render(<Header onSearch={vi.fn()} searching />);
+    const input = screen.getByPlaceholderText(/搜尋蔬果/) as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: '番茄' } });
+    expect(input).toBeEnabled();
+    expect(input.value).toBe('番茄');
+    expect(screen.getByRole('button', { name: '查詢中' })).toBeDisabled();
+  });
 });
