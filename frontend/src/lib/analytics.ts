@@ -27,6 +27,7 @@ export type EventName =
   | 'filter_changed'
   | 'watch_toggled'
   | 'drawer_opened'
+  | 'share'
   | 'trend_result'
   | 'chunk_failed'
   | 'board_schema_mismatch';

@@ -1,6 +1,17 @@
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
+import { describe, it, expect, beforeEach } from 'vitest';
 import App from './App';
+import { parseUrlState } from './lib/urlState';
+
+/** Land the window on a hash the way a pasted link would. */
+const at = (hash: string) => window.history.replaceState(null, '', `/VeggieRadar/${hash}`);
+
+// A fresh visit is an empty hash and empty storage: the board view lives in
+// both, so a leftover would carry one test's filter or query into the next.
+beforeEach(() => {
+  at('');
+  localStorage.clear();
+});
 
 // No VITE_API_BASE_URL in tests → api falls back to the bundled MOCK_BOARD.
 describe('App (board-first)', () => {
@@ -42,7 +53,6 @@ describe('App (board-first)', () => {
   });
 
   it('stars an item and filters to the watch tab', async () => {
-    localStorage.clear();
     render(<App />);
     await screen.findByText('高麗菜');
     fireEvent.click(screen.getByRole('button', { name: '關注 高麗菜' }));
@@ -85,7 +95,6 @@ describe('App (board-first)', () => {
       Array.from(screen.getByTestId('produce-list').querySelectorAll('h3')).map((el) => el.textContent);
 
     it('orders by discount vs own baseline; items without one sink in curated order', async () => {
-      localStorage.clear();
       render(<App />);
       await screen.findByText('高麗菜');
 
@@ -99,7 +108,6 @@ describe('App (board-first)', () => {
     });
 
     it('restores the persisted choice on the next visit', async () => {
-      localStorage.clear();
       localStorage.setItem('veggieradar_sort_v1', 'value');
       render(<App />);
       await screen.findByText('高麗菜');
@@ -109,7 +117,6 @@ describe('App (board-first)', () => {
     });
 
     it('toggles back to the curated category order', async () => {
-      localStorage.clear();
       localStorage.setItem('veggieradar_sort_v1', 'value');
       render(<App />);
       await screen.findByText('高麗菜');
@@ -118,5 +125,65 @@ describe('App (board-first)', () => {
       expect(listedNames()[0]).toBe('高麗菜'); // definition order restored
       expect(localStorage.getItem('veggieradar_sort_v1')).toBe('category');
     });
+  });
+});
+
+describe('App — deep links', () => {
+  it('opens the drawer for a linked item, so a reload keeps it open', async () => {
+    at('#/i/高麗菜');
+    render(<App />);
+
+    const drawer = await screen.findByTestId('detail-drawer');
+    expect(within(drawer).getByText('高麗菜')).toBeInTheDocument();
+    expect(within(drawer).getByText(/菜市場參考價/)).toBeInTheDocument();
+  });
+
+  it('gives the drawer a history entry, so the phone back key closes it', async () => {
+    render(<App />);
+    await screen.findByText('高麗菜');
+
+    fireEvent.click(screen.getByText('高麗菜'));
+    await screen.findByTestId('detail-drawer');
+    expect(parseUrlState(window.location.hash).item).toBe('高麗菜');
+
+    await act(async () => {
+      window.history.back();
+    });
+    await waitFor(() => expect(screen.queryByTestId('detail-drawer')).not.toBeInTheDocument());
+    expect(parseUrlState(window.location.hash).item).toBeNull();
+    // The board is still there — back closed the drawer, it did not leave.
+    expect(screen.getByText('高麗菜')).toBeInTheDocument();
+  });
+
+  it('says so and returns to the board when the link names an out-of-season crop', async () => {
+    at('#/i/龍鬚菜');
+    render(<App />);
+    await screen.findByText('高麗菜');
+
+    expect(screen.getByRole('status')).toHaveTextContent('「龍鬚菜」今日無交易資料');
+    expect(screen.queryByTestId('detail-drawer')).not.toBeInTheDocument();
+    expect(window.location.hash).toBe('#/');
+  });
+
+  it('runs a linked search once the board it matches against has landed', async () => {
+    at('#/?q=蔥');
+    render(<App />);
+
+    expect(await screen.findByText('搜尋「蔥」')).toBeInTheDocument();
+    const list = screen.getByTestId('produce-list');
+    expect(within(list).getByText('蔥')).toBeInTheDocument();
+    expect(within(list).queryByText('高麗菜')).not.toBeInTheDocument();
+  });
+
+  it('restores a linked filter and order together', async () => {
+    at('#/?f=水果&sort=value');
+    render(<App />);
+    await screen.findByText('香蕉');
+
+    expect(screen.getByRole('button', { name: '水果' })).toHaveClass('text-ink');
+    expect(screen.queryByText('高麗菜')).not.toBeInTheDocument();
+    // The order came from the link: nothing was persisted to fall back on.
+    expect(screen.getByRole('button', { name: /排序/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem('veggieradar_sort_v1')).toBeNull();
   });
 });

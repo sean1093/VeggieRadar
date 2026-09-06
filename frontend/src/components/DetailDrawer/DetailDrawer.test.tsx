@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import DetailDrawer from './DetailDrawer';
 import { fetchProduceTrend } from '../../services/api';
 import type { ProduceItem } from '../../types/produce';
@@ -338,5 +338,108 @@ describe('DetailDrawer — on-demand trend chart', () => {
     render(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
     expect(await screen.findByText('暫無趨勢資料')).toBeInTheDocument();
     expect(screen.queryByTestId('produce-trend-chart')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Sharing is the app's growth channel (§1): a shopper pastes today's price
+ * into a LINE group. Phones have a native sheet, desktops do not, and the
+ * message has to read as the numbers the reader will see when he opens it.
+ */
+describe('DetailDrawer — share', () => {
+  const LINK = 'http://localhost:3000/VeggieRadar/#/i/%E9%AB%98%E9%BA%97%E8%8F%9C';
+
+  beforeEach(() => window.history.replaceState(null, '', '/VeggieRadar/'));
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** A phone: the platform sheet takes the sentence, the title and the link. */
+  const withShareSheet = () => {
+    const share = vi.fn(async (_data: ShareData) => {});
+    vi.stubGlobal('navigator', { share, userAgent: 'test' });
+    return share;
+  };
+
+  /** A desktop: no sheet, so the link goes to the clipboard. */
+  const withClipboard = () => {
+    const writeText = vi.fn(async (_text: string) => {});
+    vi.stubGlobal('navigator', { clipboard: { writeText }, userAgent: 'test' });
+    return writeText;
+  };
+
+  it('hands the market price, the band and the change to the native sheet', async () => {
+    const share = withShareSheet();
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
+    render(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '分享 高麗菜' }));
+
+    await waitFor(() => expect(share).toHaveBeenCalledWith({
+      title: '今日菜價｜高麗菜',
+      text: '今日菜價｜高麗菜 約 44 元/台斤（市場 35–55・批發 15.2）↓ 便宜了 12.5%',
+      url: LINK,
+    }));
+    expect(gtag).toHaveBeenCalledWith('event', 'share', { method: 'web_share', has_retail: true });
+  });
+
+  it('falls back to the wholesale wording when the item has no retail band', async () => {
+    const share = withShareSheet();
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
+    render(<DetailDrawer isOpen onClose={() => {}} item={mockProduceItem} allProduceItems={mockAllProduceItems} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '分享 高麗菜' }));
+
+    await waitFor(() => expect(share.mock.calls[0][0]).toMatchObject({
+      text: '今日菜價｜高麗菜 批發 15.2 元/台斤（約 25 元/公斤）↓ 便宜了 12.5%',
+    }));
+    expect(gtag).toHaveBeenCalledWith('event', 'share', { method: 'web_share', has_retail: false });
+  });
+
+  it('shares a flagged item’s price without a change it has just disowned', async () => {
+    const share = withShareSheet();
+    render(
+      <DetailDrawer
+        isOpen
+        onClose={() => {}}
+        item={{ ...withRetail, suspect: true }}
+        allProduceItems={mockAllProduceItems}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '分享 高麗菜' }));
+
+    await waitFor(() => expect(share.mock.calls[0][0]).toMatchObject({
+      text: '今日菜價｜高麗菜 約 44 元/台斤（市場 35–55・批發 15.2）',
+    }));
+  });
+
+  it('copies the link and says so, briefly, where there is no share sheet', async () => {
+    const writeText = withClipboard();
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
+    render(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '分享 高麗菜' }));
+
+    expect(await screen.findByText('已複製連結')).toBeInTheDocument();
+    expect(writeText).toHaveBeenCalledWith(LINK);
+    expect(gtag).toHaveBeenCalledWith('event', 'share', { method: 'clipboard', has_retail: true });
+  });
+
+  it('claims nothing when the sheet is dismissed', async () => {
+    const share = vi.fn(async (_data: ShareData) => {
+      throw new DOMException('Share canceled', 'AbortError');
+    });
+    const gtag = vi.fn();
+    vi.stubGlobal('navigator', { share, userAgent: 'test' });
+    vi.stubGlobal('gtag', gtag);
+    render(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '分享 高麗菜' }));
+
+    await waitFor(() => expect(share).toHaveBeenCalled());
+    expect(gtag.mock.calls.filter(([, name]) => name === 'share')).toHaveLength(0);
+    expect(screen.queryByText('已複製連結')).not.toBeInTheDocument();
   });
 });

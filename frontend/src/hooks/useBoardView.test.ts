@@ -1,6 +1,7 @@
 import { renderHook, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useBoardView, type WatchlistFilter } from './useBoardView';
+import { parseUrlState } from '../lib/urlState';
 import type { ProduceItem } from '../types/produce';
 
 const SORT_KEY = 'veggieradar_sort_v1';
@@ -34,16 +35,24 @@ const BOARD = [CABBAGE, RADISH, BOKCHOY, BANANA];
 
 const NOBODY: WatchlistFilter = { count: 0, isWatched: () => false };
 const names = (items: ProduceItem[]) => items.map((it) => it.name);
+/** Land the window on a hash the way a pasted link would. */
+const at = (hash: string) => window.history.replaceState(null, '', `/VeggieRadar/${hash}`);
 
 describe('useBoardView', () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    at('');
+  });
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    at('');
   });
 
   it('offers the watch tab, 全部 and only the categories on the board', () => {
-    const { result } = renderHook(() => useBoardView(BOARD, { count: 2, isWatched: () => false }));
+    const { result } = renderHook(() =>
+      useBoardView(BOARD, { count: 2, isWatched: () => false }, BOARD),
+    );
 
     expect(result.current.filterOptions).toEqual([
       { label: '★ 關注 2', value: 'watch' },
@@ -57,14 +66,14 @@ describe('useBoardView', () => {
   });
 
   it('drops the watch count from the label when the list is empty', () => {
-    const { result } = renderHook(() => useBoardView(BOARD, NOBODY));
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
     expect(result.current.filterOptions[0]).toEqual({ label: '★ 關注', value: 'watch' });
   });
 
   it('filters by category and reports the choice', () => {
     const gtag = vi.fn();
     vi.stubGlobal('gtag', gtag);
-    const { result } = renderHook(() => useBoardView(BOARD, NOBODY));
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
 
     act(() => result.current.changeFilter('葉菜類'));
     expect(result.current.activeFilter).toBe('葉菜類');
@@ -74,7 +83,7 @@ describe('useBoardView', () => {
 
   it('filters to the watchlist', () => {
     const { result } = renderHook(() =>
-      useBoardView(BOARD, { count: 1, isWatched: (id) => id === '甘藍' }),
+      useBoardView(BOARD, { count: 1, isWatched: (id) => id === '甘藍' }, BOARD),
     );
 
     act(() => result.current.changeFilter('watch'));
@@ -84,12 +93,13 @@ describe('useBoardView', () => {
   it('resets the filter for a search without reporting a filter choice', () => {
     const gtag = vi.fn();
     vi.stubGlobal('gtag', gtag);
-    const { result } = renderHook(() => useBoardView(BOARD, NOBODY));
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
 
     act(() => result.current.changeFilter('水果'));
-    act(() => result.current.resetFilter());
+    act(() => result.current.applyQuery('蔥'));
 
     expect(result.current.activeFilter).toBe('all');
+    expect(result.current.linkedQuery).toBe('蔥');
     expect(names(result.current.visibleItems)).toEqual(['高麗菜', '白蘿蔔', '青江菜', '香蕉']);
     // The reset is a consequence of searching, not a choice worth counting.
     expect(gtag.mock.calls.filter(([, name]) => name === 'filter_changed')).toHaveLength(1);
@@ -98,7 +108,7 @@ describe('useBoardView', () => {
   it('orders 划算優先 by the deepest discount, sinking the rows without a baseline', () => {
     const gtag = vi.fn();
     vi.stubGlobal('gtag', gtag);
-    const { result } = renderHook(() => useBoardView(BOARD, NOBODY));
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
 
     act(() => result.current.toggleSort());
 
@@ -110,7 +120,7 @@ describe('useBoardView', () => {
 
   it('restores the persisted sort and toggles back to the curated order', () => {
     localStorage.setItem(SORT_KEY, 'value');
-    const { result } = renderHook(() => useBoardView(BOARD, NOBODY));
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
     expect(result.current.sortMode).toBe('value');
 
     act(() => result.current.toggleSort());
@@ -126,7 +136,7 @@ describe('useBoardView', () => {
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('private mode');
     });
-    const { result } = renderHook(() => useBoardView(BOARD, NOBODY));
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
 
     expect(result.current.sortMode).toBe('category');
     act(() => result.current.toggleSort());
@@ -134,15 +144,15 @@ describe('useBoardView', () => {
   });
 
   it('reports whether any row carries a baseline at all', () => {
-    const { result } = renderHook(() => useBoardView(BOARD, NOBODY));
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
     expect(result.current.hasBaselines).toBe(true);
 
-    const { result: bare } = renderHook(() => useBoardView([BOKCHOY], NOBODY));
+    const { result: bare } = renderHook(() => useBoardView([BOKCHOY], NOBODY, BOARD));
     expect(bare.current.hasBaselines).toBe(false);
   });
 
   it('holds the row the drawer is showing', () => {
-    const { result } = renderHook(() => useBoardView(BOARD, NOBODY));
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
     expect(result.current.selectedItem).toBeNull();
 
     act(() => result.current.select(RADISH));
@@ -150,5 +160,111 @@ describe('useBoardView', () => {
 
     act(() => result.current.close());
     expect(result.current.selectedItem).toBeNull();
+  });
+});
+
+describe('useBoardView — the URL is the state', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    at('');
+  });
+  afterEach(() => at(''));
+
+  it('restores the drawer, the filter, the order and the query from a link', () => {
+    at('#/i/白蘿蔔?q=蘿蔔&f=根莖類&sort=value');
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
+
+    expect(result.current.selectedItem).toBe(RADISH);
+    expect(result.current.activeFilter).toBe('根莖類');
+    expect(result.current.sortMode).toBe('value');
+    expect(result.current.linkedQuery).toBe('蘿蔔');
+    expect(result.current.notice).toBeNull();
+  });
+
+  it('lets an explicit order in the URL win over the persisted one', () => {
+    localStorage.setItem(SORT_KEY, 'value');
+    at('#/?sort=category');
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
+    expect(result.current.sortMode).toBe('category');
+  });
+
+  it('ignores a filter today’s board cannot honour, rather than emptying it', () => {
+    at('#/?f=菇類');
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
+
+    expect(result.current.activeFilter).toBe('all');
+    expect(result.current.visibleItems).toHaveLength(4);
+  });
+
+  it('writes the view into the URL — the drawer as an entry, the rest in place', () => {
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
+
+    act(() => result.current.changeFilter('水果'));
+    expect(window.location.hash).toBe('#/?f=%E6%B0%B4%E6%9E%9C');
+    act(() => result.current.toggleSort());
+    expect(window.location.hash).toBe('#/?f=%E6%B0%B4%E6%9E%9C&sort=value');
+
+    const entries = window.history.length;
+    act(() => result.current.select(BANANA));
+    expect(window.location.hash).toBe('#/i/%E9%A6%99%E8%95%89?f=%E6%B0%B4%E6%9E%9C&sort=value');
+    expect(window.history.length).toBe(entries + 1);
+
+    act(() => result.current.close());
+    expect(window.location.hash).toBe('#/?f=%E6%B0%B4%E6%9E%9C&sort=value');
+  });
+
+  it('follows the back key: the drawer closes and the filter comes back', () => {
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
+
+    act(() => result.current.changeFilter('水果'));
+    act(() => result.current.select(BANANA));
+    expect(result.current.selectedItem).toBe(BANANA);
+
+    // What the browser does on back: the popped URL, then the event.
+    act(() => {
+      at('#/?f=水果');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+
+    expect(result.current.selectedItem).toBeNull();
+    expect(result.current.activeFilter).toBe('水果');
+  });
+
+  it('opens a linked drawer as soon as the board lands, without a notice first', () => {
+    at('#/i/高麗菜');
+    const { result, rerender } = renderHook(
+      ({ items }: { items: ProduceItem[] }) => useBoardView(items, NOBODY, items),
+      { initialProps: { items: [] as ProduceItem[] } },
+    );
+
+    // Still loading: nothing is known yet, so nothing is claimed or reset.
+    expect(result.current.selectedItem).toBeNull();
+    expect(result.current.notice).toBeNull();
+    expect(parseUrlState(window.location.hash).item).toBe('高麗菜');
+
+    rerender({ items: BOARD });
+    expect(result.current.selectedItem).toBe(CABBAGE);
+  });
+
+  it('resolves an item a live search returned but the board does not carry', () => {
+    const RARE = item('龍鬚菜', '葉菜類', undefined);
+    at('#/i/龍鬚菜');
+    const { result } = renderHook(() => useBoardView([RARE], NOBODY, BOARD));
+
+    expect(result.current.selectedItem).toBe(RARE);
+    expect(result.current.notice).toBeNull();
+  });
+
+  it('says an out-of-season link has no data today and returns to the board', () => {
+    at('#/i/山藥');
+    const { result } = renderHook(() => useBoardView(BOARD, NOBODY, BOARD));
+
+    expect(result.current.notice).toBe('「山藥」今日無交易資料');
+    expect(result.current.selectedItem).toBeNull();
+    expect(window.location.hash).toBe('#/');
+
+    // The next thing the shopper does clears it; it is an event, not a state.
+    act(() => result.current.select(CABBAGE));
+    expect(result.current.notice).toBeNull();
   });
 });
