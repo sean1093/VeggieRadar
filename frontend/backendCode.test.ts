@@ -13,7 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { BoardResponseSchema } from './src/types/board.schema';
+import { BOARD_MIN_ITEMS, BOARD_HEALTHY_ITEMS, BoardResponseSchema } from './src/types/board.schema';
 
 type Row = {
   CropName: string;
@@ -1725,6 +1725,16 @@ describe('validateBoard', () => {
     // Nothing to compare against, so no relative rule can fire: a board that
     // would be rejected on price shift and on date order is published.
     expect(api.validateBoard(guardBoard(30, 500, '100.01.01'), null).ok).toBe(true);
+  });
+
+  it('shares its floor with the client contract, below the probe threshold', () => {
+    // `board.schema.ts` publishes the same number so the external probe and
+    // the UI reason about the guard without a second definition; the probe's
+    // "worth a look" threshold must sit above the "certainly broken" floor,
+    // or the probe could never alert on a board the guard still accepts.
+    const { api } = loadBackend();
+    expect(api.BOARD_MIN_ITEMS).toBe(BOARD_MIN_ITEMS);
+    expect(BOARD_HEALTHY_ITEMS).toBeGreaterThan(api.BOARD_MIN_ITEMS);
   });
 
   it('(e) flags a huge move only when the volume collapsed with it', () => {
