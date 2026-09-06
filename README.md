@@ -169,6 +169,46 @@ the board (including 高麗菜) without any error; and `writeChunkedProp()` spli
 the ~34 KB board — and the price history — across numbered `ScriptProperties`
 chunks, since a single property value is capped at 9 KB.
 
+### Plausibility guard
+
+`refreshBoardCache()` used to reject exactly one thing: an *empty* board.
+Everything else was stored — so a throttled crawl (40 items instead of 94) or a
+MOA unit change (every price ×1.67) overwrote a good board with a wrong one, and
+`updateHistory` baked the wrong numbers into the 28-day baseline on the way.
+`validateBoard()` in `backend/Validate.gs` now sits between the build and the
+store. Board-level rules reject the whole build; item-level rules only *mark*
+the item, because withholding 93 good prices over one bad transaction is the
+worse trade.
+
+| Rule | Threshold | Why that number |
+| --- | --- | --- |
+| Too few items | `count < max(30, 0.6 × previous)` | A normal day carries 90–94 of the 104 defined items and seasonal drop-out is under 10 %/day, so losing 40 % is a fetch failure, not a season. The floor of 30 means "certainly broken" and sits deliberately far below the 60 the external probe alerts at — that one asks "worth a look?", this one withholds data from users |
+| Mass price jump | ≥ 20 % of the common items moved beyond ×3 | A real market moves a handful of crops; a fifth of the board tripling at once is a unit or column change |
+| Whole-board displacement | median common-item price ratio outside [0.5, 2] | Every price shifting by the same factor is arithmetic, not trading |
+| Trading date regression | `roc_date` older than the stored board's | The date probe picked the wrong day, which makes every `change_percent` on the board wrong |
+| *Item:* outlier transaction | `abs(change_percent) > 150` **and** volume below 20 % of the previous board's | A crop can double overnight; 2.5× on a tenth of the volume is one mistyped `Trans_Quantity` carrying the average. Measured against the previous *board* rather than a history median, because the history store keeps prices only |
+| *Item:* grouping error | one variety above 95 % of the volume whose price differs by more than 50 % | A variety that dominant *is* the item, so a gap that wide means rows from another crop were folded in. `varietyBreakdown` cannot currently emit that shape (it needs ≥ 2 varieties, each ≥ 10 %), so this guards a future publisher change |
+
+Every board-level rule that triggers is reported, not just the first, and a
+first deploy has no stored board to compare against — then only the absolute
+floor applies.
+
+Nothing is corrected: no outlier is dropped, no price is rescaled. Choosing
+which of two numbers is the real one is guessing, and a price board that guesses
+has nothing left to offer. A rejected build is instead kept whole in its own
+chunked property (`veggie_board_rejected_chunk_*`) as the only evidence of what
+MOA answered, `veggie_last_refresh_fail` records `implausible: <reasons>`, and
+the same `recordRefreshOutcome(false, …)` path feeds the existing 3-failure
+alert — so the reasons arrive by mail rather than only in a log. `diag` exposes
+the last verdict as `last_validation`.
+
+Marked items stay **on** the board with `suspect: true`: an old price beats a
+blank. What they lose is everything derived from comparing days — they are
+excluded from the price history (a flagged observation must not bend the 28-day
+median), and the frontend hides their change badge, their 「比近月便宜」 badge
+and the drawer's baseline sentence, replacing the drawer's change block with
+「今日成交異常，暫不顯示漲跌」.
+
 ### GAS quotas are the real scaling limit
 
 Two Apps Script limits bite long before anything else: **30 simultaneous
@@ -300,6 +340,7 @@ does not justify publishing.
 | `retail_*` | the cached board predates the retail band |
 | `baseline_price`, `vs_baseline_percent` | fewer than 10 in-horizon observations for that crop (§5) |
 | `varieties` | fewer than 2 varieties clear the share and volume thresholds (§5) |
+| `suspect` | the item's numbers are plausible; it appears only on an item the guard flagged (§2), whose change and baseline the client must then hide |
 
 `date` is the trading date; `generated_at` is when the backend crawled. See
 "Trading date vs. refresh time" in §2 — clients must not present the trading date
@@ -346,6 +387,7 @@ GET {WEB_APP_URL}/exec?action=backfill&token=…[&force=1]
 GET {WEB_APP_URL}/exec?action=diag[&token=…]
 → { "type": "diag", "board": { "generated_at": ..., "stale": false },
      "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null,
+     "last_validation": { "at": "2026-09-02T16:05:08.087Z", "ok": true, "reasons": [], "suspects": [] },
      "history": { "items": 97, "min_days": 1, "max_days": 24 },
      "alert": { "failure_streak": 0, "incident_open": false, "last_sent": null, "recipient_configured": true } }
 
@@ -357,6 +399,10 @@ once — the crawls take minutes and would blow the Web App response window.
 `backfill` is idempotent per trading date, so re-running only fills gaps. `diag`
 is how you tell "markets closed" from "refresh pipeline dead" without the GAS
 console, and how you confirm history coverage after a backfill.
+
+`last_validation` is public with or without the token, unlike `last_refresh_fail`:
+its reasons are our own rule text and our own item names, never MOA or platform
+text that could quote something we would rather not publish.
 
 | Action | Anonymous | With `token` |
 | --- | --- | --- |

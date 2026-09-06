@@ -10,11 +10,15 @@ interface ProduceCardProps {
 }
 
 const ProduceCard: React.FC<ProduceCardProps> = ({ item, onClick, watched = false, onToggleWatch }) => {
+  // The backend's plausibility guard flagged today's observation for this item
+  // (§2). The price stays — an old price beats a blank — but the change and the
+  // baseline badge are both derived from the number we just called untrustworthy.
+  const suspect = item.suspect === true;
   const flat = item.change_percent === 0;
   const down = item.change_percent < 0;
   const tone = flat ? 'text-stone' : down ? 'text-sage' : 'text-clay';
   const arrow = flat ? '→' : down ? '↓' : '↑';
-  const label = flat ? '持平' : down ? '便宜了' : '變貴了';
+  const label = suspect ? '今日成交異常' : flat ? '持平' : down ? '便宜了' : '變貴了';
   // The estimated traditional-market price leads: it is the number a shopper
   // transacts at. The wholesale price stays visible as the measured anchor the
   // estimate — and the change badge — are derived from.
@@ -24,7 +28,7 @@ const ProduceCard: React.FC<ProduceCardProps> = ({ item, onClick, watched = fals
   // badge that scolds would just be noise. Wholesale basis, like the change
   // column; the drawer explains the derivation.
   const vsBaseline = item.vs_baseline_percent;
-  const cheapVsMonth = vsBaseline != null && vsBaseline <= -10;
+  const cheapVsMonth = !suspect && vsBaseline != null && vsBaseline <= -10;
 
   const open = () => onClick(item);
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -97,12 +101,14 @@ const ProduceCard: React.FC<ProduceCardProps> = ({ item, onClick, watched = fals
           )}
         </div>
 
-        <div className={`w-14 text-right ${tone}`}>
-          <span className="block text-base font-semibold tabular-nums">
-            {arrow} {Math.abs(item.change_percent).toFixed(1)}%
-          </span>
-          <span className="block text-[11px]">{label}</span>
-        </div>
+        {!suspect && (
+          <div className={`w-14 text-right ${tone}`}>
+            <span className="block text-base font-semibold tabular-nums">
+              {arrow} {Math.abs(item.change_percent).toFixed(1)}%
+            </span>
+            <span className="block text-[11px]">{label}</span>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -140,6 +140,8 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'ALERT_FAILURE_STREAK', 'ALERT_SILENCE_MS', 'ALERT_COOLDOWN_MS',
     'REFRESH_INTERVAL_HOURS', 'installDailyTrigger', 'refreshBoardCache',
     'doGet', 'isAdmin', 'alertRecipient', 'redactFailure', 'ADMIN_TOKEN_PROP', 'ALERT_EMAIL_PROP',
+    'validateBoard', 'markSuspects', 'readChunkedProp',
+    'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
   ];
   const merged: Record<string, unknown> = { ...services, ...overrides };
   const factory = new Function(
@@ -1088,7 +1090,9 @@ describe('handleSearch', () => {
  * the board down with it.
  */
 describe('failure alerting', () => {
-  const goodRows = { 甘藍: [row('甘藍-初秋', 20, 60000)] };
+  // A "good refresh" now has to clear the plausibility floor: `refreshBoardCache`
+  // no longer stores a one-item board. See `plausibleRows` at the end of the file.
+  const goodRows = plausibleRows();
 
   it('stays quiet while a single refresh failure self-heals', () => {
     const { api, mails, props } = loadBackend(); // no MOA rows → empty board
@@ -1295,7 +1299,7 @@ describe('refresh cadence vs staleness threshold', () => {
  * to survive a burst, and no alerting failure may reach the board.
  */
 describe('alerting under contention and failure', () => {
-  const goodRows = { 甘藍: [row('甘藍-初秋', 20, 60000)] };
+  const goodRows = plausibleRows();
 
   it('takes and releases the lock for every decision', () => {
     const { api, locks } = loadBackend();
@@ -1571,5 +1575,381 @@ describe('backend file layout', () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+/**
+ * The plausibility guard. The refresh used to store anything that was not
+ * empty, so a throttled crawl (half the roots answering) or a MOA unit change
+ * (every price ×1.67) overwrote a good board with a wrong one — and
+ * `updateHistory` baked the wrong numbers into the 28-day baseline. The
+ * thresholds ARE the feature, so every rule is pinned normal / exactly at the
+ * boundary / past it.
+ */
+type GuardDef = { name: string; official: string; category: string; variety?: string };
+
+/** The board definition, read once: the stubs below build their rows from it. */
+const GUARD_DEFS: GuardDef[] = loadBackend().api.BOARD_ITEMS;
+
+/**
+ * A full trading day: one MOA row per board item, keyed by root, priced at
+ * 20 元/公斤. The alerting suites above used to fake a healthy refresh with a
+ * single 甘藍 row; the guard rejects a one-item board, so "healthy" now has to
+ * look healthy. A hoisted `function` on purpose — those suites build their
+ * fixture while the file is still being collected, before `const`s below run.
+ */
+function plausibleRows(): Record<string, Row[]> {
+  const defs: GuardDef[] = loadBackend().api.BOARD_ITEMS;
+  const byRoot: Record<string, Row[]> = {};
+  for (const def of defs) {
+    const rows = byRoot[def.official] ?? (byRoot[def.official] = []);
+    rows.push(row(def.official + (def.variety ? `-${def.variety}` : ''), 20, 60000));
+  }
+  return byRoot;
+}
+
+/** One board item, carrying only the fields the guard reads. */
+const guardItem = (
+  name: string,
+  cattyPrice: number,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+  code: name, name, official_name: name, category: '葉菜類',
+  avg_price: cattyPrice / 0.6, catty_price: cattyPrice, change_percent: 0,
+  trade_volume: 60000, unit: '公斤', markets_count: 6, ...extra,
+});
+
+/** `count` items at one price — the flat board every rule below deviates from. */
+const guardBoard = (count: number, cattyPrice = 10, roc = '115.09.02') => ({
+  type: 'board',
+  roc_date: roc,
+  count,
+  items: Array.from({ length: count }, (_, i) => guardItem(`品項${i}`, cattyPrice)),
+});
+
+describe('validateBoard', () => {
+  /** 40 common items, `jumped` of them at `ratio` × the stored board's price. */
+  const jumpedBoard = (jumped: number, ratio: number) => ({
+    ...guardBoard(40),
+    items: Array.from({ length: 40 }, (_, i) => guardItem(`品項${i}`, i < jumped ? 10 * ratio : 10)),
+  });
+
+  /** A 40-item board — enough to clear rule (a) — whose 品項0 carries `extra`. */
+  const boardWithItem = (extra: Record<string, unknown>) => {
+    const board = guardBoard(40);
+    board.items[0] = guardItem('品項0', 10, extra);
+    return board;
+  };
+
+  it('(a) accepts a board that only lost a few items to the season', () => {
+    const { api } = loadBackend();
+    expect(api.validateBoard(guardBoard(90), guardBoard(94)).ok).toBe(true);
+  });
+
+  it('(a) accepts exactly 60% of the stored board and rejects one item below', () => {
+    const { api } = loadBackend();
+    expect(api.validateBoard(guardBoard(60), guardBoard(100)).ok).toBe(true);
+    expect(api.validateBoard(guardBoard(59), guardBoard(100)).reasons).toEqual([
+      'count 59 < 60% of previous 100',
+    ]);
+  });
+
+  it('(a) holds the absolute floor however small the stored board was', () => {
+    const { api } = loadBackend();
+    // 60% of 40 is 24, but a 29-item board is a failed crawl either way.
+    expect(api.validateBoard(guardBoard(29), guardBoard(40)).reasons).toEqual(['count 29 < floor 30']);
+    expect(api.validateBoard(guardBoard(30), guardBoard(40)).ok).toBe(true);
+  });
+
+  it('(b) rejects a fifth of the common items jumping beyond ×3', () => {
+    const { api } = loadBackend();
+    expect(api.validateBoard(jumpedBoard(7, 4), guardBoard(40)).ok).toBe(true); // 17.5%
+    expect(api.validateBoard(jumpedBoard(8, 4), guardBoard(40)).reasons).toEqual([
+      '8 of 40 common items moved by more than 200% (20%, limit 20%)',
+    ]);
+  });
+
+  it('(b) treats exactly ×3 as a market move, not a unit change', () => {
+    const { api } = loadBackend();
+    expect(api.validateBoard(jumpedBoard(8, 3), guardBoard(40)).ok).toBe(true);
+    expect(api.validateBoard(jumpedBoard(8, 1 / 3), guardBoard(40)).ok).toBe(true);
+  });
+
+  it('(c) rejects a median displacement of the whole board, either direction', () => {
+    const { api } = loadBackend();
+    expect(api.validateBoard(guardBoard(40, 20), guardBoard(40, 10)).ok).toBe(true); // exactly ×2
+    expect(api.validateBoard(guardBoard(40, 5), guardBoard(40, 10)).ok).toBe(true); // exactly ÷2
+    expect(api.validateBoard(guardBoard(40, 25), guardBoard(40, 10)).reasons).toEqual([
+      'median price ratio 2.5 over 40 common items outside [0.5, 2]',
+    ]);
+    expect(api.validateBoard(guardBoard(40, 4), guardBoard(40, 10)).reasons).toEqual([
+      'median price ratio 0.4 over 40 common items outside [0.5, 2]',
+    ]);
+  });
+
+  it('(b, c) stay silent when the two boards share no item at all', () => {
+    const { api } = loadBackend();
+    const renamed = {
+      ...guardBoard(40),
+      items: Array.from({ length: 40 }, (_, i) => guardItem(`新品項${i}`, 100)),
+    };
+    expect(api.validateBoard(renamed, guardBoard(40, 10)).ok).toBe(true);
+  });
+
+  it('(d) rejects a trading date that went backwards', () => {
+    const { api } = loadBackend();
+    expect(api.validateBoard(guardBoard(40, 10, '115.09.01'), guardBoard(40, 10, '115.09.02')).reasons).toEqual([
+      'trading date 115.09.01 is older than the stored 115.09.02',
+    ]);
+    // The same date is the normal case: the 4-hourly refresh revisits it.
+    expect(api.validateBoard(guardBoard(40, 10, '115.09.02'), guardBoard(40, 10, '115.09.02')).ok).toBe(true);
+    expect(api.validateBoard(guardBoard(40, 10, '115.09.03'), guardBoard(40, 10, '115.09.02')).ok).toBe(true);
+  });
+
+  it('reports every triggered rule, not just the first', () => {
+    const { api } = loadBackend();
+    const verdict = api.validateBoard(guardBoard(20, 40, '115.09.01'), guardBoard(40, 10, '115.09.02'));
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reasons).toEqual([
+      'count 20 < floor 30',
+      '20 of 20 common items moved by more than 200% (100%, limit 20%)',
+      'median price ratio 4 over 20 common items outside [0.5, 2]',
+      'trading date 115.09.01 is older than the stored 115.09.02',
+    ]);
+  });
+
+  it('applies only the absolute floor on first deploy', () => {
+    const { api } = loadBackend();
+    expect(api.validateBoard(guardBoard(api.BOARD_MIN_ITEMS), null).ok).toBe(true);
+    expect(api.validateBoard(guardBoard(api.BOARD_MIN_ITEMS - 1), null).reasons).toEqual(['count 29 < floor 30']);
+    // Nothing to compare against, so no relative rule can fire: a board that
+    // would be rejected on price shift and on date order is published.
+    expect(api.validateBoard(guardBoard(30, 500, '100.01.01'), null).ok).toBe(true);
+  });
+
+  it('(e) flags a huge move only when the volume collapsed with it', () => {
+    const { api } = loadBackend();
+    const prev = guardBoard(40); // yesterday: 60 000 kg per item
+    const suspects = (extra: Record<string, unknown>) => api.validateBoard(boardWithItem(extra), prev).suspects;
+
+    expect(suspects({ change_percent: 200, trade_volume: 60000 })).toEqual([]); // volume held: a real move
+    expect(suspects({ change_percent: 200, trade_volume: 12000 })).toEqual([]); // exactly 20% of yesterday
+    expect(suspects({ change_percent: 150, trade_volume: 100 })).toEqual([]); // exactly at the change threshold
+    expect(suspects({ change_percent: 151, trade_volume: 11999 })).toEqual(['品項0']);
+    expect(suspects({ change_percent: -400, trade_volume: 100 })).toEqual(['品項0']); // a collapse counts too
+  });
+
+  it('(e) leaves a newly listed item alone — there is no volume to compare', () => {
+    const { api } = loadBackend();
+    const board = guardBoard(40);
+    board.items[0] = guardItem('新上架', 10, { change_percent: 400, trade_volume: 100 });
+    expect(api.validateBoard(board, guardBoard(40)).suspects).toEqual([]);
+  });
+
+  it('(f) flags a dominant variety whose price disagrees with the item', () => {
+    const { api } = loadBackend();
+    const prev = guardBoard(40);
+    const suspects = (share: number, catty: number) =>
+      api.validateBoard(boardWithItem({ varieties: [{ name: '甲', catty_price: catty, share_percent: share }] }), prev).suspects;
+
+    expect(suspects(95, 20)).toEqual([]); // share exactly at the threshold
+    expect(suspects(96, 15)).toEqual([]); // exactly 50% above the item's 10
+    expect(suspects(96, 14)).toEqual([]);
+    expect(suspects(96, 16)).toEqual(['品項0']);
+    expect(suspects(96, 4)).toEqual(['品項0']); // and the cheap direction
+  });
+
+  it('lists an item that trips both item rules exactly once', () => {
+    const { api } = loadBackend();
+    const board = boardWithItem({
+      change_percent: 300,
+      trade_volume: 100,
+      varieties: [{ name: '甲', catty_price: 40, share_percent: 99 }],
+    });
+    expect(api.validateBoard(board, guardBoard(40)).suspects).toEqual(['品項0']);
+  });
+
+  it('never rejects a board over its items — 39 good prices beat none', () => {
+    const { api } = loadBackend();
+    const verdict = api.validateBoard(boardWithItem({ change_percent: 900, trade_volume: 100 }), guardBoard(40));
+    expect(verdict).toMatchObject({ ok: true, reasons: [], suspects: ['品項0'] });
+  });
+
+  it('markSuspects marks exactly the named items', () => {
+    const { api } = loadBackend();
+    const board = guardBoard(3);
+    api.markSuspects(board, ['品項1']);
+    expect(board.items.map((it) => it.suspect)).toEqual([undefined, true, undefined]);
+  });
+});
+
+/**
+ * The refresh path around the guard. What has to hold: a half-empty crawl
+ * never reaches the cache, the durable props or the history; the operator can
+ * see why from `diag` and from the existing failure mail; and a board that is
+ * merely carrying one bad item is still published, minus that item's
+ * observation.
+ */
+describe('refreshBoardCache — plausibility guard', () => {
+  /**
+   * MOA stub answering per (root, trading date). `loadBackend`'s shared
+   * responder matches on the crop term alone, and the item-level rule needs
+   * today's price to differ from yesterday's.
+   */
+  const moaByDate = (rowsFor: (root: string, roc: string) => Row[]) => {
+    const reply = (url: string) => {
+      const q = new URL(url).searchParams;
+      return {
+        getResponseCode: () => 200,
+        getContentText: () =>
+          JSON.stringify({ RS: 'OK', Data: rowsFor(q.get('CropName') ?? '', q.get('Start_time') ?? '') }),
+      };
+    };
+    return {
+      UrlFetchApp: {
+        fetch: (url: string) => reply(url),
+        fetchAll: (reqs: { url: string }[]) => reqs.map((r) => reply(r.url)),
+      },
+    };
+  };
+
+  /**
+   * One row per board item on the requested root, so `defs` builds exactly
+   * `defs.length` items — the roots left out are the throttled batch.
+   */
+  const rootRows =
+    (defs: GuardDef[], priced: (name: string, roc: string) => { price: number; volume: number } = () => ({ price: 20, volume: 60000 })) =>
+      (root: string, roc: string): Row[] =>
+        defs
+          .filter((def) => def.official === root)
+          .map((def) => {
+            const { price, volume } = priced(def.name, roc);
+            return row(def.official + (def.variety ? `-${def.variety}` : ''), price, volume);
+          });
+
+  /** A healthy stored board of `count` real items at 20 元/公斤 = 12 元/台斤. */
+  const storedBoardOf = (count: number) => ({
+    type: 'board',
+    date: new Date().toISOString().slice(0, 10),
+    roc_date: rocDate(0),
+    prev_date: rocDate(1),
+    generated_at: new Date().toISOString(),
+    count,
+    items: GUARD_DEFS.slice(0, count).map((def) => ({
+      code: def.official, name: def.name, official_name: def.official, category: def.category,
+      avg_price: 20, catty_price: 12, change_percent: 0, trade_volume: 60000,
+      unit: '公斤', markets_count: 6,
+    })),
+  });
+
+  /** A refresh where only the first 40 roots answer — the throttled-batch shape. */
+  const halfEmptyRefresh = () => {
+    const backend = loadBackend({}, moaByDate(rootRows(GUARD_DEFS.slice(0, 40))));
+    backend.api.storeBoard(storedBoardOf(94));
+    return backend;
+  };
+
+  it('keeps the stored board when a throttled crawl yields 40 of 94 items', () => {
+    const { api, props, cache } = halfEmptyRefresh();
+    const good = api.readDurableBoard();
+
+    const built = api.refreshBoardCache();
+
+    expect(built.count).toBe(40); // the build really did happen...
+    expect(api.readDurableBoard()).toBe(good); // ...and changed nothing
+    expect(cache.get('veggie_board_v2')).toBe(good);
+    expect(api.readHistory().items).toEqual({});
+    expect(props.get('veggie_last_refresh_fail')).toContain('implausible: count 40 < 60% of previous 94');
+    expect(props.has('veggie_last_refresh_ok')).toBe(false);
+  });
+
+  it('shows the verdict through diag, reasons and all', () => {
+    const { api } = halfEmptyRefresh();
+    api.refreshBoardCache();
+
+    const diag = api.handleDiag();
+    expect(diag.last_validation).toMatchObject({
+      ok: false,
+      reasons: ['count 40 < 60% of previous 94'],
+      suspects: [],
+    });
+    expect(Date.parse(diag.last_validation.at)).not.toBeNaN();
+    // The raw reason is still redacted to a category for anonymous callers,
+    // even though this one is entirely our own text.
+    expect(diag.last_refresh_fail).toMatch(/ implausible$/);
+  });
+
+  it('keeps the rejected board whole for inspection, chunked past the 9 KB cap', () => {
+    const { api, props } = halfEmptyRefresh();
+    api.refreshBoardCache();
+
+    expect(Number(props.get(api.REJECTED_PROP_COUNT))).toBeGreaterThan(1);
+    const rejected = JSON.parse(api.readChunkedProp(api.REJECTED_PROP_PREFIX, api.REJECTED_PROP_COUNT));
+    expect(rejected.count).toBe(40);
+    expect(rejected.items).toHaveLength(40);
+  });
+
+  it('reaches the operator through the existing streak alert, carrying the reasons', () => {
+    const { api, mails } = halfEmptyRefresh();
+    for (let i = 0; i < api.ALERT_FAILURE_STREAK; i++) api.refreshBoardCache();
+
+    expect(mails).toHaveLength(1);
+    expect(mails[0].subject).toContain('連續 3 次更新失敗');
+    expect(mails[0].body).toContain('implausible: count 40 < 60% of previous 94');
+  });
+
+  it('publishes a good board with one item flagged, and keeps it out of history', () => {
+    const { api, props } = loadBackend(
+      {},
+      // 番茄 triples overnight on a tenth of its usual volume; everything else
+      // trades exactly as it did yesterday.
+      moaByDate(rootRows(GUARD_DEFS, (name, roc) =>
+        name === '番茄' && roc === rocDate(0)
+          ? { price: 90, volume: 6000 }
+          : { price: 20, volume: 60000 })),
+    );
+    api.storeBoard(storedBoardOf(GUARD_DEFS.length));
+
+    api.refreshBoardCache();
+
+    const board = JSON.parse(api.readDurableBoard()) as { count: number; items: Record<string, unknown>[] };
+    const flagged = board.items.filter((it) => it.suspect === true).map((it) => it.name);
+    expect(flagged).toEqual(['番茄']);
+    expect(board.count).toBe(GUARD_DEFS.length);
+    expect(props.get('veggie_last_refresh_ok')).toContain(`${GUARD_DEFS.length} items`);
+
+    // The flagged observation must not bend the 28-day median; its neighbours
+    // are recorded as usual.
+    const history = api.readHistory().items;
+    expect(history['番茄']).toBeUndefined();
+    expect(history['高麗菜']).toEqual([[rocDate(0), 20]]);
+  });
+
+  it('accepts the first board ever built, with nothing to compare it against', () => {
+    const { api, props } = loadBackend({}, moaByDate(rootRows(GUARD_DEFS.slice(0, 30))));
+    expect(api.readDurableBoard()).toBeNull();
+
+    api.refreshBoardCache();
+
+    expect(JSON.parse(api.readDurableBoard()).count).toBe(30); // exactly the floor
+    expect(api.handleDiag().last_validation).toMatchObject({ ok: true, reasons: [], suspects: [] });
+    expect(props.has('veggie_last_refresh_fail')).toBe(false);
+  });
+
+  it('treats a torn stored board as no board rather than failing the refresh', () => {
+    const { api, props } = loadBackend({}, moaByDate(rootRows(GUARD_DEFS.slice(0, 30))));
+    props.set('veggie_board_v2_chunks', '2');
+    props.set('veggie_board_v2_chunk_0', '{"type":"board","items":[');
+
+    api.refreshBoardCache();
+
+    expect(JSON.parse(api.readDurableBoard()).count).toBe(30);
+    expect(props.has('veggie_last_refresh_fail')).toBe(false);
+  });
+
+  it('reduces an implausible failure to a category for anonymous diag callers', () => {
+    const { api } = loadBackend();
+    expect(api.redactFailure('2026-09-02T00:10:00.000Z implausible: count 40 < 60% of previous 94'))
+      .toBe('2026-09-02T00:10:00.000Z implausible');
   });
 });
