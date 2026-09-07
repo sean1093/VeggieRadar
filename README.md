@@ -381,10 +381,16 @@ Three reasons, none of which the client-side fallback could reach:
   that has already loaded the board once. The mirror is the last good board for
   *every* visitor, including a first-time one arriving while GAS is down.
 
-The mirror is fetched 20 minutes after the backend's 4-hourly refresh and
-published by the same build that ships the bundle, so it trails the backend by
-~20 minutes plus a build (~2 min). For a board of wholesale *closing* prices,
-published once a day after market close, that lag is invisible.
+The mirror is republished every two hours (plus on every code deploy), so it
+trails the backend by at most ~2 h and a build. Two hours rather than the
+backend's own four: the refresh trigger is installed by hand, so its phase is
+arbitrary, and a 4-hourly fetch that lands minutes *before* it lands there
+forever — mirroring a board already 4 h old. That is not a hypothetical; the
+probe (§8) opened `[prod-alert] mirror_stale` on a mirror 8.4 h old while GAS
+held one 0.4 h old, which is what set this cadence. Halving it keeps the mirror
+inside the client's 6 h authority window below whatever the trigger's phase
+is. For a board of wholesale *closing* prices, published once a day after
+market close, the remaining lag is invisible.
 
 **A mirror is a file, and a file cannot know it went stale.** The `stale: false`
 and `age_ms` inside it froze the moment it was written, so the client recomputes
@@ -991,11 +997,12 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   the default branch runs the tests, builds `frontend/` and publishes to Pages. In
   the repo, set **Settings → Pages → Source: GitHub Actions**. Live at
   `https://<user>.github.io/VeggieRadar/` (`vite.config.ts` `base` is `/VeggieRadar/`).
-  It also runs on `schedule: '20 */4 * * *'`, because the static board mirror
-  (§2) is only as fresh as the last deploy: 20 minutes past the hour catches a
-  board the backend's own 4-hourly trigger has already rebuilt rather than the
-  one being replaced. Six extra deploys a day sits far below Pages' soft limit
-  of ten per hour, and `concurrency: pages` still keeps one deploy at a time.
+  It also runs on `schedule: '20 */2 * * *'`, because the static board mirror
+  (§2) is only as fresh as the last deploy — and the backend's refresh trigger
+  is installed by hand, so a fetch on the *same* 4-hourly period can sit
+  permanently on the wrong side of it. Twelve deploys a day sits far below
+  Pages' soft limit of ten per hour, and `concurrency: pages` still keeps one
+  deploy at a time.
   The **Fetch board mirror** step runs after the suite and before the build:
   it `curl`s `?action=board` (the URL read from the committed `frontend/.env`,
   so no secret), validates it with

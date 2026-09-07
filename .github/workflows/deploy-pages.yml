@@ -9,12 +9,18 @@ on:
       - 'frontend/**'
       - '.github/workflows/deploy-pages.yml'
   # The board mirror (README §2) is only as fresh as the last deploy, so the
-  # deploy runs on the backend's cadence: 20 minutes after the 4-hourly
-  # refresh trigger, late enough to fetch a board that has already been
-  # rebuilt rather than the one being replaced. Six extra deploys a day sits
-  # far below Pages' soft limit of 10 per hour.
+  # deploy also runs on a clock of its own.
   schedule:
-    - cron: '20 */4 * * *'
+    # Every two hours, not four. The backend's refresh trigger is installed by
+    # hand (`installDailyTrigger()`), so its 4-hourly phase is arbitrary: a
+    # 4-hourly fetch lands a fixed number of minutes before it forever and
+    # mirrors a board that is already ~4 h old. Production proved it — the
+    # probe opened issue #42 with a mirror 8.4 h old while GAS held one 0.4 h
+    # old. At this cadence the mirror trails the backend by at most ~2 h, which
+    # keeps it inside the client's 6 h authority window and the probe's 8 h
+    # bound whatever the trigger's phase. 12 Pages deploys a day, against a
+    # soft limit of 10 per hour.
+    - cron: '20 */2 * * *'
   workflow_dispatch:
 
 # Allow the workflow to publish to GitHub Pages.
