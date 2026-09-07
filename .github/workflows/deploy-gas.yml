@@ -22,7 +22,7 @@ jobs:
       DEPLOYMENT_ID: AKfycbyKixQhgD42GXjZePZB6P62_LXmNqKZ0vtepsu1wTvw9LZXwv3GAIRIa6c8Hqu92EcM
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
