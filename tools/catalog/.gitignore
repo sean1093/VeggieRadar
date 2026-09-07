@@ -1,0 +1,3 @@
+# Raw MOA responses, kept so a re-run of build-catalog costs no requests.
+# Derived and re-downloadable; ~1 MB per crawl.
+.cache/

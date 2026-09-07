@@ -142,6 +142,9 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'doGet', 'isAdmin', 'alertRecipient', 'redactFailure', 'ADMIN_TOKEN_PROP', 'ALERT_EMAIL_PROP',
     'validateBoard', 'markSuspects', 'readChunkedProp',
     'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
+    'normalizeQuery', 'searchTerms', 'catalogRoots', 'withinOneEdit', 'CROP_CATALOG', 'SEARCH_ALIASES',
+    'catalogUsable', 'CROP_CATALOG_CRAWLED_AT', 'CATALOG_MAX_AGE_DAYS', 'defsForRoot',
+    'SEARCH_MAX_ROOTS', 'SEARCH_MAX_SUGGESTIONS', 'SEARCH_CACHE_PREFIX',
   ];
   const merged: Record<string, unknown> = { ...services, ...overrides };
   const factory = new Function(
@@ -549,6 +552,23 @@ const rocDate = (daysAgo: number): string => {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear() - 1911}.${pad(d.getMonth() + 1)}.${pad(d.getDate())}`;
 };
+
+/**
+ * A `Date` the backend sees as a later day, for the one behaviour that is
+ * defined by the passage of months: the crop catalogue ageing out of the
+ * search gate. Injected as a parameter, which shadows the global inside the
+ * merged scope — the source never declares `Date` itself.
+ */
+const expiredClock = (at: number) =>
+  class FrozenDate extends Date {
+    constructor(...args: ConstructorParameters<typeof Date>) {
+      if (args.length === 0) super(at);
+      else super(...args);
+    }
+    static now() {
+      return at;
+    }
+  };
 
 const trendRow = (
   TransDate: string,
@@ -1981,5 +2001,222 @@ describe('refreshBoardCache — plausibility guard', () => {
     const { api } = loadBackend();
     expect(api.redactFailure('2026-09-02T00:10:00.000Z implausible: count 40 < 60% of previous 94'))
       .toBe('2026-09-02T00:10:00.000Z implausible');
+  });
+});
+
+
+/**
+ * The search index (#21). A query outside the board used to cost 8–31 s and
+ * two live MOA queries whether or not the crop could exist at all: 「iphone」
+ * and 「蓮子」 walked the same path. Three things are pinned here — that both
+ * ends normalise a query identically, that an impossible query costs nothing,
+ * and that a possible one costs one crawl per root per hour.
+ */
+describe('normalizeQuery — one contract, two implementations', () => {
+  // The very fixture `src/lib/normalizeQuery.test.ts` runs against the
+  // TypeScript implementation. Two implementations of one contract only stay
+  // in step if one set of cases judges both.
+  const FIXTURE = JSON.parse(
+    readFileSync(resolve(__dirname, '../shared/normalize-query.fixture.json'), 'utf8'),
+  ) as { in: string; out: string }[];
+  const { api } = loadBackend();
+
+  it.each(FIXTURE)('$in → $out', ({ in: input, out }) => {
+    expect(api.normalizeQuery(input)).toBe(out);
+  });
+
+  it('keeps the typed form beside the root, because they match different rows', () => {
+    expect(api.searchTerms('  ＴＯＭＡＴＯ ')).toEqual(['tomato', '番茄']);
+    expect(api.searchTerms('甘藍')).toEqual(['甘藍']);
+  });
+});
+
+describe('CROP_CATALOG', () => {
+  const { api } = loadBackend();
+
+  it('covers every board root, so the gate can never refuse a board item', () => {
+    const missing = (api.BOARD_ITEMS as { official: string }[])
+      .filter((def) => api.CROP_CATALOG.indexOf(def.official) === -1)
+      .map((def) => def.official);
+    expect(missing).toEqual([]);
+  });
+
+  it('holds every alias target, so no alias can resolve into a refusal', () => {
+    // An alias whose root is not in the catalogue is a silent dead end: the
+    // query resolves, the gate then says 查無此品項, and nothing fails until a
+    // shopper types it. Catches both a typo'd alias and a stale catalogue.
+    const targets = [...new Set(Object.values(api.SEARCH_ALIASES as Record<string, string>))];
+    expect(targets.filter((root) => api.CROP_CATALOG.indexOf(root) === -1)).toEqual([]);
+  });
+
+  it('is sorted, deduplicated and big enough to be a real index', () => {
+    // Sorted and unique because it is generated; a hand edit that breaks
+    // either is a sign the file was edited instead of re-crawled.
+    expect(api.CROP_CATALOG).toEqual([...api.CROP_CATALOG].sort());
+    expect(new Set(api.CROP_CATALOG).size).toBe(api.CROP_CATALOG.length);
+    // A complete crawl of the last 400 days sees 185 produce roots: the feed's
+    // ~600 daily crop names are mostly cut flowers (`N06`, excluded) and
+    // `<root>-<variety>` spellings of one root. The floor sits under that and
+    // far over what a truncated crawl yields (a single sampled day reaches
+    // ~120), so a half-finished refresh fails here without this test
+    // pretending to know next quarter's exact count.
+    expect(api.CROP_CATALOG.length).toBeGreaterThanOrEqual(150);
+  });
+});
+
+describe('handleSearch — the three steps', () => {
+  const board = () => ({
+    type: 'board',
+    date: '2026-09-02',
+    roc_date: rocDate(0),
+    generated_at: new Date().toISOString(),
+    count: 2,
+    items: [
+      { name: '高麗菜', official_name: '甘藍', category: '葉菜類', catty_price: 14, trade_volume: 570700 },
+      { name: '洋蔥', official_name: '洋蔥', category: '根莖類', catty_price: 12, trade_volume: 41635 },
+    ],
+  });
+
+  // Every one of these reached MOA before: the client could not resolve them
+  // and the backend only looked the raw string up on the board.
+  it.each([
+    ['cabbage', '甘藍'],
+    ['ＣＡＢＢＡＧＥ', '甘藍'],
+    ['高丽菜', '甘藍'],
+    ['高麗菜多少錢', '甘藍'],
+    ['蔥', '洋蔥'], // the typed term is kept beside its alias 青蔥, which alone would miss 洋蔥
+    ['onion', '洋蔥'],
+    ['洋葱', '洋蔥'],
+  ])('answers %s from the board with zero MOA traffic', (query, official) => {
+    const { api, fetches } = loadBackend();
+    api.storeBoard(board());
+
+    const res = api.handleSearch({ query });
+    expect(res.type).toBe('search');
+    expect(res.items.map((it: { official_name: string }) => it.official_name)).toContain(official);
+    expect(fetches).toHaveLength(0);
+  });
+
+  it('refuses a query no catalogue root relates to, with zero MOA traffic', () => {
+    // This is where the 8–31 s went: gibberish, typos and non-produce
+    // searches all used to probe trading dates and run two live queries.
+    const { api, fetches } = loadBackend({ 甘藍: [row('甘藍-初秋', 20, 60000)] });
+    api.storeBoard(board());
+
+    for (const query of ['xyz', 'iphone', '哈哈哈哈']) {
+      const res = api.handleSearch({ query });
+      expect(res.error, query).toBe('查無此品項');
+      expect(res.suggestion, query).toMatch(/^試試：/);
+      const names = res.suggestion.replace('試試：', '').split('、');
+      expect(names.length, query).toBeLessThanOrEqual(api.SEARCH_MAX_SUGGESTIONS);
+    }
+    expect(fetches).toHaveLength(0);
+  });
+
+  it('offers roots one edit from a typo, and what is trading when nothing is close', () => {
+    const { api, fetches } = loadBackend();
+    // 高麗菜 is a board name, so a typo of a real ROOT is what exercises this.
+    const typo = api.handleSearch({ query: '甘籃' }); // 甘藍 with the wrong 藍
+    expect(typo.error).toBe('查無此品項');
+    const suggested = typo.suggestion.replace('試試：', '').split('、');
+    expect(suggested.length).toBeLessThanOrEqual(api.SEARCH_MAX_SUGGESTIONS);
+    for (const name of suggested) expect(api.withinOneEdit(name, '甘籃'), name).toBe(true);
+
+    // Nothing is one edit from gibberish, so the offer becomes the board's
+    // biggest sellers — volume order, not definition order.
+    api.storeBoard(board());
+    expect(api.handleSearch({ query: 'iphone' }).suggestion).toBe('試試：高麗菜、洋蔥');
+    expect(fetches).toHaveLength(0);
+  });
+
+  it('measures one edit exactly, in either direction', () => {
+    const { api } = loadBackend();
+    expect(api.withinOneEdit('甘藍', '甘籃')).toBe(true); // substitution
+    expect(api.withinOneEdit('甘藍', '藍')).toBe(true); // deletion
+    expect(api.withinOneEdit('甘藍', '甘藍菜')).toBe(true); // insertion
+    expect(api.withinOneEdit('甘藍', '甘薯葉')).toBe(false);
+    expect(api.withinOneEdit('甘藍', '花椰菜')).toBe(false);
+  });
+
+  it('caps the fan-out, so a one-character query cannot crawl the whole feed', () => {
+    const { api } = loadBackend();
+    expect(api.catalogRoots(['菜']).length).toBeLessThanOrEqual(api.SEARCH_MAX_ROOTS);
+    expect(api.catalogRoots(['甘藍'])[0]).toBe('甘藍'); // an exact root always leads
+  });
+
+  it('runs a catalogue hit live once, then serves it from the cache', () => {
+    const officials = new Set((loadBackend().api.BOARD_ITEMS as { official: string }[]).map((d) => d.official));
+    const offBoard = (loadBackend().api.CROP_CATALOG as string[]).find((root) => !officials.has(root));
+    if (!offBoard) throw new Error('the catalogue holds nothing beyond the board');
+
+    const { api, fetches, cache } = loadBackend({
+      甘藍: [row('甘藍-初秋', 20, 60000)], // feeds the trading-date probe
+      [offBoard]: [row(`${offBoard}-一般`, 30, 5000)],
+    });
+    const first = api.handleSearch({ query: offBoard });
+    expect(first.items.map((it: { official_name: string }) => it.official_name)).toContain(offBoard);
+    const afterFirst = fetches.length;
+    expect(afterFirst).toBeGreaterThan(0);
+    expect([...cache.keys()].some((k) => k.startsWith(`${api.SEARCH_CACHE_PREFIX}${offBoard}_`))).toBe(true);
+
+    // Same query, same hour: the crawl is shared with every other visitor.
+    const second = api.handleSearch({ query: offBoard });
+    expect(second.items).toEqual(first.items);
+    expect(fetches).toHaveLength(afterFirst);
+  });
+
+  it('keys a cached answer by the trading date it describes', () => {
+    // A miss cached on Saturday must not answer Monday's question. The key
+    // carries the resolved trading date, so yesterday's payload is not a hit.
+    const { api, cache, fetches } = loadBackend({
+      甘藍: [row('甘藍-初秋', 20, 60000)], // moves the trading-date probe
+      蓮藕: [row('蓮藕-一般', 60, 5000)],
+    });
+    const yesterday = `${api.SEARCH_CACHE_PREFIX}蓮藕_${rocDate(1)}`;
+    cache.set(yesterday, JSON.stringify({ date: '2026-09-01', rows: 0, items: [] }));
+
+    const res = api.handleSearch({ query: '蓮藕' });
+
+    expect(res.items.map((it: { official_name: string }) => it.official_name)).toEqual(['蓮藕']);
+    expect(fetches.length).toBeGreaterThan(0);
+    expect([...cache.keys()]).toContain(`${api.SEARCH_CACHE_PREFIX}蓮藕_${rocDate(0)}`);
+    expect(cache.get(yesterday)).toContain('"rows":0'); // untouched, and unused
+  });
+
+  it('keeps the board’s variety guards on a live answer', () => {
+    // 青椒 and 甜椒 share the MOA root 甜椒 and are two board items split by
+    // `variety` / `excludes`. A live answer that skipped `selectRows` would
+    // report one blended average the board deliberately never shows.
+    const { api } = loadBackend({
+      甘藍: [row('甘藍-初秋', 20, 60000)],
+      甜椒: [row('甜椒-青椒', 30, 5000), row('甜椒-紅', 90, 5000), row('甜椒-黃', 100, 5000)],
+    });
+
+    const res = api.handleSearch({ query: '青椒' });
+    const priceByName: Record<string, number> = {};
+    for (const item of res.items as { name: string; avg_price: number }[]) priceByName[item.name] = item.avg_price;
+    expect(Object.keys(priceByName).sort()).toEqual(['甜椒', '青椒']);
+    expect(priceByName['青椒']).toBe(30); // only the 青椒 rows
+    expect(priceByName['甜椒']).toBe(95); // the other two, exactly as the board splits them
+  });
+
+  it('stops refusing once the catalogue is too old to be trusted', () => {
+    // The crawl samples 100 of 400 days, so a whole season can hide between
+    // two samples, and MOA does add roots. Inside the freshness window the
+    // gate is the feature; past it a list nobody re-crawled must not outlive
+    // the crops it forgot, so search falls back to the live query.
+    const { api } = loadBackend();
+    const crawled = Date.parse(api.CROP_CATALOG_CRAWLED_AT);
+    const day = 24 * 60 * 60 * 1000;
+    expect(api.catalogUsable(crawled + (api.CATALOG_MAX_AGE_DAYS - 1) * day)).toBe(true);
+    expect(api.catalogUsable(crawled + api.CATALOG_MAX_AGE_DAYS * day)).toBe(false);
+
+    const stale = loadBackend(
+      { 甘藍: [row('甘藍-初秋', 20, 60000)], 哈哈哈哈: [row('哈哈哈哈-一般', 40, 5000)] },
+      { Date: expiredClock(crawled + 400 * day) },
+    );
+    const res = stale.api.handleSearch({ query: '哈哈哈哈' });
+    expect(res.items.map((it: { official_name: string }) => it.official_name)).toEqual(['哈哈哈哈']);
+    expect(stale.fetches.length).toBeGreaterThan(0);
   });
 });

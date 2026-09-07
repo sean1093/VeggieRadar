@@ -7,11 +7,23 @@ import DetailDrawer from './components/DetailDrawer/DetailDrawer';
 import EmptyState from './components/EmptyState/EmptyState';
 import ErrorMessage from './components/ErrorMessage/ErrorMessage';
 import { boardItems, useBoard } from './hooks/useBoard';
-import { itemsFor, useSearch } from './hooks/useSearch';
+import { itemsFor, useSearch, type SearchStatus } from './hooks/useSearch';
 import { useBoardView } from './hooks/useBoardView';
 import { useWatchlist } from './hooks/useWatchlist';
 import type { ProduceItem } from './types/produce';
 import './App.css';
+
+/**
+ * What to offer when a query found nothing. The backend knows the crop
+ * catalogue, so its own line (「試試：」 plus roots one edit from the query, or
+ * the day's biggest sellers) beats the fixed trio this used to show; that trio
+ * survives only as the answer for an older deploy that sends no suggestion.
+ */
+function missSuggestion(query: string, status: SearchStatus): string {
+  if (!query) return '目前沒有菜價資料。';
+  const offered = status.kind === 'not_found' ? status.suggestion : undefined;
+  return `找不到「${query}」，${offered ?? '試試：高麗菜、番茄、蔥'}。`;
+}
 
 /**
  * Composition only. Three hooks own the state — the board lifecycle, the query,
@@ -22,7 +34,7 @@ import './App.css';
 function App() {
   const { status, freshness, reload } = useBoard();
   const board = boardItems(status);
-  const { query, status: searchStatus, search: runQuery, clear } = useSearch(board);
+  const { query, status: searchStatus, search: runQuery, preview, clear } = useSearch(board);
   const watchlist = useWatchlist();
   const view = useBoardView(itemsFor(searchStatus, board), watchlist, board);
   const searching = searchStatus.kind === 'searching';
@@ -36,7 +48,15 @@ function App() {
 
   return (
     <div className="min-h-[100dvh] bg-paper">
-      <Header onSearch={(q) => { view.applyQuery(q); runQuery(q); }} onClear={() => { view.applyQuery(''); clear(); }} searching={searching} />
+      {/* Typing filters the board locally (debounced, never a request); Enter
+          widens the board back to 全部, writes the query to the URL and asks
+          the backend. */}
+      <Header
+        onSearch={(q) => { view.applyQuery(q); runQuery(q); }}
+        onQueryChange={preview}
+        onClear={() => { view.applyQuery(''); clear(); }}
+        searching={searching}
+      />
 
       <main className="mx-auto max-w-2xl px-4 pb-[env(safe-area-inset-bottom)]">
         {status.kind === 'error' ? (
@@ -92,10 +112,7 @@ function App() {
               (view.activeFilter === 'watch' ? (
                 <EmptyState message="還沒有關注的品項" suggestion="點卡片左側的 ☆ 加入關注，方便每天追蹤。" />
               ) : (
-                <EmptyState
-                  message="查無此品項"
-                  suggestion={query ? `找不到「${query}」，試試：高麗菜、番茄、蔥。` : '目前沒有菜價資料。'}
-                />
+                <EmptyState message="查無此品項" suggestion={missSuggestion(query, searchStatus)} />
               ))}
 
             <p className="py-8 text-center text-xs text-stone">資料來源：農業部批發市場交易行情開放資料</p>

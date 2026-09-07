@@ -2,13 +2,24 @@ import React, { useState } from 'react';
 
 interface HeaderProps {
   onSearch: (query: string) => void;
+  /**
+   * Every keystroke, so the board can narrow locally while a word is still
+   * being typed. Optional: the box works exactly as before without it, and
+   * nothing here debounces — the hook owns that timing.
+   */
+  onQueryChange?: (query: string) => void;
   onClear?: () => void;
   /** A live query is in flight. Only the submit button waits for it. */
   searching?: boolean;
 }
 
-const Header: React.FC<HeaderProps> = ({ onSearch, onClear, searching = false }) => {
+const Header: React.FC<HeaderProps> = ({ onSearch, onQueryChange, onClear, searching = false }) => {
   const [value, setValue] = useState('');
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setValue(e.target.value);
+    onQueryChange?.(e.target.value);
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -33,7 +44,7 @@ const Header: React.FC<HeaderProps> = ({ onSearch, onClear, searching = false })
             type="search"
             inputMode="search"
             value={value}
-            onChange={(e) => setValue(e.target.value)}
+            onChange={handleChange}
             placeholder="搜尋蔬果（例如：高麗菜、番茄）"
             className="min-w-0 flex-1 bg-transparent py-2 text-base text-ink placeholder:text-stone outline-none"
           />

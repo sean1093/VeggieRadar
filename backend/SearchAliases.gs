@@ -1,0 +1,67 @@
+// GENERATED from shared/search-aliases.json — run `npm run sync-aliases` in tools/catalog.
+// Edit the JSON, never this file: the frontend imports the same JSON, and
+// frontend/repoHygiene.test.ts fails when the two drift apart.
+
+
+/**
+ * Search aliases → MOA root name (Chinese; the API only accepts Chinese).
+ * Covers common English and colloquial terms plus the many cases where the
+ * everyday name is not the MOA root name. Keys are already folded, so
+ * `normalizeQuery` can look one up directly.
+ */
+var SEARCH_ALIASES = {
+  'cabbage': '甘藍', 'napa cabbage': '包心白菜', 'bok choy': '小白菜', 'baby bok choy': '青江白菜',
+  'water spinach': '蕹菜', 'sweet potato leaf': '甘薯葉', 'spinach': '菠菜', 'lettuce': '萵苣菜',
+  'chinese kale': '芥藍菜', 'kale': '芥藍菜', 'amaranth': '莧菜', 'chrysanthemum greens': '茼蒿',
+  'mustard greens': '芥菜', 'chives': '韭菜', 'celery': '芹菜', 'cilantro': '芫荽', 'coriander': '芫荽',
+  'asparagus': '蘆筍', 'cauliflower': '花椰菜', 'broccoli': '花椰菜', 'daikon': '蘿蔔', 'radish': '蘿蔔',
+  'carrot': '胡蘿蔔', 'onion': '洋蔥', 'potato': '馬鈴薯', 'sweet potato': '甘薯', 'taro': '芋',
+  'yam': '薯蕷', 'burdock': '牛蒡', 'bamboo shoot': '竹筍', 'water bamboo': '茭白筍', 'lotus root': '蓮藕',
+  'jicama': '豆薯', 'tomato': '番茄', 'cherry tomato': '小番茄', 'eggplant': '茄子',
+  'green pepper': '甜椒', 'bell pepper': '甜椒', 'pepper': '甜椒', 'corn': '玉米', 'baby corn': '玉米',
+  'green bean': '敏豆', 'string bean': '敏豆', 'yard long bean': '菜豆', 'pea': '豌豆', 'okra': '秋葵',
+  'bitter gourd': '苦瓜', 'luffa': '絲瓜', 'cucumber': '花胡瓜', 'winter melon': '冬瓜', 'pumpkin': '南瓜',
+  'bottle gourd': '扁蒲', 'chayote': '隼人瓜', 'scallion': '青蔥', 'green onion': '青蔥',
+  'shallot': '青蔥', 'ginger': '薑', 'garlic': '大蒜', 'chili': '辣椒', 'chili pepper': '辣椒',
+  'thai basil': '九層塔', 'basil': '九層塔', 'shiitake': '濕香菇', 'mushroom': '濕香菇', 'enoki': '金絲菇',
+  'king oyster mushroom': '杏鮑菇', 'shimeji': '鴻喜菇', 'button mushroom': '洋菇',
+  'oyster mushroom': '秀珍菇', 'wood ear': '濕木耳', 'bean sprouts': '芽菜類', 'banana': '香蕉',
+  'apple': '蘋果', 'papaya': '木瓜', 'pineapple': '鳳梨', 'watermelon': '西瓜', 'melon': '甜瓜',
+  'cantaloupe': '洋香瓜', 'guava': '番石榴', 'dragon fruit': '紅龍果', 'grape': '葡萄', 'mango': '芒果',
+  'lychee': '荔枝', 'longan': '龍眼', 'pear': '梨', 'peach': '桃子', 'plum': '李', 'jujube': '棗子',
+  'persimmon': '柿子', 'wax apple': '蓮霧', 'sugar apple': '釋迦', 'custard apple': '釋迦',
+  'starfruit': '楊桃', 'passion fruit': '百香果', 'loquat': '枇杷', 'lemon': '雜柑', 'lime': '雜柑',
+  'orange': '甜橙', 'mandarin': '椪柑', 'pomelo': '柚子', 'grapefruit': '葡萄柚', 'avocado': '酪梨',
+  'kiwi': '奇異果', 'strawberry': '草莓', 'cherry': '櫻桃', 'blueberry': '藍莓', 'coconut': '椰子',
+  '高麗菜': '甘藍', '結球白菜': '包心白菜', '山東白菜': '包心白菜', '空心菜': '蕹菜', '青江菜': '青江白菜', '地瓜葉': '甘薯葉',
+  '番薯葉': '甘薯葉', '大陸妹': '萵苣菜', 'a菜': '萵苣菜', '油麥菜': '萵苣菜', '生菜': '萵苣菜', '芥蘭': '芥藍菜', '香菜': '芫荽',
+  '過溝菜': '蕨菜', '過貓': '蕨菜', '青花菜': '花椰菜', '花菜': '花椰菜', '綠花椰': '花椰菜', '紅蘿蔔': '胡蘿蔔', '白蘿蔔': '蘿蔔',
+  '菜頭': '蘿蔔', '地瓜': '甘薯', '番薯': '甘薯', '芋頭': '芋', '山藥': '薯蕷', '聖女番茄': '小番茄', '玉女番茄': '小番茄',
+  '小番茄': '小番茄', '青椒': '甜椒', '四季豆': '敏豆', '長豆': '菜豆', '豇豆': '菜豆', '甜豌豆': '豌豆', '荷蘭豆': '豌豆',
+  '大黃瓜': '胡瓜', '小黃瓜': '花胡瓜', '花胡瓜': '花胡瓜', '蒲瓜': '扁蒲', '瓠瓜': '扁蒲', '佛手瓜': '隼人瓜', '隼人瓜': '隼人瓜',
+  '蔥': '青蔥', '青蒜': '青蔥', '蒜頭': '大蒜', '香菇': '濕香菇', '金針菇': '金絲菇', '木耳': '濕木耳', '黑木耳': '濕木耳',
+  '豆芽': '芽菜類', '豆芽菜': '芽菜類', '綠豆芽': '芽菜類', '香瓜': '甜瓜', '美濃瓜': '甜瓜', '哈密瓜': '洋香瓜', '芭樂': '番石榴',
+  '火龍果': '紅龍果', '檸檬': '雜柑', '金桔': '雜柑', '柳丁': '甜橙', '柳橙': '甜橙', '文旦': '柚子', '柚子': '柚子',
+  '奇異果': '奇異果', '番荔枝': '釋迦'
+};
+
+/**
+ * Simplified → traditional, produce vocabulary only — no OpenCC, no full
+ * conversion table. Every key exists only in simplified Chinese, so the map
+ * cannot rewrite a query that was already Traditional.
+ */
+var SIMPLIFIED_TO_TRADITIONAL = {
+  '丽': '麗', '萝': '蘿', '卜': '蔔', '葱': '蔥', '姜': '薑', '笋': '筍', '莲': '蓮', '苹': '蘋', '芦': '蘆',
+  '苋': '莧', '叶': '葉', '荚': '莢', '药': '藥', '莴': '萵', '荠': '薺', '芜': '蕪', '苏': '蘇', '丝': '絲',
+  '蓣': '蕷', '榄': '欖', '柠': '檸', '樱': '櫻', '枣': '棗', '杨': '楊', '释': '釋', '雾': '霧', '异': '異',
+  '凤': '鳳', '龙': '龍', '红': '紅', '黄': '黃', '绿': '綠', '蓝': '藍', '针': '針', '鲍': '鮑', '鸿': '鴻',
+  '湿': '濕', '马': '馬', '铃': '鈴', '兰': '蘭', '长': '長', '头': '頭', '结': '結', '东': '東', '圣': '聖',
+  '陆': '陸', '麦': '麥', '杂': '雜', '类': '類', '层': '層', '过': '過', '沟': '溝', '浓': '濃', '产': '產',
+  '进': '進', '农': '農', '鲜': '鮮', '价': '價', '钱': '錢', '贵': '貴', '买': '買', '几': '幾', '块': '塊',
+  '场': '場'
+};
+
+/** Question suffixes 「高麗菜多少錢」 carries; stripped longest-first. */
+var QUERY_SUFFIXES = [
+  '菜價', '價格', '多少錢', '多少', '今天', '今日', '元'
+];

@@ -18,6 +18,7 @@ import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
+import { renderSearchAliases } from '../tools/catalog/src/render.ts';
 
 const repoRoot = resolve(__dirname, '..');
 
@@ -102,5 +103,29 @@ describe('credential hygiene', () => {
     const env = readFileSync(resolve(repoRoot, 'frontend/.env'), 'utf8');
     const keys = [...env.matchAll(/^\s*([A-Z0-9_]+)\s*=/gm)].map((m) => m[1]);
     expect(keys).toEqual(['VITE_API_BASE_URL']);
+  });
+});
+
+/**
+ * The search tables are generated (`tools/catalog`, README §7). The alias
+ * table in particular exists exactly once — in `shared/search-aliases.json`,
+ * which the frontend imports directly — because the previous copy inside
+ * `Config.gs` was invisible to the client, and 「onion」 therefore missed on
+ * the board and paid for a live MOA query for an item already on screen.
+ */
+describe('generated search tables', () => {
+  it('keeps SearchAliases.gs byte-identical to what the JSON renders', () => {
+    // Re-render rather than eyeball: a hand edit to the .gs would otherwise
+    // give the two ends different tables and no test would notice.
+    const spec = JSON.parse(readFileSync(resolve(repoRoot, 'shared/search-aliases.json'), 'utf8'));
+    expect(readFileSync(resolve(repoRoot, 'backend/SearchAliases.gs'), 'utf8')).toBe(renderSearchAliases(spec));
+  });
+
+  it('leaves no second copy of the alias table in Config.gs', () => {
+    expect(readFileSync(resolve(repoRoot, 'backend/Config.gs'), 'utf8')).not.toContain('SEARCH_ALIASES');
+  });
+
+  it('ignores the crawl cache, which is derived and re-downloadable', () => {
+    expect(isIgnored('tools/catalog/.cache/115.09.02_台北一.json')).toBe(true);
   });
 });
