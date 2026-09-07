@@ -875,7 +875,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-250 tests at ~97% statement / ~90% branch coverage. `vitest.config.ts` pins
+478 tests at ~98% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1100,16 +1100,24 @@ a dead pipeline serves a perfectly healthy-looking board.
 
 ## 9. Roadmap
 
-- Per-variety baselines. Today's baseline is blended across varieties (blend vs.
-  blend is self-consistent, and the median resists mix rotation), while the
-  variety breakdown is same-day only.
+The plan lives in [issue #24](https://github.com/sean1093/VeggieRadar/issues/24),
+which tracks every improvement with its rationale and order; this list is only
+what is still open there, so the two cannot drift.
+
+- **Long-term price history** ([#22](https://github.com/sean1093/VeggieRadar/issues/22)):
+  a Google Sheet as append-only storage, for 「比去年同期」 and per-variety
+  baselines. Today's history is capped at 28 trading days by the
+  ScriptProperties quota (§5), so both features need a bigger store first.
+- **Regional board** ([#23](https://github.com/sean1093/VeggieRadar/issues/23)):
+  north / central / south / east wholesale averages. Waiting on data, not on
+  code — if GA4's city dimension (§6) shows one region carrying most visits,
+  the cheaper change is to default to it rather than to build a switcher.
+- Per-region retail bands: the calibration feeds are Taichung + Taipei only, so
+  a southern band would be assumed precision (§4). Needs a third feed.
 - A rules-based 「今日推薦」 strip on top of the board — deliberately deferred
   until the 划算優先 sort proves the demand (`sort_changed`, §6).
-- ~~Recalibrate the retail markups periodically.~~ Done: `tools/calibrate` is
-  the pipeline and `.github/workflows/recalibrate.yml` runs it monthly, opening
-  a `data-quality` pull request when the fit moves (§4).
-- Per-region retail bands (the calibration feeds are Taichung + Taipei only).
-- Per-market / per-region filtering.
+- Per-item pre-rendered pages for LINE previews and search engines (OG tags,
+  JSON-LD `Product`), built from the static mirror (§2) at build time.
 - Line Bot lookups (`doPost` is reserved).
 
 ## License
