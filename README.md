@@ -85,7 +85,9 @@ Browser: localStorage (paints first) ──▶ data/board.json ──▶ GAS /ex
   open data, no API key. `https://data.moa.gov.tw/api/v1/AgriProductsTransType/`
   (ROC-calendar dates, e.g. `115.08.26`; prices in `元/公斤`).
 - **Backend (`backend/*.gs`):** one file per domain — `Config` (every tuneable
-  constant plus the board definition), `WebApp` (the `doGet` router),
+  constant plus the board definition), `RetailCalibration` (**generated** by
+  `tools/calibrate`: the three retail-markup tables and nothing else, §4),
+  `WebApp` (the `doGet` router),
   `Board`, `Aggregate`, `History`, `Alerts`, `Moa`, `Search`. Apps Script merges
   them into one global scope, so the split is organisational, not architectural;
   no ordering config is needed or used, because no top-level initialiser here
@@ -555,13 +557,13 @@ Everything is rounded outward to NT$5, because stalls price in round numbers and
 implying single-digit precision on an estimate would be dishonest. Board items
 on the coarse tier-3 fallback dropped from **72 of 104 to 50**.
 
-### Calibration and accuracy
+### Calibration: a pipeline, not a memory
 
-Markups are fitted by joining MOA wholesale to two municipal retail feeds:
+Markups are fitted offline by joining MOA wholesale to two municipal retail feeds:
 
 | Source | Granularity | Coverage |
 | --- | --- | --- |
-| [臺中市公有零售市場每日蔬果價格表](https://data.gov.tw/dataset/84539) | daily, 14 markets | 42 produce items, rolling 365 days (4,425 rows) |
+| [臺中市公有零售市場每日蔬果價格表](https://data.gov.tw/dataset/84539) | daily, 14 markets | 42 produce items, rolling 365 days |
 | [臺北市公有零售市場行情](https://data.taipei/dataset/detail?id=54d9d492-1e2e-40d1-ae7b-fbce6f271bf1) | monthly | 122 items × **18 monthly snapshots** |
 
 Both are keyless JSON quoting `元/台斤` — the same unit the app displays, so no
@@ -569,47 +571,53 @@ conversion is involved on the retail side. A survey for a third municipal feed
 found none: Kaohsiung, Tainan and New Taipei publish no retail produce series,
 and data.gov.tw's dataset search API is broken (405/404).
 
-**Tier 2 exists because the Taipei feed was under-used.** Only one of its 18
-monthly snapshots had ever been joined. Using all 18 gives paired observations
-for 64 crops — but the obvious next step, extending tier 1's rule to them, made
-accuracy *worse*, which is why the two tables have different shapes.
+**The fit lives in `tools/calibrate`, and the numbers it produces live in
+`backend/RetailCalibration.gs`.** That is the whole point of this section: the
+headline digits on every card used to come from a script nobody could re-run,
+so the accuracy claims underneath them could not be reproduced or improved —
+only trusted. Now `npm run calibrate` fetches, joins, fits, evaluates and
+writes both the `.gs` file and `tools/calibrate/report/<YYYY-MM>.md`; every
+download is cached, so a second run is offline. **The latest report, not this
+file, carries the current coverage, error and per-crop numbers** — see
+[`tools/calibrate/report/`](tools/calibrate/report/).
 
-Held-out accuracy on the crops tier 2 covers (most recent 20% of each crop's
-observations, fitted on the older 80% — 20 crops, 59 observations):
-
-| Rule | Band coverage | Median abs. error |
-| --- | --- | --- |
-| Category fallback (previous behaviour) | 79.7% | **17.3%** |
-| Per-crop midpoint with tier 1's `× 0.75 … × 1.35` band | 51.9% | 17.0% |
-| Per-crop `[p10, median, p90]` (**shipped**) | **81.4%** | **6.8%** |
-
-The midpoint's error falls by 61% and coverage improves slightly, so the
-drawer's 「機率約八成」 stays true for these crops too. Three constraints decide
-what is listed, each of them the result of a measurement that contradicted the
+The rules that decide what gets listed are functions with tests
+(`tools/calibrate/src/fit.ts`), each one a measurement that contradicted the
 obvious guess:
 
-1. **Quantiles, not a multiple of the midpoint.** Tier 1's fixed band applied
-   here *lost* coverage against the fallback it was meant to beat — the spread
-   is not proportional to the markup.
-2. **Taipei-derived crops only.** A crop with daily Taichung coverage has enough
-   observations for a tier-1-style fit and belongs in that pipeline. An earlier
-   cut mixed both sources and produced a flattering blended figure that hid a
-   coverage collapse on the Taichung side — 雜柑, 甜橙 and 海梨柑 are excluded
-   for this reason.
-3. **The band must be strictly tighter than the category band it replaces**,
-   or the per-crop number is less informative than the default. This excludes
-   竹筍, 蘆筍, 菠菜, 芹菜, 萵苣菜 and 李 — spread genuinely huge, usually because
-   one MOA root spans varieties trading far apart (綠竹筍 vs 麻竹筍, §5) — and
-   豌豆, 洋香瓜, whose fitted spread came out *exactly* as wide as their category.
+1. **Fewer than 8 paired observations → not listed.** 龍眼 and 枇杷 fail here;
+   their seasons are too short.
+2. **Quantiles, not a multiple of the midpoint,** for tier 2: tier 1's fixed
+   `× 0.75 … × 1.35` band applied to these crops *lost* coverage against the
+   fallback it was meant to beat — the spread is not proportional to the markup.
+3. **A tier-2 band must be strictly tighter than the category band it
+   replaces,** or the per-crop number is less informative than the default.
+   This is what excludes 竹筍 and 蘆筍: one MOA root spanning varieties that
+   trade far apart (綠竹筍 vs 麻竹筍, §5) is genuinely that wide.
+4. **Tier 2 is Taipei-derived only.** A crop with daily Taichung coverage has
+   enough observations for a tier-1-style fit and belongs in that pipeline;
+   mixing the sources produced a flattering blended figure that hid a coverage
+   collapse on the Taichung side.
+5. **The holdout is strictly later than the fit window** (per crop: oldest 80 %
+   fitted, newest 20 % evaluated). The previous constants were measured on a
+   window that overlapped their holdout, which flattered them; this is the
+   defect the pipeline exists to remove.
 
-龍眼 and 枇杷 are absent for a duller reason: 5 observations each, below the 8
-this needs. Their seasons are too short.
+**A refit is a proposal, never an automatic change.**
+`.github/workflows/recalibrate.yml` runs the pipeline on the 1st of each month
+and, when the generated file moves, opens a `data-quality` pull request whose
+body is the report summary (old vs new, the ten largest changes, the adoption
+gate). Nothing auto-merges: the card's big digits must not change because a
+cron job woke up and a municipality revised a month.
 
-The **tier-1 numbers are deliberately untouched.** The pipeline reproduces them
-to a median of NT$2 — a useful check that the join, units and dates line up —
-but they were fitted on a window that overlaps this holdout, so any comparison
-flatters them. Replacing working constants on a contaminated measurement would
-be a guess dressed as an improvement.
+The tables shipping today are still the **previously fitted** ones. The refit
+on data through 2026-09 reproduces tier 1 to a median of NT$3.5 and 14 of 17
+shipped tier-2 medians to within NT$2 — under the adoption gate of 17 of 17,
+so `--keep-shipped` was used: the report is committed, the numbers are not.
+What moved is worth reading rather than adopting blindly — the current window
+has no overlap with its holdout, and on it the tier-1-style band scores *above*
+the per-crop quantile band on coverage, which is the opposite of what the
+original cut measured.
 
 That residual error is why the UI shows a range rather than a single number, and
 why the drawer says 「非實際報價」. Both feeds are used *offline* to derive the
@@ -951,8 +959,9 @@ a dead pipeline serves a perfectly healthy-looking board.
   variety breakdown is same-day only.
 - A rules-based 「今日推薦」 strip on top of the board — deliberately deferred
   until the 划算優先 sort proves the demand (`sort_changed`, §6).
-- Recalibrate the retail markups periodically against the Taichung daily feed;
-  the current constants were fitted on data through 2026-08.
+- ~~Recalibrate the retail markups periodically.~~ Done: `tools/calibrate` is
+  the pipeline and `.github/workflows/recalibrate.yml` runs it monthly, opening
+  a `data-quality` pull request when the fit moves (§4).
 - Per-region retail bands (the calibration feeds are Taichung + Taipei only).
 - Per-market / per-region filtering.
 - Line Bot lookups (`doPost` is reserved).
