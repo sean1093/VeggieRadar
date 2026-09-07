@@ -1,0 +1,11 @@
+{
+  "name": "veggieradar-catalog",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Offline generators for the backend's search tables: the shared alias table and the MOA crop catalogue.",
+  "type": "module",
+  "scripts": {
+    "sync-aliases": "node --experimental-strip-types src/sync-aliases.ts",
+    "build-catalog": "node --experimental-strip-types src/build-catalog.ts"
+  }
+}

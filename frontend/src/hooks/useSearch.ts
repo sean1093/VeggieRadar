@@ -1,7 +1,8 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { searchProduce } from '../services/api';
 import { isApiError, type ProduceItem } from '../types/produce';
 import { track } from '../lib/analytics';
+import { searchTerms } from '../lib/normalizeQuery';
 
 /**
  * Where a query stands.
@@ -25,9 +26,18 @@ export type SearchStatus =
 export interface Search {
   query: string;
   status: SearchStatus;
+  /** Enter: the board first, then the backend if the board has no answer. */
   search: (query: string) => void;
+  /** Typing: a debounced local filter, which never costs a request. */
+  preview: (query: string) => void;
   clear: () => void;
 }
+
+/**
+ * How long the box may keep typing before the board narrows under it. Long
+ * enough that a whole word is one filter pass, short enough to read as live.
+ */
+const PREVIEW_DEBOUNCE_MS = 300;
 
 /**
  * Settled search states. A local hit is deliberately item-less here: its rows
@@ -47,12 +57,15 @@ const IDLE: Phase = { kind: 'idle' };
 const NO_ITEMS: ProduceItem[] = [];
 
 /**
- * The instant path's match rule: the display name case-insensitively (people
- * type English and lower case), the MOA official name as given.
+ * The instant path's match rule. `searchTerms` folds the query and adds the
+ * MOA root the alias table maps it to, so 「onion」, 「高丽菜」 and 「大白菜」
+ * match the board that is already on screen — each of them used to miss here
+ * and cost a live backend query for an item the shopper could see.
  */
 function matcher(query: string): (item: ProduceItem) => boolean {
-  const lower = query.toLowerCase();
-  return (item) => item.name.toLowerCase().includes(lower) || item.official_name.includes(query);
+  const terms = searchTerms(query);
+  return (item) =>
+    terms.some((term) => item.name.toLowerCase().includes(term) || item.official_name.includes(term));
 }
 
 /**
@@ -83,12 +96,19 @@ export function useSearch(board: ProduceItem[]): Search {
   // One ticket per search. A slower earlier query must not overwrite a newer
   // one, and `clear()` voids whatever is still in flight.
   const ticket = useRef(0);
+  // The pending debounced preview. Anything that settles the box — Enter, the
+  // clear button, unmount — must drop it, or a keystroke from before the
+  // submit lands afterwards and resets the answer to idle.
+  const previewTimer = useRef<number | undefined>(undefined);
+
+  useEffect(() => () => clearTimeout(previewTimer.current), []);
 
   const local = useMemo(() => (query ? board.filter(matcher(query)) : NO_ITEMS), [board, query]);
 
   const search = useCallback(
     async (raw: string) => {
       const q = raw.trim();
+      clearTimeout(previewTimer.current);
       const mine = ++ticket.current;
       setQuery(q);
       if (!q) {
@@ -127,7 +147,24 @@ export function useSearch(board: ProduceItem[]): Search {
     [board],
   );
 
+  /**
+   * What the box does while a word is still being typed: narrow the board
+   * locally, never send anything. A miss here is deliberately *not*
+   * 查無此品項 — mid-word we do not know, so the full board simply stays on
+   * screen and Enter is what asks the backend. No analytics either: an event
+   * per keystroke would drown the outcome rates in §6.
+   */
+  const preview = useCallback((raw: string) => {
+    clearTimeout(previewTimer.current);
+    previewTimer.current = setTimeout(() => {
+      ticket.current++; // whatever is in flight answers a query the box no longer holds
+      setQuery(raw.trim());
+      setPhase(IDLE);
+    }, PREVIEW_DEBOUNCE_MS);
+  }, []);
+
   const clear = useCallback(() => {
+    clearTimeout(previewTimer.current);
     ticket.current++;
     setQuery('');
     setPhase(IDLE);
@@ -144,5 +181,5 @@ export function useSearch(board: ProduceItem[]): Search {
     [phase, local],
   );
 
-  return { query, status, search, clear };
+  return { query, status, search, preview, clear };
 }

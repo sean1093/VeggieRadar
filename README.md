@@ -112,10 +112,10 @@ Browser: localStorage (paints first) ──▶ data/board.json ──▶ GAS /ex
     freezing the app on an old date. The threshold deliberately sits **above**
     the 4 h cadence plus the crawl: when the two were equal, a healthy board
     reported itself stale in the minutes before every scheduled run.
-  - `doGet?action=search&query=<name>` — filters the board, falling back to a live
-    query. Accepts Chinese and common English/colloquial terms via an alias table.
-    The trading-date probe is cached for an hour, so a burst of misses no longer
-    re-probes up to 16 dates each.
+  - `doGet?action=search&query=<name>` — the board, then a crop-name index,
+    then a live query; see "The search path" below. Accepts Traditional and
+    simplified Chinese, common English and colloquial terms, and price
+    questions like 「高麗菜多少錢」.
   - `doGet?action=getTrend&cropName=<name>&days=7` — **one** MOA range query
     (`days` clamped to 14), cached per crop per day and shared by every visitor,
     so drawer traffic stops scaling with users.
@@ -221,6 +221,68 @@ the board (including 高麗菜) without any error; and `writeChunkedProp()` spli
 the ~34 KB board — and the price history — across numbered `ScriptProperties`
 chunks, since a single property value is capped at 9 KB.
 
+### The search path: answer, refuse, or crawl
+
+Search is the one place a shopper can ask for something the board does not
+carry, and it used to treat every such ask the same way: probe the trading
+dates (up to 16 fetches), query MOA for today, query MOA for the previous day,
+then answer 「查無此品項」 — 8–31 s to say "that does not exist". 「iphone」 and
+「蓮子」 cost exactly the same.
+
+Three steps now, cheapest first:
+
+| Step | Cost | Ends here |
+| --- | --- | --- |
+| 1. The served board | a cache read | Most queries. The board carries ~90 items and is what people search for |
+| 2. The `CROP_CATALOG` gate | zero MOA traffic | Everything MOA has never published: typos, gibberish, non-produce, brand names |
+| 3. A live query per matching root | 1 crawl per root per hour, shared | Real crops outside the board (蓮子, 山蘇) |
+
+**Step 2 is the whole win.** `backend/CropCatalog.gs` lists every MOA root crop
+name that really traded in the last 400 days (~380 of them, generated — §7). If
+a query is a substring of no root, and no root is a substring of it, the crop
+cannot be in the feed, so the answer is immediate and free: 「查無此品項」 plus up
+to three suggestions — catalogue roots one edit away when the query looks like a
+typo (「甘籃」 → 甘藍), otherwise the board's biggest sellers. What survives the
+gate goes to at most `SEARCH_MAX_ROOTS` (3) live queries whose results are cached
+per root for an hour under `veggie_search_<root>_<date>`, the same policy the
+trend uses — so a burst of the same miss costs one crawl for everybody, and the
+cache key carries *today's* date so a warm answer needs no trading-date probe at
+all.
+
+**One query normaliser, two implementations, one fixture.**
+`normalizeQuery()` (in `backend/Search.gs` and `frontend/src/lib/normalizeQuery.ts`)
+folds a query — trim, full-width → half-width, collapse whitespace, lower-case —
+then de-simplifies it against a ~60-character produce table (簡體 丽/萝/葱/姜,
+not OpenCC and not a full conversion), strips price-question suffixes
+(「菜價」「多少錢」「今天」, longest first, repeatedly, never down to nothing) and
+finally resolves the alias table once. Alias resolution comes **last** so the
+output is the most MOA-resolvable form of the query: that is what lets
+「荷蘭豆多少錢」 reach 豌豆, and it makes the result independent of the script the
+shopper typed in — 「高丽菜」 and 「高麗菜」 both normalise to 甘藍. Both
+implementations are tested against the same
+`shared/normalize-query.fixture.json`, so they cannot drift.
+
+Matching keeps **both** the typed form and the alias target, because they find
+different rows: 「蔥」 is a board name of its own while its alias 青蔥 is the root
+behind 蔥 and 紅蔥頭 — resolving only to 青蔥 would lose 洋蔥, which a shopper
+typing 蔥 expects to see.
+
+**The alias table exists once.** It lived in `Config.gs`, where the client could
+not read it, so 「onion」 missed on the board and paid for a live query for an
+item that was on screen all along. `shared/search-aliases.json` is now the
+single source: the frontend imports it directly, Apps Script gets a generated
+`backend/SearchAliases.gs`, and `repoHygiene.test.ts` re-renders the generated
+file and fails on any drift. Its keys are stored already folded (lower-case,
+half-width) so a lookup is one map hit on both ends, and the whole table costs
+the client 4.1 kB raw / 2.3 kB gzip — measured, and cheaper than one avoided
+round trip.
+
+The client runs the same normaliser, so 「onion」, 「高丽菜」 and 「大白菜」 now hit
+the board with no request at all, and the search box narrows the board locally
+300 ms after the last keystroke (`useSearch.preview`). A keystroke never sends
+a request and never shows 「查無此品項」 — mid-word we do not know, so the board
+simply stays whole and Enter is what asks the backend.
+
 ### Plausibility guard
 
 `refreshBoardCache()` used to reject exactly one thing: an *empty* board.
@@ -273,7 +335,8 @@ Script entirely; these were the per-user actions:
 | Path | Before | Now |
 | --- | --- | --- |
 | Trend (one drawer open) | 7 sequential fetches + 480 ms of sleeps, 5–10 s holding an execution slot | 1 range query, then a shared cache: ~1 crawl per crop per hour for *all* users (1.3 s warm) |
-| Search miss | up to 16 probe fetches plus the queries | probe cached 1 h → 7.8 s warm instead of ~31 s |
+| Search, impossible query (typo, gibberish, non-produce) | 16 probe fetches + 2 live queries, 8–31 s | **0 fetches**, answered from `CROP_CATALOG` in milliseconds |
+| Search, real crop outside the board | the same 8–31 s, every time | 1 crawl per root per hour, shared by all users |
 | Board | one execution per visit, served from cache | **no execution at all** while the static mirror is fresh (below); GAS only for a stale or missing mirror |
 
 History writes (`updateHistory`, `backfillHistory`) run inside a `LockService`
@@ -471,10 +534,29 @@ board still renders (`board_schema_mismatch`, §6).
 ### Search
 ```
 GET {WEB_APP_URL}/exec?action=search&query=高麗菜
+→ { "type": "search", "query": "高麗菜", "date": "2026-09-02", "count": 1, "items": [ ... ] }
+
+GET {WEB_APP_URL}/exec?action=search&query=iphone
+→ { "type": "search", "query": "iphone", "error": "查無此品項", "suggestion": "試試：高麗菜、番茄、蔥" }
 ```
-Same `items` shape with `type: "search"`; no match returns `{ "error": "查無此品項" }`.
-A board hit answers with **zero** MOA traffic; only a genuine miss falls through
-to a live query.
+Same `items` shape as the board, with `type: "search"`. `query` echoes what was
+asked, not the normalised form — 「高丽菜」 comes back as typed.
+
+`suggestion` is a **string**, ready to render: 「試試：」 plus up to three names
+joined with 、. It carries catalogue roots one edit away when the query looks
+like a typo, and otherwise the board's biggest sellers (§2, "The search path").
+A string rather than a list because it is one line of UI, and because clients
+that already read `suggestion` keep working.
+
+The web client does not read it yet: its empty state offers a fixed trio built
+in `App.tsx`, and carrying the field through `searchProduce` is a small
+follow-up. The response is already the better answer for any client that does.
+
+A board hit and a gated miss both answer with **zero** MOA traffic; only a real
+crop outside the board falls through to a live query. Other errors:
+`請輸入查詢關鍵字` (empty query), `近期查無交易資料` (no trading date could be
+resolved) and `查無符合條件的品項（可能交易量過低）` (rows existed but every one
+was below `MIN_TRADE_VOLUME`).
 
 ### Trend
 ```
@@ -780,6 +862,45 @@ npm run test:coverage  # v8 coverage report
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
+
+### Generated search tables (`tools/catalog`)
+
+Two backend files are generated and must never be hand-edited:
+`backend/SearchAliases.gs` (from `shared/search-aliases.json`) and
+`backend/CropCatalog.gs` (from MOA). No runtime dependencies; Node strips the
+types.
+
+```bash
+cd tools/catalog
+npm run sync-aliases    # seconds — re-renders SearchAliases.gs from the JSON
+npm run build-catalog   # ~50 min, ~1800 MOA requests — re-crawls the crop catalogue
+```
+
+`sync-aliases` is what you run after editing an alias: the JSON is the single
+source (§2) and `frontend/repoHygiene.test.ts` fails while the generated copy
+lags behind it. Its output carries no timestamp, precisely so that re-rendering
+can be compared byte for byte.
+
+`build-catalog` is a **quarterly** job — new crops appear in the feed a few
+times a year, not weekly. It walks 100 sampled days × 14 wholesale markets:
+MOA's response caps near 1000 rows and ignores `Page`, so a whole day is
+unreachable, while adding `MarketName=` makes one day-market slice complete
+(~300 rows, `Next: false`). The stride is 4 days, never 7, because every market
+rests on fixed weekdays and a 7-day stride would sample one weekday for the
+whole window; 100 samples over 400 days is also what catches a crop whose
+entire season is three weeks long. Only transaction types `N04` (vegetables)
+and `N05` (fruit) are kept: `N06` is cut flowers, more than half of every day's
+rows, and letting 「火鶴花」 through the gate would answer it with a per-catty
+price and a retail band fitted on vegetables. Raw responses are cached under
+`tools/catalog/.cache/` (gitignored), so an interrupted crawl resumes for free,
+and `tools/catalog/last-seen.json` (committed) records the last month each root
+traded — that index is what lets a later run retire a root MOA stopped
+publishing 24 months ago instead of carrying it forever. Board roots are always
+included: the daily refresh already crawls them, so a crop whose three-week
+season fell between two samples must not be gated out of search.
+
+Both commands write into `backend/`, so review the diff and commit it with the
+change that motivated it.
 
 ### What is committed, and why it is safe
 

@@ -22,6 +22,18 @@ describe('Header', () => {
     expect(onSearch).toHaveBeenCalledWith('高麗菜');
   });
 
+  it('reports every keystroke untrimmed, so the board can narrow while typing', () => {
+    // Raw, and on every change: debouncing and trimming belong to the hook,
+    // which is what decides when a keystroke becomes a filter pass.
+    const onQueryChange = vi.fn();
+    render(<Header onSearch={vi.fn()} onQueryChange={onQueryChange} />);
+    const input = screen.getByPlaceholderText(/搜尋蔬果/);
+
+    fireEvent.change(input, { target: { value: '高' } });
+    fireEvent.change(input, { target: { value: '高麗 ' } });
+    expect(onQueryChange.mock.calls).toEqual([['高'], ['高麗 ']]);
+  });
+
   it('clears the field and notifies the parent via the × button', () => {
     const onClear = vi.fn();
     render(<Header onSearch={vi.fn()} onClear={onClear} />);
