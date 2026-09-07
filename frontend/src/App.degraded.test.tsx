@@ -55,6 +55,9 @@ const isMirror = (url: unknown) => String(url).includes('data/board.json');
 
 beforeEach(() => {
   localStorage.clear();
+  // The view lives in the URL now, so a leftover hash would carry one test's
+  // search or filter into the next.
+  window.history.replaceState(null, '', '/VeggieRadar/');
   vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 

@@ -58,6 +58,13 @@ actually being quoted when one crop trades at two very different prices.
   「目前連不上伺服器」 plus a retry, because stale prices beat a blank page in
   front of a stall. A busy backend during search says 「服務忙碌中」 — never
   「查無此品項」, which would be a lie about the produce rather than about us.
+- **Shareable.** Every screen is a URL. The item drawer, a search, the filter
+  and the sort all live in the hash (`#/i/高麗菜`, `#/?f=葉菜類&sort=value`),
+  because the way this board spreads is one shopper pasting today's price into
+  a LINE group — and a link that opens the home screen instead of that price is
+  not worth pasting. The drawer is a history entry too, so the Android back key
+  closes it rather than leaving the app; a link to a crop that is out of season
+  today says 「今日無交易資料」 and lands on the board instead of erroring.
 - **MUJI aesthetic.** Paper background, ink text, hairline dividers, generous
   whitespace, restrained type. No loud colour, no heavy shadows.
 
@@ -723,6 +730,7 @@ wrapper, `src/lib/analytics.ts`. Each event exists to settle a decision:
 | `filter_changed` | `filter` | Which categories and 關注 get used |
 | `watch_toggled` | `on`, `count_bucket` | Whether a watchlist summary is worth building |
 | `drawer_opened` | `has_varieties`, `has_baseline`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen |
+| `share` | `method` (`web_share` / `clipboard`), `has_retail` | Whether sharing earns the per-item preview pages (§9), and how much of it goes through the native sheet |
 | `trend_result` | `outcome` (`ok` / `empty` / `failed`), `reason` | Whether the trend deadline is right; memo hits are not reported |
 | `chunk_failed` | `chunk` | Cost of the code split |
 | `board_schema_mismatch` | `path` | Whether the backend's payload has drifted from the contract in §3 — a nonzero rate means some field is quietly missing from the UI while the board still renders |

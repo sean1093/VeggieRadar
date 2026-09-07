@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import Header from './components/Header/Header';
 import BoardCaption from './components/BoardCaption/BoardCaption';
 import ProduceList from './components/ProduceGrid/ProduceList';
@@ -13,38 +14,44 @@ import type { ProduceItem } from './types/produce';
 import './App.css';
 
 /**
- * Composition only. Three hooks own the state — the board lifecycle, the
- * query, and how the board is presented — and each exposes a discriminated
- * status, so this file never has to spell out which combination of booleans
- * means what.
+ * Composition only. Three hooks own the state — the board lifecycle, the query,
+ * and how the board is presented (which is also the URL, so a link restores the
+ * screen); each exposes a discriminated status, so no combination of booleans
+ * has to be spelled out here.
  */
 function App() {
   const { status, freshness, reload } = useBoard();
   const board = boardItems(status);
-  const search = useSearch(board);
+  const { query, status: searchStatus, search: runQuery, clear } = useSearch(board);
   const watchlist = useWatchlist();
-  const view = useBoardView(itemsFor(search.status, board), watchlist);
-  const searching = search.status.kind === 'searching';
+  const view = useBoardView(itemsFor(searchStatus, board), watchlist, board);
+  const searching = searchStatus.kind === 'searching';
   const toggleWatch = (item: ProduceItem) => watchlist.toggle(item.official_name);
+
+  // The URL's query runs itself — on a shared `?q=` and on back/forward alike —
+  // but not before there is a board to match against: the instant path needs it.
+  useEffect(() => {
+    if (board.length && view.linkedQuery !== query) runQuery(view.linkedQuery);
+  }, [board.length, view.linkedQuery, query, runQuery]);
 
   return (
     <div className="min-h-[100dvh] bg-paper">
-      {/* A new query widens the board back to 全部 before it runs. */}
-      <Header onSearch={(q) => { view.resetFilter(); search.search(q); }} onClear={search.clear} searching={searching} />
+      <Header onSearch={(q) => { view.applyQuery(q); runQuery(q); }} onClear={() => { view.applyQuery(''); clear(); }} searching={searching} />
 
       <main className="mx-auto max-w-2xl px-4 pb-[env(safe-area-inset-bottom)]">
         {status.kind === 'error' ? (
-          <ErrorMessage error={status.message} query={search.query} onRetry={reload} />
+          <ErrorMessage error={status.message} query={query} onRetry={reload} />
         ) : (
           <>
             <BoardCaption
-              title={search.query ? `搜尋「${search.query}」` : '今日菜價'}
+              title={query ? `搜尋「${query}」` : '今日菜價'}
               date={status.kind === 'loading' ? '' : status.board.date}
               freshness={freshness}
               degradedReason={status.kind === 'degraded' ? status.reason : null}
               onRetry={reload}
               searching={searching}
             />
+            {view.notice && <p role="status" className="-mt-4 pb-5 text-xs text-clay">{view.notice}</p>}
 
             {view.filterOptions.length > 1 && (
               <div className="pb-5">
@@ -75,25 +82,23 @@ function App() {
               />
             )}
 
-            {search.status.kind === 'transient' && (
-              <ErrorMessage error={search.status.message} query={search.query} onRetry={() => search.search(search.query)} />
+            {searchStatus.kind === 'transient' && (
+              <ErrorMessage error={searchStatus.message} query={query} onRetry={() => runQuery(query)} />
             )}
 
             {status.kind !== 'loading' &&
-              search.status.kind !== 'transient' &&
+              searchStatus.kind !== 'transient' &&
               view.visibleItems.length === 0 &&
               (view.activeFilter === 'watch' ? (
                 <EmptyState message="還沒有關注的品項" suggestion="點卡片左側的 ☆ 加入關注，方便每天追蹤。" />
               ) : (
                 <EmptyState
                   message="查無此品項"
-                  suggestion={search.query ? `找不到「${search.query}」，試試：高麗菜、番茄、蔥。` : '目前沒有菜價資料。'}
+                  suggestion={query ? `找不到「${query}」，試試：高麗菜、番茄、蔥。` : '目前沒有菜價資料。'}
                 />
               ))}
 
-            <p className="py-8 text-center text-xs text-stone">
-              資料來源：農業部批發市場交易行情開放資料
-            </p>
+            <p className="py-8 text-center text-xs text-stone">資料來源：農業部批發市場交易行情開放資料</p>
           </>
         )}
       </main>

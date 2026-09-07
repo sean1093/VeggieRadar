@@ -8,6 +8,7 @@ import {
 } from '@/components/ui/dialog';
 import type { ProduceItem } from '../../types/produce';
 import { fetchProduceTrend } from '../../services/api';
+import { itemUrl } from '../../lib/urlState';
 import { marketPrice } from '../../lib/utils/market-price';
 import { track } from '../../lib/analytics';
 
@@ -33,6 +34,29 @@ interface DetailDrawerProps {
   onToggleWatch?: (item: ProduceItem) => void;
 }
 
+/**
+ * The line a shopper pastes into a LINE group. Deliberately the card's own
+ * wording, because the message has to read as the numbers the reader will see
+ * when he opens the link. A suspect item (§2) shares its price and no change:
+ * the change is exactly the part the backend called untrustworthy.
+ */
+function shareText(item: ProduceItem): string {
+  const mid = marketPrice(item);
+  const price =
+    mid != null
+      ? `約 ${mid} 元/台斤（市場 ${item.retail_low}–${item.retail_high}・批發 ${item.catty_price.toFixed(1)}）`
+      : `批發 ${item.catty_price.toFixed(1)} 元/台斤（約 ${item.avg_price.toFixed(0)} 元/公斤）`;
+  let change = '';
+  if (item.suspect !== true) {
+    // A flat day carries no percentage: 「→ 持平 0.0%」 says the same thing twice.
+    change =
+      item.change_percent === 0
+        ? '→ 持平'
+        : `${item.change_percent < 0 ? '↓ 便宜了' : '↑ 變貴了'} ${Math.abs(item.change_percent).toFixed(1)}%`;
+  }
+  return `今日菜價｜${item.name} ${price}${change}`;
+}
+
 const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allProduceItems, watched = false, onToggleWatch }) => {
   // The crop whose trend the drawer shows, or null while closed. The trend is
   // stored together with the key it answers, so a new item or a reopen reads
@@ -46,6 +70,16 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
   // Wrapped in an object: a bare component in state would be mistaken for a
   // functional state updater.
   const [chart, setChart] = useState<{ Component: ChartComponent } | 'failed' | null>(null);
+
+  // Clipboard confirmation. Not a toast: one line next to the button is the
+  // whole message, and it clears itself because a permanent 已複製連結 would
+  // read as state rather than as the thing that just happened.
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
 
   // The backend's plausibility guard flagged today's observation (§2): the
   // price, the retail band and the varieties still stand — they are measured —
@@ -62,6 +96,31 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
     if (!trendKey) return;
     track('drawer_opened', { has_varieties: hasVarieties, has_baseline: hasBaseline, has_retail: hasRetail });
   }, [trendKey, hasVarieties, hasBaseline, hasRetail]);
+
+  // Phones hand the sentence to LINE through the native sheet; desktops, which
+  // have no sheet, get the link on the clipboard. Only the completed path is
+  // reported: a dismissed sheet is neither a share nor an error.
+  const share = async () => {
+    const url = itemUrl(item.name);
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: `今日菜價｜${item.name}`, text: shareText(item), url });
+      } catch {
+        return;
+      }
+      track('share', { method: 'web_share', has_retail: hasRetail });
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      // No clipboard (or permission refused): nothing was copied, so nothing
+      // is claimed. The link is still in the address bar.
+      return;
+    }
+    setCopied(true);
+    track('share', { method: 'clipboard', has_retail: hasRetail });
+  };
 
   useEffect(() => {
     if (!trendKey) return;
@@ -136,17 +195,28 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
         <DialogHeader className="text-left">
           <div className="flex items-start justify-between gap-3">
             <DialogTitle className="text-2xl font-semibold tracking-tight">{item.name}</DialogTitle>
-            {onToggleWatch && (
+            <div className="flex shrink-0 items-center gap-3">
+              {copied && <span role="status" className="text-xs text-sage">已複製連結</span>}
               <button
                 type="button"
-                onClick={() => onToggleWatch(item)}
-                aria-pressed={watched}
-                aria-label={watched ? `取消關注 ${item.name}` : `關注 ${item.name}`}
-                className={`-m-1 p-1 text-2xl leading-none transition-colors ${watched ? 'text-sage' : 'text-line hover:text-stone'}`}
+                onClick={share}
+                aria-label={`分享 ${item.name}`}
+                className="text-sm text-stone transition-colors hover:text-ink"
               >
-                {watched ? '★' : '☆'}
+                分享
               </button>
-            )}
+              {onToggleWatch && (
+                <button
+                  type="button"
+                  onClick={() => onToggleWatch(item)}
+                  aria-pressed={watched}
+                  aria-label={watched ? `取消關注 ${item.name}` : `關注 ${item.name}`}
+                  className={`-m-1 p-1 text-2xl leading-none transition-colors ${watched ? 'text-sage' : 'text-line hover:text-stone'}`}
+                >
+                  {watched ? '★' : '☆'}
+                </button>
+              )}
+            </div>
           </div>
           <DialogDescription className="text-sm text-stone">
             {item.category}
