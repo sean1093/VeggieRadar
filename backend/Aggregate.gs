@@ -118,13 +118,15 @@ function varietyBreakdown(def, rows, totalVolume) {
  * calibration available for the crop:
  *
  *   1. `RETAIL_MARKUP_ROOT`  — a fitted midpoint; the band is a fixed multiple
- *      of it. 30 crops, unchanged since they were first calibrated.
+ *      of it.
  *   2. `RETAIL_BAND_ROOT`    — a fitted [p10, median, p90] of the crop's own
- *      observed markup distribution. 24 crops that previously fell through to
- *      the category table, where the midpoint's median error was 18.8%; with
- *      their own band it is 7.6%. Assuming the spread is a fixed multiple of
- *      the midpoint is what made tier 1's rule unusable for them.
+ *      observed markup distribution. Assuming the spread is a fixed multiple of
+ *      the midpoint is what made tier 1's rule unusable for these crops.
  *   3. `RETAIL_MARKUP_CATEGORY` — the coarse fallback for everything else.
+ *
+ * All three live in `RetailCalibration.gs`, which `tools/calibrate` generates.
+ * Crop counts and held-out accuracy are NOT repeated here: they change with
+ * every refit and are reported in `tools/calibrate/report/` (see README §4).
  *
  * Rounded outward to the nearest NT$5 because stalls price in round numbers,
  * and because implying single-digit precision on an estimate would be dishonest.

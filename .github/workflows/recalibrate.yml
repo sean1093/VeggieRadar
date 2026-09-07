@@ -1,0 +1,114 @@
+name: Recalibrate retail markups
+
+# Monthly refit of the three retail-markup tables (README §4).
+#
+# The tables are the product's headline numbers, so this job never changes them
+# on its own: it runs `tools/calibrate`, and if the generated file or the report
+# moved it opens a pull request for a human to read. Auto-merge would mean the
+# card's big digits could change because a cron woke up and a municipal feed
+# revised a month — exactly the thing the report exists to let someone judge.
+#
+# The 1st of the month at 03:00 UTC (11:00 Taipei): data.taipei publishes the
+# previous month's snapshot in the first days of a month, and the run costs
+# ~3,700 MOA requests, so it happens once and off-peak.
+on:
+  schedule:
+    - cron: '0 3 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# A second refit while the first is still opening its PR would race on the same
+# branch name.
+concurrency:
+  group: recalibrate
+  cancel-in-progress: false
+
+jobs:
+  refit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/calibrate/package-lock.json
+
+      - name: Install dependencies
+        working-directory: tools/calibrate
+        run: npm ci
+
+      - name: Test the rules
+        working-directory: tools/calibrate
+        run: npm test
+
+      # No `continue-on-error`: a source that is down, throttled or has changed
+      # shape must fail the job. Emitting a table fitted on half the feeds would
+      # be worse than emitting nothing, and a failed run opens no PR.
+      - name: Refit
+        working-directory: tools/calibrate
+        run: npm run calibrate
+
+      - name: Read the report
+        id: report
+        run: |
+          month=$(sed -n '1s/.*data through \([0-9-]*\)\..*/\1/p' backend/RetailCalibration.gs)
+          if [ -z "$month" ]; then
+            echo "generated file has no 'data through <YYYY-MM>' header" >&2
+            exit 1
+          fi
+          echo "month=$month" >> "$GITHUB_OUTPUT"
+          {
+            echo 'summary<<PR_BODY_EOF'
+            echo "Refit of the retail-markup tables on data through **$month**."
+            echo
+            sed -n '/<!-- pr-summary:start -->/,/<!-- pr-summary:end -->/p' \
+              "tools/calibrate/report/$month.md" | sed '1d;$d'
+            echo
+            echo "Full report: \`tools/calibrate/report/$month.md\`."
+            echo
+            echo '**Nothing here is adopted by merging blindly.** Compare the'
+            echo 'reproduction section against the previous report before'
+            echo 'accepting new numbers; re-run with `--keep-shipped` to take'
+            echo 'the report without the values.'
+            echo 'PR_BODY_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Any change to propose?
+        id: diff
+        run: |
+          if git diff --quiet -- backend/RetailCalibration.gs tools/calibrate/report; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open a pull request
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          add-paths: |
+            backend/RetailCalibration.gs
+            tools/calibrate/report
+          branch: calibration/refit-${{ steps.report.outputs.month }}
+          delete-branch: true
+          commit-message: "calibration: refit on data through ${{ steps.report.outputs.month }} (#16)"
+          title: "calibration: refit on data through ${{ steps.report.outputs.month }}"
+          body: ${{ steps.report.outputs.summary }}
+          labels: data-quality
+
+      - name: Summarise
+        run: |
+          echo "### Recalibration — data through ${{ steps.report.outputs.month }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.diff.outputs.changed }}" = "true" ]; then
+            echo "Opened/updated \`calibration/refit-${{ steps.report.outputs.month }}\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No change to the generated tables or the report." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          cat "tools/calibrate/report/${{ steps.report.outputs.month }}.md" >> "$GITHUB_STEP_SUMMARY"

@@ -52,6 +52,10 @@ describe('credential hygiene', () => {
     'backend/.env',
     'node_modules/anything',
     'frontend/node_modules/anything',
+    // `tools/calibrate` is its own npm workspace and caches every municipal
+    // download it makes: megabytes of derived JSON that must never be staged.
+    'tools/calibrate/node_modules/anything',
+    'tools/calibrate/.cache/moa/0123456789abcdef.json',
   ];
 
   it.each(mustBeIgnored)('ignores %s', (path) => {

@@ -1,0 +1,17 @@
+{
+  "name": "veggieradar-calibrate",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Offline retail-markup calibration for VeggieRadar: joins municipal retail feeds to MOA wholesale and generates backend/RetailCalibration.gs",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "calibrate": "node --experimental-strip-types src/cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

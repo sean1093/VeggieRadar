@@ -22,7 +22,11 @@ gcp-sa-key.json
 node_modules/
 dist/
 
-# Scratch data for the offline retail calibration (derived, re-downloadable).
+# Raw downloads for the retail calibration (derived, re-downloadable). The tool
+# caches every response so a rerun costs no traffic; the cache is megabytes of
+# municipal JSON and has no business in review. `.calibration/` is the scratch
+# directory the pre-tools/ version of this fit used.
+tools/calibrate/.cache/
 .calibration/
 
 # The production probe's result file (§8 Monitoring), written wherever the
