@@ -109,32 +109,56 @@ function handleSearch(params) {
     }
   }
 
-  // 2. The gate.
+  // 2. The gate. It may refuse only while the index is young enough to be
+  //    trusted (see `catalogUsable`); a stale one falls through to step 3,
+  //    which is what search did before this index existed.
   var roots = catalogRoots(terms);
   if (!roots.length) {
-    return { type: 'search', query: query, error: '查無此品項', suggestion: suggestFor(terms, board) };
+    if (catalogUsable()) {
+      return { type: 'search', query: query, error: '查無此品項', suggestion: suggestFor(terms, board) };
+    }
+    roots = [terms[terms.length - 1]]; // the normalised query itself
   }
 
-  // 3. The live query, per surviving root.
+  // 3. The live query, per surviving root. The trading date is resolved once
+  //    here rather than inside the per-root cache: the payload a root is
+  //    cached under has to name the day it describes, or Saturday's 「查無」
+  //    answers Monday's question for another hour.
+  var dates = resolveTradeDates();
+  if (!dates.latest) return { type: 'search', query: query, error: '近期查無交易資料', items: [] };
+
   var items = [];
-  var date = null;
   var rows = 0;
   for (var i = 0; i < roots.length; i++) {
-    var live = liveRootCards(roots[i]);
-    if (!live) continue; // no trading date at all — nothing to serve or cache
-    if (!date) date = live.date;
+    var live = liveRootCards(roots[i], dates);
     rows += live.rows;
     for (var j = 0; j < live.items.length; j++) {
-      if (!hasOfficial(items, live.items[j].official_name)) items.push(live.items[j]);
+      if (!hasName(items, live.items[j].name)) items.push(live.items[j]);
     }
   }
-  if (!date) return { type: 'search', query: query, error: '近期查無交易資料', items: [] };
   if (!rows) return { type: 'search', query: query, error: '查無此品項', suggestion: suggestFor(terms, board) };
   if (!items.length) {
     return { type: 'search', query: query, error: '查無符合條件的品項（可能交易量過低）' };
   }
   items.sort(function (a, b) { return b.trade_volume - a.trade_volume; });
-  return { type: 'search', query: query, date: date, count: items.length, items: items };
+  return { type: 'search', query: query, date: rocToISO(dates.latest), count: items.length, items: items };
+}
+
+/**
+ * True while the generated index is young enough to refuse a query on.
+ *
+ * The crawl samples 100 days of the last 400, so a crop whose entire season
+ * falls between two samples can be missing, and MOA does add roots. Refusing
+ * on a fresh index is the point of this feature; refusing forever on an index
+ * nobody re-crawled would turn a performance win into a wrong answer that no
+ * deploy fixes. Past `CATALOG_MAX_AGE_DAYS` the gate opens and search costs
+ * what it always used to. `now` is a parameter so the boundary is testable
+ * without waiting six months for it.
+ */
+function catalogUsable(now) {
+  var crawled = Date.parse(CROP_CATALOG_CRAWLED_AT);
+  if (isNaN(crawled)) return false;
+  return (now || Date.now()) - crawled < CATALOG_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
 }
 
 /** A board row the query means: display name (case-insensitive) or MOA root. */
@@ -180,18 +204,17 @@ function catalogRoots(terms) {
 
 /**
  * One root's cards from a live MOA query, cached for an hour and shared by
- * every visitor — the same policy the trend uses. The key carries today's
- * date, not the trading date, so a warm cache answers without the
- * trading-date probe; the payload carries the trading date it was built from.
+ * every visitor — the same policy the trend uses.
+ *
+ * The key carries the TRADING date the payload describes, not today's date. A
+ * miss cached on a Saturday would otherwise keep answering 「查無此品項」 after
+ * Monday's prices published, for the rest of the hour.
  */
-function liveRootCards(root) {
+function liveRootCards(root, dates) {
   var cache = CacheService.getScriptCache();
-  var cacheKey = SEARCH_CACHE_PREFIX + root + '_' + dateToROC(new Date());
+  var cacheKey = SEARCH_CACHE_PREFIX + root + '_' + dates.latest;
   var hit = cache.get(cacheKey);
   if (hit) return JSON.parse(hit);
-
-  var dates = resolveTradeDates();
-  if (!dates.latest) return null; // never cache a failed probe
 
   var todayRows = tradedRows(fetchCrop(root, dates.latest));
   // A root that did not trade today needs no second query to prove it.
@@ -211,9 +234,15 @@ function liveRootCards(root) {
   for (var k = 0; k < order.length; k++) {
     var name = order[k];
     var prevForRoot = prevRows.filter(function (r) { return rowRoot(r.CropName) === name; });
-    var def = { name: name, official: name, category: categoryOf(name) };
-    var card = aggregateGroup(def, groups[name], prevForRoot);
-    if (card) items.push(card);
+    var defs = defsForRoot(name);
+    for (var d = 0; d < defs.length; d++) {
+      var def = defs[d];
+      // `selectRows` is what separates 青椒 from 甜椒 and keeps 蘿蔔 off
+      // 胡蘿蔔; a live search that skipped it would answer a filtered board
+      // item with the blended root the board deliberately never shows.
+      var card = aggregateGroup(def, selectRows(groups[name], def), selectRows(prevForRoot, def));
+      if (card) items.push(card);
+    }
   }
 
   var payload = { date: rocToISO(dates.latest), rows: todayRows.length, items: items };
@@ -221,9 +250,26 @@ function liveRootCards(root) {
   return payload;
 }
 
-function hasOfficial(items, officialName) {
+/**
+ * The definitions a live root should be aggregated under.
+ *
+ * A root the board defines is served exactly as the board serves it — one card
+ * per board item, variety guards included, so 甜椒 answers with 青椒 and 甜椒
+ * separately rather than with one average of both. A root the board does not
+ * define gets the bare root, which is all that is known about it.
+ */
+function defsForRoot(root) {
+  var defs = [];
+  for (var i = 0; i < BOARD_ITEMS.length; i++) {
+    if (BOARD_ITEMS[i].official === root) defs.push(BOARD_ITEMS[i]);
+  }
+  if (defs.length) return defs;
+  return [{ name: root, official: root, category: categoryOf(root) }];
+}
+
+function hasName(items, name) {
   for (var i = 0; i < items.length; i++) {
-    if (items[i].official_name === officialName) return true;
+    if (items[i].name === name) return true;
   }
   return false;
 }

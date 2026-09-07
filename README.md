@@ -238,16 +238,32 @@ Three steps now, cheapest first:
 | 3. A live query per matching root | 1 crawl per root per hour, shared | Real crops outside the board (蓮子, 山蘇) |
 
 **Step 2 is the whole win.** `backend/CropCatalog.gs` lists every MOA root crop
-name that really traded in the last 400 days (~380 of them, generated — §7). If
-a query is a substring of no root, and no root is a substring of it, the crop
-cannot be in the feed, so the answer is immediate and free: 「查無此品項」 plus up
-to three suggestions — catalogue roots one edit away when the query looks like a
-typo (「甘籃」 → 甘藍), otherwise the board's biggest sellers. What survives the
-gate goes to at most `SEARCH_MAX_ROOTS` (3) live queries whose results are cached
-per root for an hour under `veggie_search_<root>_<date>`, the same policy the
-trend uses — so a burst of the same miss costs one crawl for everybody, and the
-cache key carries *today's* date so a warm answer needs no trading-date probe at
-all.
+name that really traded in the last 400 days (185 of them, generated — §7;
+MOA's ~600 daily crop names are mostly cut flowers and `<root>-<variety>`
+spellings of one root). If a query is a substring of no root, and no root is a
+substring of it, the crop cannot be in the feed, so the answer is immediate and
+free: 「查無此品項」 plus up to three suggestions — catalogue roots one edit away
+when the query looks like a typo (「甘籃」 → 甘藍), otherwise the board's biggest
+sellers.
+
+**The gate expires.** The crawl samples 100 of those 400 days, so a crop whose
+entire season falls between two samples can be missing, and MOA does publish
+new roots. Refusing on a fresh index is the feature; refusing forever on an
+index nobody re-crawled would be a wrong answer no deploy fixes. So the
+generated file carries `CROP_CATALOG_CRAWLED_AT`, and past
+`CATALOG_MAX_AGE_DAYS` (180 — two quarters, so the quarterly refresh can slip
+once) the gate opens and a miss costs what it always used to: slower, never
+wrong.
+
+What survives the gate goes to at most `SEARCH_MAX_ROOTS` (3) live queries.
+Each root is aggregated under the **board's own definitions**, so a live answer
+for a root the board splits by variety (青椒 vs 甜椒, both root 甜椒) comes back
+split the same way instead of as one blended average the board never shows.
+Results are cached per root for an hour under
+`veggie_search_<root>_<trading date>`, the same policy the trend uses — so a
+burst of the same miss costs one crawl for everybody. The key carries the
+**trading date**, not today's: a miss cached on a Saturday would otherwise keep
+answering 「查無此品項」 for an hour after Monday's prices published.
 
 **One query normaliser, two implementations, one fixture.**
 `normalizeQuery()` (in `backend/Search.gs` and `frontend/src/lib/normalizeQuery.ts`)
@@ -548,9 +564,10 @@ like a typo, and otherwise the board's biggest sellers (§2, "The search path").
 A string rather than a list because it is one line of UI, and because clients
 that already read `suggestion` keep working.
 
-The web client does not read it yet: its empty state offers a fixed trio built
-in `App.tsx`, and carrying the field through `searchProduce` is a small
-follow-up. The response is already the better answer for any client that does.
+The web client renders it: `useSearch` keeps it on the `not_found` state and
+the empty state reads 「找不到「<query>」，試試：…」 with the backend's names. An
+older deploy that omits the field falls back to the fixed trio, which is why
+the field is optional in the type.
 
 A board hit and a gated miss both answer with **zero** MOA traffic; only a real
 crop outside the board falls through to a live query. Other errors:

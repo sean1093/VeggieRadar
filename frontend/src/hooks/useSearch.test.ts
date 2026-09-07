@@ -105,14 +105,16 @@ describe('useSearch', () => {
     expect(gtag).toHaveBeenCalledWith('event', 'search_result', { outcome: 'remote_hit', query_length: 3 });
   });
 
-  it('reports a definitive miss as not_found', async () => {
+  it('reports a definitive miss as not_found, carrying the backend’s suggestion', async () => {
     const gtag = vi.fn();
     vi.stubGlobal('gtag', gtag);
-    searchProduceMock.mockResolvedValue({ error: '查無此品項', items: [] });
+    // The backend knows the crop catalogue; its 「試試：…」 beats any fixed trio
+    // this hook could invent, so the line has to survive into the state.
+    searchProduceMock.mockResolvedValue({ error: '查無此品項', items: [], suggestion: '試試：甘藍、甘薯葉' });
     const { result } = renderHook(() => useSearch(BOARD));
 
     await act(async () => result.current.search('龍鬚菜'));
-    expect(result.current.status).toEqual({ kind: 'not_found' });
+    expect(result.current.status).toEqual({ kind: 'not_found', suggestion: '試試：甘藍、甘薯葉' });
     expect(gtag).toHaveBeenCalledWith('event', 'search_result', { outcome: 'not_found', query_length: 3 });
   });
 

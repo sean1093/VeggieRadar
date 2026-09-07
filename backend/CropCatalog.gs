@@ -24,3 +24,12 @@ var CROP_CATALOG = [
   '醃瓜', '釋迦', '金絲菇', '金針筍', '金針花', '隼人瓜', '雜柑', '雪里紅', '青江白菜', '青花苔', '青蔥', '韭菜', '香椿', '香瓜梨',
   '香茅', '香蕉', '馬鈴薯', '鳳梨', '鴻喜菇', '鵲豆', '鹹菜', '黃秋葵', '黃金果', '黑甜仔菜', '龍眼'
 ];
+
+/**
+ * When this index was crawled. The gate refuses a query only while the
+ * index is younger than `CATALOG_MAX_AGE_DAYS`: a list nobody refreshed
+ * must not become a permanent wall in front of a crop MOA started
+ * publishing since. Past that age the search falls through to the live
+ * query it used to always run — slower, but never wrong.
+ */
+var CROP_CATALOG_CRAWLED_AT = '2026-09-07';

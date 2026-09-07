@@ -143,6 +143,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'validateBoard', 'markSuspects', 'readChunkedProp',
     'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
     'normalizeQuery', 'searchTerms', 'catalogRoots', 'withinOneEdit', 'CROP_CATALOG', 'SEARCH_ALIASES',
+    'catalogUsable', 'CROP_CATALOG_CRAWLED_AT', 'CATALOG_MAX_AGE_DAYS', 'defsForRoot',
     'SEARCH_MAX_ROOTS', 'SEARCH_MAX_SUGGESTIONS', 'SEARCH_CACHE_PREFIX',
   ];
   const merged: Record<string, unknown> = { ...services, ...overrides };
@@ -551,6 +552,23 @@ const rocDate = (daysAgo: number): string => {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear() - 1911}.${pad(d.getMonth() + 1)}.${pad(d.getDate())}`;
 };
+
+/**
+ * A `Date` the backend sees as a later day, for the one behaviour that is
+ * defined by the passage of months: the crop catalogue ageing out of the
+ * search gate. Injected as a parameter, which shadows the global inside the
+ * merged scope — the source never declares `Date` itself.
+ */
+const expiredClock = (at: number) =>
+  class FrozenDate extends Date {
+    constructor(...args: ConstructorParameters<typeof Date>) {
+      if (args.length === 0) super(at);
+      else super(...args);
+    }
+    static now() {
+      return at;
+    }
+  };
 
 const trendRow = (
   TransDate: string,
@@ -2145,5 +2163,60 @@ describe('handleSearch — the three steps', () => {
     const second = api.handleSearch({ query: offBoard });
     expect(second.items).toEqual(first.items);
     expect(fetches).toHaveLength(afterFirst);
+  });
+
+  it('keys a cached answer by the trading date it describes', () => {
+    // A miss cached on Saturday must not answer Monday's question. The key
+    // carries the resolved trading date, so yesterday's payload is not a hit.
+    const { api, cache, fetches } = loadBackend({
+      甘藍: [row('甘藍-初秋', 20, 60000)], // moves the trading-date probe
+      蓮藕: [row('蓮藕-一般', 60, 5000)],
+    });
+    const yesterday = `${api.SEARCH_CACHE_PREFIX}蓮藕_${rocDate(1)}`;
+    cache.set(yesterday, JSON.stringify({ date: '2026-09-01', rows: 0, items: [] }));
+
+    const res = api.handleSearch({ query: '蓮藕' });
+
+    expect(res.items.map((it: { official_name: string }) => it.official_name)).toEqual(['蓮藕']);
+    expect(fetches.length).toBeGreaterThan(0);
+    expect([...cache.keys()]).toContain(`${api.SEARCH_CACHE_PREFIX}蓮藕_${rocDate(0)}`);
+    expect(cache.get(yesterday)).toContain('"rows":0'); // untouched, and unused
+  });
+
+  it('keeps the board’s variety guards on a live answer', () => {
+    // 青椒 and 甜椒 share the MOA root 甜椒 and are two board items split by
+    // `variety` / `excludes`. A live answer that skipped `selectRows` would
+    // report one blended average the board deliberately never shows.
+    const { api } = loadBackend({
+      甘藍: [row('甘藍-初秋', 20, 60000)],
+      甜椒: [row('甜椒-青椒', 30, 5000), row('甜椒-紅', 90, 5000), row('甜椒-黃', 100, 5000)],
+    });
+
+    const res = api.handleSearch({ query: '青椒' });
+    const priceByName: Record<string, number> = {};
+    for (const item of res.items as { name: string; avg_price: number }[]) priceByName[item.name] = item.avg_price;
+    expect(Object.keys(priceByName).sort()).toEqual(['甜椒', '青椒']);
+    expect(priceByName['青椒']).toBe(30); // only the 青椒 rows
+    expect(priceByName['甜椒']).toBe(95); // the other two, exactly as the board splits them
+  });
+
+  it('stops refusing once the catalogue is too old to be trusted', () => {
+    // The crawl samples 100 of 400 days, so a whole season can hide between
+    // two samples, and MOA does add roots. Inside the freshness window the
+    // gate is the feature; past it a list nobody re-crawled must not outlive
+    // the crops it forgot, so search falls back to the live query.
+    const { api } = loadBackend();
+    const crawled = Date.parse(api.CROP_CATALOG_CRAWLED_AT);
+    const day = 24 * 60 * 60 * 1000;
+    expect(api.catalogUsable(crawled + (api.CATALOG_MAX_AGE_DAYS - 1) * day)).toBe(true);
+    expect(api.catalogUsable(crawled + api.CATALOG_MAX_AGE_DAYS * day)).toBe(false);
+
+    const stale = loadBackend(
+      { 甘藍: [row('甘藍-初秋', 20, 60000)], 哈哈哈哈: [row('哈哈哈哈-一般', 40, 5000)] },
+      { Date: expiredClock(crawled + 400 * day) },
+    );
+    const res = stale.api.handleSearch({ query: '哈哈哈哈' });
+    expect(res.items.map((it: { official_name: string }) => it.official_name)).toEqual(['哈哈哈哈']);
+    expect(stale.fetches.length).toBeGreaterThan(0);
   });
 });

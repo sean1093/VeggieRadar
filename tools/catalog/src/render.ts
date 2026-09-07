@@ -120,5 +120,14 @@ export function renderCropCatalog(roots: string[], meta: { date: string; months:
     ...wrap(roots.map((root, i) => `${literal(root)}${i === roots.length - 1 ? '' : ','}`)),
     '];',
     '',
+    '/**',
+    ' * When this index was crawled. The gate refuses a query only while the',
+    ' * index is younger than `CATALOG_MAX_AGE_DAYS`: a list nobody refreshed',
+    ' * must not become a permanent wall in front of a crop MOA started',
+    ' * publishing since. Past that age the search falls through to the live',
+    ' * query it used to always run — slower, but never wrong.',
+    ' */',
+    "var CROP_CATALOG_CRAWLED_AT = '" + meta.date + "';",
+    '',
   ].join('\n');
 }

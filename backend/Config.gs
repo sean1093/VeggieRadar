@@ -59,6 +59,14 @@ var SEARCH_CACHE_PREFIX = 'veggie_search_';
 var SEARCH_CACHE_TTL = 60 * 60;  // seconds; same policy as the trend cache
 var SEARCH_MAX_ROOTS = 3;        // catalogue roots one query may fan out to
 var SEARCH_MAX_SUGGESTIONS = 3;  // 「試試：…」 alternatives offered on a miss
+// How long a generated `CROP_CATALOG` may be trusted to REFUSE a query. The
+// crawl samples 100 of the last 400 days, so a crop whose whole season falls
+// between two samples can be missing, and MOA does publish new roots. Inside
+// this window the gate is the feature; past it it opens and search costs what
+// it always used to — a list nobody re-crawled must not become a permanent
+// wall in front of a real crop. Two quarters, so the quarterly refresh
+// README §7 asks for can slip once without users noticing.
+var CATALOG_MAX_AGE_DAYS = 180;
 
 // Durable board storage. ScriptProperties caps a single value at 9 KB and the
 // board is ~34 KB, so it is written as numbered chunks.

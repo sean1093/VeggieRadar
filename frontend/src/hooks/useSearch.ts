@@ -19,7 +19,12 @@ export type SearchStatus =
   /** A live backend query is in flight; the board stays visible under it. */
   | { kind: 'searching' }
   | { kind: 'remote'; items: ProduceItem[] }
-  | { kind: 'not_found' }
+  /**
+   * The backend answered "no such produce". `suggestion` is the line it
+   * offers instead — catalogue roots one edit from the query, or the board's
+   * biggest sellers. Absent when the answer came from an older deploy.
+   */
+  | { kind: 'not_found'; suggestion?: string }
   /** Transport-level failure (busy backend, timeout) — a retry is worth offering. */
   | { kind: 'transient'; message: string };
 
@@ -50,7 +55,7 @@ type Phase =
   | { kind: 'local' }
   | { kind: 'searching' }
   | { kind: 'remote'; items: ProduceItem[] }
-  | { kind: 'not_found' }
+  | { kind: 'not_found'; suggestion?: string }
   | { kind: 'transient'; message: string };
 
 const IDLE: Phase = { kind: 'idle' };
@@ -133,8 +138,11 @@ export function useSearch(board: ProduceItem[]): Search {
 
       if (isApiError(res)) {
         // A busy backend is never presented as 查無此品項: that would lie about
-        // the produce rather than about us.
-        setPhase(res.transient ? { kind: 'transient', message: res.error } : { kind: 'not_found' });
+        // the produce rather than about us. A definitive miss carries the
+        // backend's own suggestion — it knows the catalogue, this hook does not.
+        setPhase(res.transient
+          ? { kind: 'transient', message: res.error }
+          : { kind: 'not_found', suggestion: res.suggestion });
         report(res.transient ? 'transient' : 'not_found');
       } else if (res.items.length) {
         setPhase({ kind: 'remote', items: res.items });
