@@ -13,7 +13,7 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadBackend, REPO_ROOT } from './backend.ts';
+import { loadBackend, loadCommittedBackend, REPO_ROOT } from './backend.ts';
 import { RETAIL_MARKUP_CATEGORY } from './category-bands.ts';
 import type { MarkupBand } from './category-bands.ts';
 import type { CropFit } from './fit.ts';
@@ -25,7 +25,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPORT_DIR = resolve(HERE, '../report');
 export const GENERATED_GS = resolve(REPO_ROOT, 'backend/RetailCalibration.gs');
 
-/** The tables as they exist in the backend right now, for the old-vs-new diff. */
+/** The tables as they are DEPLOYED (read from HEAD), for the old-vs-new diff. */
 export type ShippedTables = { markupRoot: Record<string, number>; bandRoot: Record<string, MarkupBand> };
 
 export type CropChange = {
@@ -49,9 +49,14 @@ export type EmitOptions = { keepShipped: boolean; generatedOn: string; dataThrou
 
 export type EmitResult = { gsPath: string; reportPath: string; reproduction: Reproduction; changes: CropChange[] };
 
-/** The live tables, read through the backend loader so there is no second copy. */
+/**
+ * The deployed tables, read through the backend loader so there is no second
+ * copy — and from the COMMITTED source, so a rerun in a tree this tool has
+ * already written to still compares against what is live. See
+ * `loadCommittedBackend`.
+ */
 export function shippedTables(): ShippedTables {
-  const backend = loadBackend();
+  const backend = loadCommittedBackend();
   const bandRoot: Record<string, MarkupBand> = {};
   for (const [root, band] of Object.entries(backend.RETAIL_BAND_ROOT)) {
     bandRoot[root] = [band[0], band[1], band[2]];

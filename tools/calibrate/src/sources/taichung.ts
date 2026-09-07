@@ -94,13 +94,34 @@ export type TaichungRow = Record<string, string>;
 /** One surveyed price: an ISO date, a MOA root, and 元/台斤. */
 export type RetailQuote = { date: string; root: string; item?: string; price: number };
 
+/**
+ * The whole daily feed: ~4,400 rows, one per (market, survey date).
+ *
+ * Completeness is checked INSIDE `accept`, before the body reaches the cache.
+ * A response that is truncated mid-stream, or answered short by a struggling
+ * server, is still valid-looking JSON: cached, it would freeze a thinner feed
+ * into every later run and quietly shift every fitted markup. So the retry
+ * decides on the parsed row count, and a body that stays short fails the run
+ * instead of being written to `.cache/`.
+ */
 export async function fetchTaichung(): Promise<TaichungRow[]> {
-  const body = await cachedText('taichung', TAICHUNG_URL, (text) => text.trimStart().startsWith('['));
-  const rows = JSON.parse(body) as TaichungRow[];
-  if (!Array.isArray(rows) || rows.length < 100) {
-    throw new Error(`Taichung feed returned ${Array.isArray(rows) ? rows.length : 'no'} rows`);
+  const body = await cachedText('taichung', TAICHUNG_URL, isCompleteTaichungBody);
+  return JSON.parse(body) as TaichungRow[];
+}
+
+/** A year of 14 markets is ~4,400 rows; half of that is not a feed, it is an accident. */
+export const TAICHUNG_MIN_ROWS = 2000;
+
+export function isCompleteTaichungBody(body: string): boolean {
+  let rows: unknown;
+  try {
+    rows = JSON.parse(body);
+  } catch {
+    return false; // truncated mid-stream
   }
-  return rows;
+  if (!Array.isArray(rows) || rows.length < TAICHUNG_MIN_ROWS) return false;
+  // Every row must carry the two keys the melt joins on, or the shape changed.
+  return rows.every((row) => !!row && typeof row === 'object' && DATE_KEY in row && MARKET_KEY in row);
 }
 
 /**

@@ -206,14 +206,36 @@ export function parseResources(html: string): MonthlyResource[] {
     .sort((a, b) => b.month.localeCompare(a.month));
 }
 
-/** One month's ~122 priced items, melted into quotes dated to the 1st of the month. */
+/**
+ * One month's ~122 priced items, melted into quotes dated to the 1st of the
+ * month. Completeness is decided INSIDE `accept`, before the cache is written:
+ * the API states how many rows the resource has, so a short answer is a
+ * measurable fact rather than a guess, and caching one would silently drop a
+ * month's worth of crops out of the fit.
+ */
 export async function fetchTaipeiMonth(resource: MonthlyResource): Promise<{ quotes: RetailQuote[]; items: string[] }> {
   const url = `https://data.taipei/api/v1/dataset/${resource.rid}?scope=resourceAquire&limit=1000`;
-  const body = await cachedText('taipei', url, (text) => text.includes('"results"'));
-  const payload = JSON.parse(body) as { result?: { count?: number; results?: Record<string, string>[] } };
-  const rows = payload.result?.results ?? [];
-  if (!rows.length) throw new Error(`Taipei resource ${resource.rid} (${resource.month}) returned no rows`);
+  const body = await cachedText('taipei', url, isCompleteTaipeiMonth);
+  const rows = JSON.parse(body).result.results as Record<string, string>[];
   return { quotes: meltTaipeiMonth(resource.month, rows), items: rows.map((r) => String(r[ITEM_KEY] ?? '')) };
+}
+
+/**
+ * True when the body carries every row the resource claims to have. `limit` is
+ * 1000 against ~122 rows, so `count` is never paged: `results.length < count`
+ * means the answer was cut short, not that a page is missing.
+ */
+export function isCompleteTaipeiMonth(body: string): boolean {
+  let payload: { result?: { count?: number; results?: unknown[] } };
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  const count = payload.result?.count;
+  const rows = payload.result?.results;
+  if (typeof count !== 'number' || count <= 0 || !Array.isArray(rows)) return false;
+  return rows.length >= count && rows.every((row) => !!row && typeof row === 'object' && ITEM_KEY in row);
 }
 
 export function meltTaipeiMonth(month: string, rows: Record<string, unknown>[]): RetailQuote[] {

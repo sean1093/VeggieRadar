@@ -8,11 +8,14 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { loadBackend, defForRoot } from '../src/backend.ts';
-import { COLUMN_TO_ROOT, IGNORED_COLUMNS, meltTaichung } from '../src/sources/taichung.ts';
+import {
+  COLUMN_TO_ROOT, IGNORED_COLUMNS, meltTaichung,
+  isCompleteTaichungBody, TAICHUNG_MIN_ROWS,
+} from '../src/sources/taichung.ts';
 import type { TaichungRow } from '../src/sources/taichung.ts';
 import {
   ITEM_TO_ROOT, IGNORED_ITEMS, DATASET_ID, MIN_RESOURCES,
-  meltTaipeiMonth, parseResources, unmappedItems, FIXTURE_PATH,
+  meltTaipeiMonth, parseResources, unmappedItems, FIXTURE_PATH, isCompleteTaipeiMonth,
 } from '../src/sources/taipei.ts';
 import type { MonthlyResource } from '../src/sources/taipei.ts';
 import { coverWindows, dailyWholesale } from '../src/sources/moa.ts';
@@ -41,6 +44,41 @@ describe('the backend loader', () => {
     // UrlFetchApp is stubbed to throw: the tool fetches with node's fetch and
     // must never accidentally drive the backend's own network path.
     expect(() => loadBackend().categoryOf('甘藍')).not.toThrow();
+  });
+});
+
+/**
+ * A short answer from either municipal feed is valid JSON, so nothing downstream
+ * can tell it from a real month with fewer items — and once cached it would
+ * shift every fitted markup for as long as the cache lives. Completeness is
+ * therefore decided before the body is written to `.cache/`.
+ */
+describe('the completeness guards that decide what may be cached', () => {
+  const taichungRow = (date: string) => ({ 市場名稱: '合作市場', 訪價日期: date, '甘藍（平地高麗菜）': '45' });
+  const taichungBody = (rows: number) =>
+    JSON.stringify(Array.from({ length: rows }, (_, i) => taichungRow(`2026090${i % 9}`)));
+
+  it('accepts a full Taichung feed and refuses a thin or truncated one', () => {
+    expect(isCompleteTaichungBody(taichungBody(TAICHUNG_MIN_ROWS))).toBe(true);
+    expect(isCompleteTaichungBody(taichungBody(TAICHUNG_MIN_ROWS - 1))).toBe(false);
+    // Cut mid-stream: still starts with `[`, which is all the old check asked.
+    expect(isCompleteTaichungBody(taichungBody(3000).slice(0, 5_000))).toBe(false);
+    expect(isCompleteTaichungBody('[]')).toBe(false);
+    // Shape change: the melt joins on these two columns.
+    expect(isCompleteTaichungBody(JSON.stringify(
+      Array.from({ length: TAICHUNG_MIN_ROWS }, () => ({ 市場: '合作市場', 日期: '20260901' })),
+    ))).toBe(false);
+  });
+
+  it('holds a Taipei month to the row count the API declares', () => {
+    const month = (count: number, rows: number) => JSON.stringify({
+      result: { count, results: Array.from({ length: rows }, () => ({ 項目: '蘿蔔', '平均（元/台斤）': '32' })) },
+    });
+    expect(isCompleteTaipeiMonth(month(122, 122))).toBe(true);
+    expect(isCompleteTaipeiMonth(month(122, 121))).toBe(false); // one row short of its own claim
+    expect(isCompleteTaipeiMonth(month(0, 0))).toBe(false);
+    expect(isCompleteTaipeiMonth('{"result":{"results":[]}}')).toBe(false); // no count to check against
+    expect(isCompleteTaipeiMonth(month(122, 122).slice(0, 60))).toBe(false);
   });
 });
 

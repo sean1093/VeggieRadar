@@ -21,7 +21,7 @@
 import { loadBackend } from './backend.ts';
 import { categoryBand } from './category-bands.ts';
 import type { MarkupBand } from './category-bands.ts';
-import { splitByTime, tier1Midpoint, tier2Band, hasEnoughObservations } from './fit.ts';
+import { splitByTime, tier1Midpoint, tier2Band, tierFor } from './fit.ts';
 import type { Observation } from './join.ts';
 
 export type RuleName = 'category' | 'tier1-style' | 'per-crop-quantile';
@@ -44,18 +44,21 @@ export type Holdout = {
 };
 
 /**
- * Scores the three rules on the crops tier 2 is *about*: Taipei-sourced crops
- * with enough observations to be listed at all. Tier-1 crops are excluded for
- * the same reason rule 3 excludes them from tier 2 — a daily crop's holdout
- * would dominate the average and answer a different question.
+ * Scores the three rules on the crops tier 2 is *about*: the roots `tierFor`
+ * assigns to tier 2 — Taipei-sourced, enough observations to be listed, and
+ * WITHOUT the daily Taichung coverage that makes a crop a tier-1 crop instead.
+ *
+ * Excluding tier-1 roots is the whole point of the population. They carry
+ * hundreds of daily observations each against tier 2's ~18 monthly ones, so
+ * leaving them in lets a handful of daily crops dominate every average and the
+ * table then answers "how do the rules do on 甘藍" rather than "which rule
+ * should serve the crops that have no daily feed" — the decision this table
+ * exists to make.
  */
 export function evaluateHoldout(observations: Observation[]): Holdout {
   const backend = loadBackend();
   const byRoot: Record<string, Observation[]> = {};
-  for (const observation of observations) {
-    if (observation.source !== 'taipei') continue;
-    (byRoot[observation.root] ??= []).push(observation);
-  }
+  for (const observation of observations) (byRoot[observation.root] ??= []).push(observation);
 
   const errors: Record<RuleName, number[]> = { 'category': [], 'tier1-style': [], 'per-crop-quantile': [] };
   const covered: Record<RuleName, number> = { 'category': 0, 'tier1-style': 0, 'per-crop-quantile': 0 };
@@ -63,8 +66,16 @@ export function evaluateHoldout(observations: Observation[]): Holdout {
   let evaluated = 0;
 
   for (const root of Object.keys(byRoot).sort()) {
-    const own = byRoot[root];
-    if (!hasEnoughObservations(own.length)) continue;
+    const all = byRoot[root];
+    const tier = tierFor({
+      taichung: all.filter((o) => o.source === 'taichung').length,
+      taipei: all.filter((o) => o.source === 'taipei').length,
+    });
+    if (tier !== 'tier2') continue;
+    // Tier 2 is fitted on the monthly source alone (rule 3), so it is measured
+    // on it too: scoring against Taichung days the table will never serve
+    // would report an accuracy the shipped rule does not have.
+    const own = all.filter((o) => o.source === 'taipei');
     const { fit, holdout } = splitByTime(own);
     if (!holdout.length || !fit.length) continue;
 

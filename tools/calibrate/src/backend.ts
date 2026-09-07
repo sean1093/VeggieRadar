@@ -13,6 +13,7 @@
  * helpers are pure, and a stub that quietly returned a plausible value would
  * hide a mistake instead of failing it.
  */
+import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -103,11 +104,54 @@ let cached: Backend | null = null;
 /** Loads (once) the merged backend scope and returns the helpers the tool needs. */
 export function loadBackend(): Backend {
   if (cached) return cached;
-  const files = readdirSync(BACKEND_DIR).filter((f) => f.endsWith('.gs')).sort();
-  const source = files.map((f) => readFileSync(resolve(BACKEND_DIR, f), 'utf8')).join('\n');
-  const factory = new Function(...Object.keys(SERVICES), `${source}\nreturn { ${EXPORTED.join(', ')} };`);
-  cached = factory(...Object.values(SERVICES)) as Backend;
+  cached = evaluateBackend(readBackendSources());
   return cached;
+}
+
+/**
+ * The backend as it is COMMITTED, not as it sits in the working tree.
+ *
+ * `RetailCalibration.gs` is this tool's own output, so a run that has already
+ * written it would otherwise read its own proposal back as the deployed
+ * baseline: the old-vs-new comparison would compare a proposal with itself,
+ * and `--keep-shipped` would freeze the proposal instead of preserving what is
+ * live. Reading the generated file out of `git show HEAD:` removes that
+ * ordering trap — a rerun is idempotent whatever is lying in the tree.
+ *
+ * When HEAD has no generated file (the commit that introduces this tool), the
+ * tables still live in `Config.gs`, so the working tree minus the generated
+ * file is exactly the deployed state.
+ */
+export function loadCommittedBackend(): Backend {
+  const sources = readBackendSources().filter((s) => s.name !== GENERATED_FILE);
+  const committed = gitShow(`HEAD:backend/${GENERATED_FILE}`);
+  if (committed !== null) sources.push({ name: GENERATED_FILE, source: committed });
+  return evaluateBackend(sources);
+}
+
+const GENERATED_FILE = 'RetailCalibration.gs';
+
+function readBackendSources(): { name: string; source: string }[] {
+  return readdirSync(BACKEND_DIR)
+    .filter((f) => f.endsWith('.gs'))
+    .sort()
+    .map((name) => ({ name, source: readFileSync(resolve(BACKEND_DIR, name), 'utf8') }));
+}
+
+/** Apps Script merges every file into one global scope; so does this. */
+function evaluateBackend(sources: { name: string; source: string }[]): Backend {
+  const merged = sources.map((s) => s.source).join('\n');
+  const factory = new Function(...Object.keys(SERVICES), `${merged}\nreturn { ${EXPORTED.join(', ')} };`);
+  return factory(...Object.values(SERVICES)) as Backend;
+}
+
+/** A committed file's content, or null when the path is not in that revision. */
+function gitShow(revPath: string): string | null {
+  try {
+    return execFileSync('git', ['show', revPath], { cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return null;
+  }
 }
 
 /**
