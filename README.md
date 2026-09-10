@@ -881,7 +881,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-478 tests at ~98% statement / ~93% branch coverage. `vitest.config.ts` pins
+490 tests at ~98% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1080,6 +1080,18 @@ publish at all, so degradation is reported while the board still works.
 today.** The trading date legitimately stands still over weekends, holidays and
 typhoon closures (§2, "Trading date vs. refresh time"), so a `date`-based check
 would page a human every Sunday and be ignored by the second one.
+
+**The two GAS checks retry; nothing else does** (`scripts/gas-retry.mjs`).
+Apps Script answers a cold start on `/exec` with a platform 404 HTML page, and
+an account near its quota queues a request until the deadline expires — the app
+itself makes three attempts for exactly this reason (§2). The probe made one,
+so two cold starts in two days opened two `prod-alert` issues that the next run
+closed again, with an e-mail each time. Reachability failures (a timeout, DNS,
+404, 5xx) are therefore retried up to 3 times with a 2 s then 4 s backoff, and
+the alert says `after 3 attempts` so a blip stays distinguishable from an
+outage. A **200 is never retried**, whatever its body: a stale board, a short
+count, schema drift or a platform HTML page is evidence that `doGet` answered,
+and a second attempt would only hide a real fault for a minute.
 
 A failing run comments on the open issue labelled **`prod-alert`**, and only
 opens `[prod-alert] <categories> since <date>` when there is none (creating the

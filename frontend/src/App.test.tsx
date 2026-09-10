@@ -162,7 +162,12 @@ describe('App — deep links', () => {
 
     expect(screen.getByRole('status')).toHaveTextContent('「龍鬚菜」今日無交易資料');
     expect(screen.queryByTestId('detail-drawer')).not.toBeInTheDocument();
-    expect(window.location.hash).toBe('#/');
+    // The sentence and the URL do NOT land together, by design: `useBoardView`
+    // sets the notice during render so the board never paints without it once,
+    // while putting the URL back on the board is an effect that same commit
+    // schedules. So the hash is a tick behind the sentence, and asserting it
+    // synchronously passed locally and failed on a loaded CI runner.
+    await waitFor(() => expect(window.location.hash).toBe('#/'));
   });
 
   it('runs a linked search once the board it matches against has landed', async () => {
