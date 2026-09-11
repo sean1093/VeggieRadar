@@ -61,6 +61,28 @@ function App() {
     if (view.linkedQuery !== query) runQuery(view.linkedQuery);
   }, [board.length, view.linkedQuery, query, runQuery]);
 
+  // …and the settled word goes back the other way. `query` only moves once the
+  // typing debounce has settled, so this publishes one word rather than one
+  // keystroke, and marking it adopted is what keeps the effect above from
+  // reading its own write as a link to re-run against the backend.
+  //
+  // Typing has to reach the URL, not just the box: the URL carries the filter
+  // too, so without this a word typed on the ★ 關注 tab was intersected with
+  // the watchlist and hid a crop that is on the board, and emptying the box
+  // with the keyboard left `?q=` behind for the next reload to restore.
+  const { applyQuery } = view;
+  useEffect(() => {
+    if (adoptedQuery.current === null) return; // nothing adopted yet: the board is still arriving
+    if (query === view.linkedQuery) return;
+    adoptedQuery.current = query;
+    applyQuery(query);
+  }, [query, view.linkedQuery, applyQuery]);
+
+  // A word still being typed that matches nothing leaves the whole board on
+  // screen on purpose — mid-word it is not a miss yet, only unfinished — so the
+  // caption must not announce a search the board does not show.
+  const narrowed = query !== '' && searchStatus.kind !== 'idle';
+
   return (
     <div className="min-h-[100dvh] bg-paper">
       {/* Typing filters the board locally (debounced, never a request); Enter
@@ -79,7 +101,7 @@ function App() {
         ) : (
           <>
             <BoardCaption
-              title={query ? `搜尋「${query}」` : '今日菜價'}
+              title={narrowed ? `搜尋「${query}」` : '今日菜價'}
               date={status.kind === 'loading' ? '' : status.board.date}
               freshness={freshness}
               degradedReason={status.kind === 'degraded' ? status.reason : null}
