@@ -13,7 +13,7 @@ interface ProduceListProps {
 const panelClass = 'mx-auto max-w-2xl bg-surface rounded-2xl border border-line overflow-hidden divide-y divide-line';
 
 const LoadingSkeleton: React.FC = () => (
-  <div className={panelClass}>
+  <div data-testid="produce-skeleton" className={panelClass}>
     {Array.from({ length: 8 }).map((_, i) => (
       <div key={i} className="px-5 py-4 flex items-center justify-between animate-pulse">
         <div className="space-y-2">

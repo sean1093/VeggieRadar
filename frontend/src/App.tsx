@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import Header from './components/Header/Header';
 import BoardCaption from './components/BoardCaption/BoardCaption';
 import ProduceList from './components/ProduceGrid/ProduceList';
@@ -42,8 +42,23 @@ function App() {
 
   // The URL's query runs itself — on a shared `?q=` and on back/forward alike —
   // but not before there is a board to match against: the instant path needs it.
+  //
+  // Keyed on the URL *changing*, never on the URL merely differing from the
+  // box. Typing updates the box without touching the URL, on purpose, so a
+  // difference is the normal state mid-word: re-running the URL's query on it
+  // undid every debounced keystroke, which left 「打字即時篩選」 inert, and
+  // after a submit it re-applied the previous query while the box showed the
+  // new one. Each distinct URL query is therefore adopted exactly once.
+  const adoptedQuery = useRef<string | null>(null);
   useEffect(() => {
-    if (board.length && view.linkedQuery !== query) runQuery(view.linkedQuery);
+    if (!board.length) return;
+    if (adoptedQuery.current === view.linkedQuery) return;
+    const firstAdoption = adoptedQuery.current === null;
+    adoptedQuery.current = view.linkedQuery;
+    // A first load carrying no `?q=` has nothing to restore, and running the
+    // empty query here would discard a word typed while the board arrived.
+    if (firstAdoption && !view.linkedQuery) return;
+    if (view.linkedQuery !== query) runQuery(view.linkedQuery);
   }, [board.length, view.linkedQuery, query, runQuery]);
 
   return (
@@ -91,7 +106,13 @@ function App() {
               </div>
             )}
 
-            {status.kind === 'loading' && <ProduceList items={[]} loading onCardClick={view.select} />}
+            {/* The skeleton stands in for rows that are not there yet, so it
+                must not sit above rows that are. The input is never disabled,
+                so a query submitted during the first paint can be answered
+                before the board itself arrives. */}
+            {status.kind === 'loading' && view.visibleItems.length === 0 && (
+              <ProduceList items={[]} loading onCardClick={view.select} />
+            )}
 
             {view.visibleItems.length > 0 && (
               <ProduceList

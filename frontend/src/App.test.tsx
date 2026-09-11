@@ -1,5 +1,5 @@
 import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import App from './App';
 import { parseUrlState } from './lib/urlState';
 
@@ -178,6 +178,58 @@ describe('App — deep links', () => {
     const list = screen.getByTestId('produce-list');
     expect(within(list).getByText('蔥')).toBeInTheDocument();
     expect(within(list).queryByText('高麗菜')).not.toBeInTheDocument();
+  });
+
+  it('keeps typing out of the URL, so a typed word is not undone by it', async () => {
+    // The regression this pins: the URL-sync effect fired on any difference
+    // between the box and the URL, and typing is exactly that difference — so
+    // every debounced keystroke was immediately reverted and the feature was
+    // inert in production while every test still passed.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<App />);
+      await screen.findByText('高麗菜');
+
+      fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '番茄' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
+
+      const list = screen.getByTestId('produce-list');
+      expect(within(list).getByText('番茄')).toBeInTheDocument();
+      expect(within(list).queryByText('高麗菜')).not.toBeInTheDocument();
+      // Typing narrows the board without publishing the word: the URL is what
+      // gets shared, and a half-typed crop is not something to share.
+      expect(parseUrlState(window.location.hash).query).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('follows the box when a submitted search is then edited', async () => {
+    // The worse half of the same bug: after a submit the URL held 番茄, so the
+    // next keystroke re-applied 番茄 while the box already read 高麗.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<App />);
+      await screen.findByText('高麗菜');
+
+      const box = screen.getByPlaceholderText(/搜尋蔬果/);
+      fireEvent.change(box, { target: { value: '番茄' } });
+      fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
+      await waitFor(() => expect(screen.getByText('搜尋「番茄」')).toBeInTheDocument());
+
+      fireEvent.change(box, { target: { value: '高麗' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
+
+      expect(screen.getByText('搜尋「高麗」')).toBeInTheDocument();
+      expect(within(screen.getByTestId('produce-list')).getByText('高麗菜')).toBeInTheDocument();
+      expect(screen.queryByText('搜尋「番茄」')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('restores a linked filter and order together', async () => {
