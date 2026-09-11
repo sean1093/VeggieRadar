@@ -37,11 +37,14 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BOARD_HEALTHY_ITEMS, boardMismatch } from '../src/types/board.schema.ts';
+import { attemptSuffix, withRetry } from './gas-retry.mjs';
 
 const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 // One deadline per request. Apps Script over quota *queues* requests instead
 // of failing fast, and a queued probe must not hold a scheduled job open.
+// The two GAS checks retry that deadline (`gas-retry.mjs`), because a single
+// timeout or cold-start 404 is a blip, not an outage.
 const TIMEOUT_MS = 20_000;
 // Two 4-hourly refresh cycles plus the crawl: one missed run is routine and
 // self-heals, two in a row is a pipeline that stopped.
@@ -110,6 +113,14 @@ async function get(url) {
     return { status: 0, body: '', error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) };
   }
 }
+
+/**
+ * The same request, but tolerant of Apps Script's two documented blips: a
+ * cold-start 404 and a queued request that times out. See `gas-retry.mjs` —
+ * one attempt per GAS check is what turned two cold starts into two
+ * self-closing prod-alert issues. Contract failures are never retried.
+ */
+const getGas = (url) => withRetry(get, url);
 
 const ok = (name, detail) => ({ name, status: 'ok', detail });
 const skipped = (name, detail) => ({ name, status: 'skipped', detail });
@@ -191,9 +202,9 @@ async function checkMirror() {
 async function checkGasBoard() {
   const name = 'gas_board';
   if (!API_BASE_URL) return failed(name, 'gas_error', 'no API base URL: set API_BASE_URL or VITE_API_BASE_URL');
-  const res = await get(`${API_BASE_URL}?action=board`);
-  if (res.error) return failed(name, 'gas_error', `request failed: ${res.error}`);
-  if (res.status !== 200) return failed(name, 'gas_error', `HTTP ${res.status}`, res.body);
+  const res = await getGas(`${API_BASE_URL}?action=board`);
+  if (res.error) return failed(name, 'gas_error', `request failed${attemptSuffix(res)}: ${res.error}`);
+  if (res.status !== 200) return failed(name, 'gas_error', `HTTP ${res.status}${attemptSuffix(res)}`, res.body);
 
   // Apps Script answers 200 with an HTML page for platform-level failures
   // (over quota, a deploy that never re-consented to its scopes), so the
@@ -234,9 +245,11 @@ async function checkDiag() {
   if (!API_BASE_URL) {
     return unavailable(failed(name, 'gas_error', 'no API base URL: set API_BASE_URL or VITE_API_BASE_URL'));
   }
-  const res = await get(`${API_BASE_URL}?action=diag`);
-  if (res.error) return unavailable(failed(name, 'gas_error', `request failed: ${res.error}`));
-  if (res.status !== 200) return unavailable(failed(name, 'gas_error', `HTTP ${res.status}`, res.body));
+  const res = await getGas(`${API_BASE_URL}?action=diag`);
+  if (res.error) return unavailable(failed(name, 'gas_error', `request failed${attemptSuffix(res)}: ${res.error}`));
+  if (res.status !== 200) {
+    return unavailable(failed(name, 'gas_error', `HTTP ${res.status}${attemptSuffix(res)}`, res.body));
+  }
 
   const parsed = parseObject(res.body);
   if (parsed.problem) {
