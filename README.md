@@ -65,6 +65,9 @@ actually being quoted when one crop trades at two very different prices.
   not worth pasting. The drawer is a history entry too, so the Android back key
   closes it rather than leaving the app; a link to a crop that is out of season
   today says 「今日無交易資料」 and lands on the board instead of erroring.
+  A typed word reaches the hash once its debounce settles — one word, not one
+  keystroke, and with `replaceState`, so the board you are looking at is always
+  the board your URL describes without typing filling up the back button.
 - **MUJI aesthetic.** Paper background, ink text, hairline dividers, generous
   whitespace, restrained type. No loud colour, no heavy shadows.
 
