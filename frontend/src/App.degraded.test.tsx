@@ -4,7 +4,7 @@
  * need `VITE_API_BASE_URL` stubbed before the module graph loads — the happy
  * path keeps running against the bundled mock board.
  */
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { BoardResponse } from './types/produce';
 
@@ -123,6 +123,52 @@ describe('App — backend unreachable', () => {
     expect(JSON.stringify(gtag.mock.calls)).not.toContain('龍鬚菜');
   });
 });
+describe('App — a search that outruns the board', () => {
+  it('never shows the skeleton above results that have already arrived', async () => {
+    // The input is deliberately never disabled, so a query can be submitted
+    // during the first paint and answered before the board itself lands. The
+    // skeleton stands in for rows that are missing; once real rows are on
+    // screen it is a second, fake panel above them.
+    const board = Promise.withResolvers<unknown>();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: unknown) => {
+        if (isMirror(url)) return NO_MIRROR;
+        if (String(url).includes('action=search')) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              JSON.stringify({
+                type: 'search',
+                query: '龍鬚菜',
+                date: '2026-09-01',
+                count: 1,
+                items: [{ ...CACHED_BOARD.items[0], code: 'LY1', name: '龍鬚菜', official_name: '龍鬚菜' }],
+              }),
+          };
+        }
+        return board.promise;
+      }),
+    );
+    const App = await loadApp();
+
+    render(<App />);
+    // Nothing on screen yet, so the skeleton is the right answer.
+    expect(await screen.findByTestId('produce-skeleton')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '龍鬚菜' } });
+    fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
+
+    const list = await screen.findByTestId('produce-list');
+    expect(within(list).getByText('龍鬚菜')).toBeInTheDocument();
+    expect(screen.queryByTestId('produce-skeleton')).not.toBeInTheDocument();
+
+    // Let the abandoned board request settle rather than leaving it pending.
+    board.resolve({ ok: true, status: 200, text: async () => JSON.stringify(CACHED_BOARD) });
+  });
+});
+
 describe('App — recovery via the banner retry', () => {
   it('replaces the cached board with fresh data after a successful retry', async () => {
     localStorage.setItem('veggieradar_last_board_v1', JSON.stringify(CACHED_BOARD));

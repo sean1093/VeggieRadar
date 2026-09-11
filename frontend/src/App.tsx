@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import Header from './components/Header/Header';
 import BoardCaption from './components/BoardCaption/BoardCaption';
 import ProduceList from './components/ProduceGrid/ProduceList';
@@ -42,9 +42,46 @@ function App() {
 
   // The URL's query runs itself — on a shared `?q=` and on back/forward alike —
   // but not before there is a board to match against: the instant path needs it.
+  //
+  // Keyed on the URL *changing*, never on the URL merely differing from the
+  // box. Typing updates the box without touching the URL, on purpose, so a
+  // difference is the normal state mid-word: re-running the URL's query on it
+  // undid every debounced keystroke, which left 「打字即時篩選」 inert, and
+  // after a submit it re-applied the previous query while the box showed the
+  // new one. Each distinct URL query is therefore adopted exactly once.
+  const adoptedQuery = useRef<string | null>(null);
   useEffect(() => {
-    if (board.length && view.linkedQuery !== query) runQuery(view.linkedQuery);
+    if (!board.length) return;
+    if (adoptedQuery.current === view.linkedQuery) return;
+    const firstAdoption = adoptedQuery.current === null;
+    adoptedQuery.current = view.linkedQuery;
+    // A first load carrying no `?q=` has nothing to restore, and running the
+    // empty query here would discard a word typed while the board arrived.
+    if (firstAdoption && !view.linkedQuery) return;
+    if (view.linkedQuery !== query) runQuery(view.linkedQuery);
   }, [board.length, view.linkedQuery, query, runQuery]);
+
+  // …and the settled word goes back the other way. `query` only moves once the
+  // typing debounce has settled, so this publishes one word rather than one
+  // keystroke, and marking it adopted is what keeps the effect above from
+  // reading its own write as a link to re-run against the backend.
+  //
+  // Typing has to reach the URL, not just the box: the URL carries the filter
+  // too, so without this a word typed on the ★ 關注 tab was intersected with
+  // the watchlist and hid a crop that is on the board, and emptying the box
+  // with the keyboard left `?q=` behind for the next reload to restore.
+  const { applyQuery } = view;
+  useEffect(() => {
+    if (adoptedQuery.current === null) return; // nothing adopted yet: the board is still arriving
+    if (query === view.linkedQuery) return;
+    adoptedQuery.current = query;
+    applyQuery(query);
+  }, [query, view.linkedQuery, applyQuery]);
+
+  // A word still being typed that matches nothing leaves the whole board on
+  // screen on purpose — mid-word it is not a miss yet, only unfinished — so the
+  // caption must not announce a search the board does not show.
+  const narrowed = query !== '' && searchStatus.kind !== 'idle';
 
   return (
     <div className="min-h-[100dvh] bg-paper">
@@ -64,7 +101,7 @@ function App() {
         ) : (
           <>
             <BoardCaption
-              title={query ? `搜尋「${query}」` : '今日菜價'}
+              title={narrowed ? `搜尋「${query}」` : '今日菜價'}
               date={status.kind === 'loading' ? '' : status.board.date}
               freshness={freshness}
               degradedReason={status.kind === 'degraded' ? status.reason : null}
@@ -91,7 +128,13 @@ function App() {
               </div>
             )}
 
-            {status.kind === 'loading' && <ProduceList items={[]} loading onCardClick={view.select} />}
+            {/* The skeleton stands in for rows that are not there yet, so it
+                must not sit above rows that are. The input is never disabled,
+                so a query submitted during the first paint can be answered
+                before the board itself arrives. */}
+            {status.kind === 'loading' && view.visibleItems.length === 0 && (
+              <ProduceList items={[]} loading onCardClick={view.select} />
+            )}
 
             {view.visibleItems.length > 0 && (
               <ProduceList

@@ -1,5 +1,5 @@
 import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import App from './App';
 import { parseUrlState } from './lib/urlState';
 
@@ -178,6 +178,128 @@ describe('App — deep links', () => {
     const list = screen.getByTestId('produce-list');
     expect(within(list).getByText('蔥')).toBeInTheDocument();
     expect(within(list).queryByText('高麗菜')).not.toBeInTheDocument();
+  });
+
+  it('narrows the board as you type, and publishes the settled word', async () => {
+    // The regression this pins: the URL-sync effect fired on any difference
+    // between the box and the URL, and typing is exactly that difference — so
+    // every debounced keystroke was immediately reverted and the feature was
+    // inert in production while every test still passed.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<App />);
+      await screen.findByText('高麗菜');
+
+      fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '番茄' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
+
+      const list = screen.getByTestId('produce-list');
+      expect(within(list).getByText('番茄')).toBeInTheDocument();
+      expect(within(list).queryByText('高麗菜')).not.toBeInTheDocument();
+      // The settled word reaches the URL — one word, not one keystroke — so a
+      // reload, a share and the filter all see the same board.
+      expect(parseUrlState(window.location.hash).query).toBe('番茄');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('widens the ★ tab when typing, instead of hiding a crop that is on the board', async () => {
+    // Enter resets the filter; typing has to agree, or a typed crop that is
+    // simply not on the watchlist reads as 還沒有關注的品項.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<App />);
+      await screen.findByText('高麗菜');
+      fireEvent.click(screen.getByRole('button', { name: '關注 高麗菜' }));
+      fireEvent.click(screen.getByRole('button', { name: /★ 關注/ }));
+      expect(screen.queryByText('番茄')).not.toBeInTheDocument();
+
+      fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '番茄' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
+
+      expect(within(screen.getByTestId('produce-list')).getByText('番茄')).toBeInTheDocument();
+      expect(screen.queryByText('還沒有關注的品項')).not.toBeInTheDocument();
+      expect(parseUrlState(window.location.hash).filter).toBe('all');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not announce a search while a half-typed word matches nothing', async () => {
+    // Mid-word a miss is not a miss yet, so the whole board stays on screen —
+    // and the caption must not claim a search that the board contradicts.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<App />);
+      await screen.findByText('高麗菜');
+
+      fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '龍鬚' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
+
+      expect(screen.getByText('今日菜價', { selector: 'h2' })).toBeInTheDocument();
+      expect(screen.queryByText('搜尋「龍鬚」')).not.toBeInTheDocument();
+      expect(screen.getByText('高麗菜')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears the URL query when the box is emptied from the keyboard', async () => {
+    // The × button already did this; emptying the box by hand used to leave
+    // `?q=` behind for the next reload or share to restore.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<App />);
+      await screen.findByText('高麗菜');
+
+      const box = screen.getByPlaceholderText(/搜尋蔬果/);
+      fireEvent.change(box, { target: { value: '番茄' } });
+      fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
+      await waitFor(() => expect(parseUrlState(window.location.hash).query).toBe('番茄'));
+
+      fireEvent.change(box, { target: { value: '' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
+
+      expect(parseUrlState(window.location.hash).query).toBe('');
+      expect(screen.getByText('高麗菜')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('follows the box when a submitted search is then edited', async () => {
+    // The worse half of the same bug: after a submit the URL held 番茄, so the
+    // next keystroke re-applied 番茄 while the box already read 高麗.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<App />);
+      await screen.findByText('高麗菜');
+
+      const box = screen.getByPlaceholderText(/搜尋蔬果/);
+      fireEvent.change(box, { target: { value: '番茄' } });
+      fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
+      await waitFor(() => expect(screen.getByText('搜尋「番茄」')).toBeInTheDocument());
+
+      fireEvent.change(box, { target: { value: '高麗' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
+
+      expect(screen.getByText('搜尋「高麗」')).toBeInTheDocument();
+      expect(within(screen.getByTestId('produce-list')).getByText('高麗菜')).toBeInTheDocument();
+      expect(screen.queryByText('搜尋「番茄」')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('restores a linked filter and order together', async () => {
