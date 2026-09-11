@@ -66,7 +66,7 @@ jobs:
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
 
       - name: Report and manage the prod-alert issue
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           RESULT_PATH: ${{ github.workspace }}/probe-result.json
           PROBE_EXIT_CODE: ${{ steps.probe.outputs.exit_code }}
