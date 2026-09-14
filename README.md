@@ -884,7 +884,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-496 tests at ~98% statement / ~93% branch coverage. `vitest.config.ts` pins
+504 tests at ~98% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1011,15 +1011,26 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   so no secret), validates it with
   `node --experimental-strip-types scripts/validate-board.mjs`, and copies it
   to `frontend/public/data/board.json` — which `frontend/.gitignore` covers,
-  since the file belongs in the artifact and not in the history. **The step
-  never fails the job**: a failed fetch or a rejected board re-publishes the
-  mirror already on Pages, and if that is missing too the site deploys without
-  one and the client goes straight to GAS. Every run records which of the three
-  happened in its step summary:
+  since the file belongs in the artifact and not in the history. Both the GAS
+  fetch and the fallback fetch of the published mirror go through
+  `scripts/fetch-retry.mjs`, which is the probe's own policy
+  (`scripts/gas-retry.mjs`, Monitoring): three attempts, 2 s then 4 s apart,
+  for a 404, a 5xx or a timeout, and never for a 200 — a bad body is the
+  validator's question, an empty one is refused outright. The Pages fetch runs
+  in `static` mode, where a 404 is the final answer ("nothing published") and
+  only a 5xx or a dead connection is retried. One attempt was how the mirror froze for a whole day
+  on 2026-09-13 (#53): Apps Script answered each 2-hourly fetch with its
+  cold-start 404 after queueing it for ~15 s, every run "succeeded" by
+  republishing the same 04:22 board, and GAS itself was healthy the entire
+  time. **The step never fails the job**: a failed fetch or a rejected board
+  re-publishes the mirror already on Pages, and if that is missing too the
+  site deploys without one and the client goes straight to GAS. Every run
+  records which of the three happened, with the attempt count, in its step
+  summary and in its log:
   ```
   mirror: fresh | reused (stale) | none
 
-  reason: board ok: 94 items, traded 2026-09-03, crawled 3.3 h ago
+  reason: board ok: 94 items, traded 2026-09-03, crawled 3.3 h ago (ok after 2 attempts)
   ```
 - **Backend → Apps Script** via `.github/workflows/deploy-gas.yml` (optional):
   otherwise deploy manually with `clasp` (§7). The workflow runs lint and the
@@ -1084,7 +1095,9 @@ today.** The trading date legitimately stands still over weekends, holidays and
 typhoon closures (§2, "Trading date vs. refresh time"), so a `date`-based check
 would page a human every Sunday and be ignored by the second one.
 
-**The two GAS checks retry; nothing else does** (`scripts/gas-retry.mjs`).
+**The two GAS checks retry, and so do the deploy's two mirror fetches (§8);
+nothing else does** — all through `scripts/gas-retry.mjs`, so there is one
+policy to tune.
 Apps Script answers a cold start on `/exec` with a platform 404 HTML page, and
 an account near its quota queues a request until the deadline expires — the app
 itself makes three attempts for exactly this reason (§2). The probe made one,

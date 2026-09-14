@@ -72,6 +72,19 @@ jobs:
         # falls back: first to the mirror already published (stale prices the
         # client will still send to GAS), then to no mirror at all (the client
         # goes straight to GAS, exactly as it did before this step existed).
+        #
+        # Both fetches go through `scripts/fetch-retry.mjs`, the probe's retry
+        # policy (`gas-retry.mjs`): three attempts, 2 s then 4 s apart, for a
+        # 404, a 5xx or a timeout; a 200 is never retried, whatever its body,
+        # because that is the validator's question (an empty one is refused). One attempt is how the
+        # mirror froze for a whole day on 2026-09-13 (#53): Apps Script
+        # answered each 2-hourly fetch with its cold-start 404 — after queueing
+        # the request for ~15 s — and every run "succeeded" by republishing the
+        # same 04:22 board while GAS itself was healthy throughout. The reuse
+        # fetch retries too: its failure mode is a site with no mirror at all,
+        # which is worse than a stale one.
+        env:
+          MIRROR_URL: https://sean1093.github.io/VeggieRadar/data/board.json
         run: |
           set -uo pipefail
           api_base="$(sed -n 's/^[[:space:]]*VITE_API_BASE_URL[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*$/\1/p' .env)"
@@ -81,14 +94,14 @@ jobs:
 
           if [ -z "$api_base" ]; then
             reason='VITE_API_BASE_URL missing from frontend/.env'
-          elif ! curl -fsSL --max-time 30 "${api_base}?action=board" -o /tmp/board.json; then
-            reason='GAS fetch failed (curl)'
+          elif ! fetched="$(node scripts/fetch-retry.mjs "${api_base}?action=board" /tmp/board.json)"; then
+            reason="GAS fetch failed: $fetched"
           elif ! verdict="$(node --experimental-strip-types scripts/validate-board.mjs /tmp/board.json 2>&1)"; then
             reason="$verdict"
           else
             cp /tmp/board.json public/data/board.json
             mirror=fresh
-            reason="$verdict"
+            reason="$verdict ($fetched)"
           fi
 
           if [ "$mirror" = none ]; then
@@ -96,15 +109,22 @@ jobs:
             # validated when it was written. It is deliberately NOT re-validated
             # here: it is reused *because* it is the best available, and its age
             # is the one thing this branch already knows is wrong.
-            if curl -fsSL --max-time 30 https://sean1093.github.io/VeggieRadar/data/board.json -o public/data/board.json; then
+            # `static`: on Pages a 404 means "nothing published", final — only
+            # a 5xx or a dead connection is retried, so the summary never
+            # reports a CDN blip that was really an absent file.
+            if reused="$(node scripts/fetch-retry.mjs "$MIRROR_URL" public/data/board.json static)"; then
               mirror='reused (stale)'
+              reason="$reason; reused the published mirror ($reused)"
             else
               rm -f public/data/board.json
-              reason="$reason; no published mirror to reuse — the client falls back to GAS"
+              reason="$reason; no published mirror to reuse ($reused) — the client falls back to GAS"
             fi
           fi
 
-          printf 'mirror: %s\n\nreason: %s\n' "$mirror" "$reason" >> "$GITHUB_STEP_SUMMARY"
+          # To the log as well as the step summary: the summary is not reachable
+          # through the API, and "which branch did this run take" is the first
+          # question when the mirror goes stale.
+          printf 'mirror: %s\n\nreason: %s\n' "$mirror" "$reason" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Build (embeds VITE_API_BASE_URL from frontend/.env)
         run: npm run build
