@@ -82,7 +82,7 @@ MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ CacheServic
                                                                       │
                                                             GET /exec │
                                                                       ▼
-Frontend (GitHub Pages) ◀── validate ◀── GitHub Actions (deploy-pages, cron :20 / 4 h)
+Frontend (GitHub Pages) ◀── validate ◀── GitHub Actions (deploy-pages, cron :20 / 2 h)
   data/board.json, published inside the bundle's own artifact
         │
         ▼
@@ -419,7 +419,7 @@ passes `frontend/scripts/validate-board.mjs` (the §3 contract, ≥ 60 items,
 crawled < 8 h ago, every item priced), and a failed fetch or a rejected board
 re-publishes the *previous* mirror rather than failing the deploy — a code
 change must not be blocked by a backend outage, and an unvalidated file would
-serve wrong prices for four hours (§8).
+serve wrong prices for two hours (§8).
 
 ### Alerting: a broken pipeline has to reach a human
 
@@ -884,7 +884,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-504 tests at ~98% statement / ~93% branch coverage. `vitest.config.ts` pins
+504 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1007,8 +1007,8 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   Pages' soft limit of ten per hour, and `concurrency: pages` still keeps one
   deploy at a time.
   The **Fetch board mirror** step runs after the suite and before the build:
-  it `curl`s `?action=board` (the URL read from the committed `frontend/.env`,
-  so no secret), validates it with
+  it fetches `?action=board` with `scripts/fetch-retry.mjs` (the URL read from
+  the committed `frontend/.env`, so no secret), validates it with
   `node --experimental-strip-types scripts/validate-board.mjs`, and copies it
   to `frontend/public/data/board.json` — which `frontend/.gitignore` covers,
   since the file belongs in the artifact and not in the history. Both the GAS
@@ -1055,7 +1055,7 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
     rotate it if the secret ever leaks.
 
 > A board rebuilt out of band — after `warm`, or after a backfill — reaches the
-> mirror only on the next scheduled deploy, up to four hours later. Running
+> mirror only on the next scheduled deploy, up to two hours later. Running
 > `deploy-pages` by `workflow_dispatch` refreshes it immediately; visitors see
 > the new prices either way, since a mirror older than 6 h sends the client to
 > GAS (§2).
