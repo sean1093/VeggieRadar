@@ -884,7 +884,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-500 tests at ~98% statement / ~93% branch coverage. `vitest.config.ts` pins
+504 tests at ~98% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1016,7 +1016,9 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   `scripts/fetch-retry.mjs`, which is the probe's own policy
   (`scripts/gas-retry.mjs`, Monitoring): three attempts, 2 s then 4 s apart,
   for a 404, a 5xx or a timeout, and never for a 200 — a bad body is the
-  validator's question. One attempt was how the mirror froze for a whole day
+  validator's question, an empty one is refused outright. The Pages fetch runs
+  in `static` mode, where a 404 is the final answer ("nothing published") and
+  only a 5xx or a dead connection is retried. One attempt was how the mirror froze for a whole day
   on 2026-09-13 (#53): Apps Script answered each 2-hourly fetch with its
   cold-start 404 after queueing it for ~15 s, every run "succeeded" by
   republishing the same 04:22 board, and GAS itself was healthy the entire

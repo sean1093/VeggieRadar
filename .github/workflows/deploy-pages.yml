@@ -76,7 +76,7 @@ jobs:
         # Both fetches go through `scripts/fetch-retry.mjs`, the probe's retry
         # policy (`gas-retry.mjs`): three attempts, 2 s then 4 s apart, for a
         # 404, a 5xx or a timeout; a 200 is never retried, whatever its body,
-        # because that is the validator's question. One attempt is how the
+        # because that is the validator's question (an empty one is refused). One attempt is how the
         # mirror froze for a whole day on 2026-09-13 (#53): Apps Script
         # answered each 2-hourly fetch with its cold-start 404 — after queueing
         # the request for ~15 s — and every run "succeeded" by republishing the
@@ -109,10 +109,10 @@ jobs:
             # validated when it was written. It is deliberately NOT re-validated
             # here: it is reused *because* it is the best available, and its age
             # is the one thing this branch already knows is wrong.
-            # `-s` is belt and braces: the fetch script's own exit code is the
-            # verdict, but a step that declares 'reused' must be able to show
-            # the file it reused.
-            if reused="$(node scripts/fetch-retry.mjs "$MIRROR_URL" public/data/board.json)" && [ -s public/data/board.json ]; then
+            # `static`: on Pages a 404 means "nothing published", final — only
+            # a 5xx or a dead connection is retried, so the summary never
+            # reports a CDN blip that was really an absent file.
+            if reused="$(node scripts/fetch-retry.mjs "$MIRROR_URL" public/data/board.json static)"; then
               mirror='reused (stale)'
               reason="$reason; reused the published mirror ($reused)"
             else

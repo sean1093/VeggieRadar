@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { attemptSuffix, isTransient, outcome, withRetry } from './gas-retry.mjs';
+import { attemptSuffix, isTransient, isTransientStatic, outcome, withRetry } from './gas-retry.mjs';
 
 /** `get()` in prod-probe.mjs never throws: a dead host comes back as data. */
 const res = (status, body = '{}') => ({ status, body });
@@ -33,8 +33,28 @@ describe('isTransient', () => {
   });
 });
 
+describe('isTransientStatic — a static host, where 404 is the answer', () => {
+  it('never retries a 404: on Pages it means nothing is published there', () => {
+    expect(isTransientStatic(res(404, 'Not Found'))).toBe(false);
+    expect(isTransientStatic(res(200))).toBe(false);
+  });
+
+  it('still retries what never reached the host, and the host falling over', () => {
+    expect(isTransientStatic(dead('TypeError: fetch failed'))).toBe(true);
+    expect(isTransientStatic(res(502))).toBe(true);
+    expect(isTransientStatic(undefined)).toBe(false);
+  });
+});
+
 describe('withRetry', () => {
   const sleep = () => Promise.resolve();
+
+  it('takes the transient predicate from the caller — one attempt for a Pages 404', async () => {
+    const get = vi.fn(async () => res(404, 'Not Found'));
+    const out = await withRetry(get, 'url', { sleep, transient: isTransientStatic });
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(out.attempts).toBe(1);
+  });
 
   it('returns a healthy answer on the first attempt without waiting', async () => {
     const get = vi.fn(async () => res(200, '{"type":"board"}'));
@@ -129,5 +149,9 @@ describe('outcome — what the deploy mirror step reads', () => {
   it('does not claim retries that never happened', () => {
     expect(outcome({ status: 403, body: '', attempts: 1 })).toEqual({ ok: false, reason: 'HTTP 403' });
     expect(outcome(undefined)).toEqual({ ok: false, reason: 'no response' });
+  });
+
+  it('refuses a 200 with nothing in it, so no shell-side size check has to contradict it', () => {
+    expect(outcome({ status: 200, body: '', attempts: 1 })).toEqual({ ok: false, reason: 'HTTP 200 with an empty body' });
   });
 });
