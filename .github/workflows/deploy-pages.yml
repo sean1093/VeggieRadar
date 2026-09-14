@@ -73,16 +73,18 @@ jobs:
         # client will still send to GAS), then to no mirror at all (the client
         # goes straight to GAS, exactly as it did before this step existed).
         #
-        # The GAS request RETRIES, on the same terms as the production probe
-        # (`scripts/gas-retry.mjs`): Apps Script answers a cold start with a
-        # 404 — after queueing the request for ~15 s, in practice — and one
-        # attempt at :20 past every other hour hit exactly that all day on
-        # 2026-09-13, so every run "succeeded" by republishing the same
-        # 04:22 board until the probe paged (#53). `--retry-all-errors` is
-        # what makes curl retry an HTTP error under `-f` (404, 5xx) as well as
-        # a timeout; a 200 is never an error, so a bad body still goes to the
-        # validator once and is judged, not retried. No `--retry-delay`, so
-        # curl backs off 1 s, 2 s, 4 s between the three retries.
+        # Both fetches go through `scripts/fetch-retry.mjs`, the probe's retry
+        # policy (`gas-retry.mjs`): three attempts, 2 s then 4 s apart, for a
+        # 404, a 5xx or a timeout; a 200 is never retried, whatever its body,
+        # because that is the validator's question. One attempt is how the
+        # mirror froze for a whole day on 2026-09-13 (#53): Apps Script
+        # answered each 2-hourly fetch with its cold-start 404 — after queueing
+        # the request for ~15 s — and every run "succeeded" by republishing the
+        # same 04:22 board while GAS itself was healthy throughout. The reuse
+        # fetch retries too: its failure mode is a site with no mirror at all,
+        # which is worse than a stale one.
+        env:
+          MIRROR_URL: https://sean1093.github.io/VeggieRadar/data/board.json
         run: |
           set -uo pipefail
           api_base="$(sed -n 's/^[[:space:]]*VITE_API_BASE_URL[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*$/\1/p' .env)"
@@ -92,15 +94,14 @@ jobs:
 
           if [ -z "$api_base" ]; then
             reason='VITE_API_BASE_URL missing from frontend/.env'
-          elif ! curl -fsSL --max-time 30 --retry 3 --retry-all-errors --retry-max-time 150 \
-                 "${api_base}?action=board" -o /tmp/board.json; then
-            reason='GAS fetch failed (curl, after 4 attempts)'
+          elif ! fetched="$(node scripts/fetch-retry.mjs "${api_base}?action=board" /tmp/board.json)"; then
+            reason="GAS fetch failed: $fetched"
           elif ! verdict="$(node --experimental-strip-types scripts/validate-board.mjs /tmp/board.json 2>&1)"; then
             reason="$verdict"
           else
             cp /tmp/board.json public/data/board.json
             mirror=fresh
-            reason="$verdict"
+            reason="$verdict ($fetched)"
           fi
 
           if [ "$mirror" = none ]; then
@@ -108,11 +109,15 @@ jobs:
             # validated when it was written. It is deliberately NOT re-validated
             # here: it is reused *because* it is the best available, and its age
             # is the one thing this branch already knows is wrong.
-            if curl -fsSL --max-time 30 https://sean1093.github.io/VeggieRadar/data/board.json -o public/data/board.json; then
+            # `-s` is belt and braces: the fetch script's own exit code is the
+            # verdict, but a step that declares 'reused' must be able to show
+            # the file it reused.
+            if reused="$(node scripts/fetch-retry.mjs "$MIRROR_URL" public/data/board.json)" && [ -s public/data/board.json ]; then
               mirror='reused (stale)'
+              reason="$reason; reused the published mirror ($reused)"
             else
               rm -f public/data/board.json
-              reason="$reason; no published mirror to reuse — the client falls back to GAS"
+              reason="$reason; no published mirror to reuse ($reused) — the client falls back to GAS"
             fi
           fi
 

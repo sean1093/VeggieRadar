@@ -43,10 +43,10 @@ const wait = (ms) => new Promise((done) => setTimeout(done, ms));
  *
  * `sleep` is injected so the tests do not spend the backoff.
  */
-export async function withRetry(get, url, { attempts = 3, backoffMs = 2_000, sleep = wait } = {}) {
+export async function withRetry(get, url, { attempts = 3, backoffMs = 2_000, sleep = wait, timeoutMs } = {}) {
   let res;
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    res = await get(url);
+    res = await get(url, timeoutMs === undefined ? {} : { timeoutMs });
     if (!isTransient(res)) return { ...res, attempts: attempt };
     // Linear, not exponential: a cold start takes seconds, and the probe runs
     // on a schedule where a bounded wait is cheaper than a false alarm.
@@ -58,4 +58,37 @@ export async function withRetry(get, url, { attempts = 3, backoffMs = 2_000, sle
 /** `" after 3 attempts"`, or nothing when the first attempt settled it. */
 export function attemptSuffix(res) {
   return res && res.attempts > 1 ? ` after ${res.attempts} attempts` : '';
+}
+
+/**
+ * One request with a deadline, shaped for `withRetry`. Never throws: a dead
+ * host is data, and `isTransient` is what decides whether to ask again. The
+ * default deadline matches the deploy step's old `curl --max-time 30`; Apps
+ * Script over quota *queues* requests instead of failing fast, and a queued
+ * request must not hold a scheduled job open.
+ */
+export async function get(url, { timeoutMs = 30_000, userAgent = 'VeggieRadar-fetch-retry' } = {}) {
+  try {
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'user-agent': userAgent },
+    });
+    return { status: response.status, body: await response.text() };
+  } catch (error) {
+    // A deadline surfaces as TimeoutError, DNS/TLS failures as TypeError.
+    return { status: 0, body: '', error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) };
+  }
+}
+
+/**
+ * What a final response means to a caller that wanted a file. A 200 is the
+ * only success — whatever its body, which is the validator's question, not a
+ * fetch's. Anything else names itself with the attempt count, so a deploy
+ * step summary reads the way the probe's alert does.
+ */
+export function outcome(res) {
+  if (!res) return { ok: false, reason: 'no response' };
+  if (res.error) return { ok: false, reason: `request failed${attemptSuffix(res)}: ${res.error}` };
+  if (res.status !== 200) return { ok: false, reason: `HTTP ${res.status}${attemptSuffix(res)}` };
+  return { ok: true, reason: `ok${attemptSuffix(res)}` };
 }

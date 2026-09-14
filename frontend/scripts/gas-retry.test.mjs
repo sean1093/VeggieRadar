@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { attemptSuffix, isTransient, withRetry } from './gas-retry.mjs';
+import { attemptSuffix, isTransient, outcome, withRetry } from './gas-retry.mjs';
 
 /** `get()` in prod-probe.mjs never throws: a dead host comes back as data. */
 const res = (status, body = '{}') => ({ status, body });
@@ -98,5 +98,36 @@ describe('attemptSuffix', () => {
 
   it('says how hard the probe tried, so the alert distinguishes a blip from an outage', () => {
     expect(attemptSuffix({ attempts: 3 })).toBe(' after 3 attempts');
+  });
+});
+
+describe('outcome — what the deploy mirror step reads', () => {
+  it('only a 200 is a success, and the body is not its business', () => {
+    // A platform HTML page served with 200 is passed through to the validator
+    // to be judged, never retried and never mistaken for a fetch failure.
+    expect(outcome({ status: 200, body: '<!DOCTYPE html>', attempts: 1 })).toEqual({ ok: true, reason: 'ok' });
+    expect(outcome({ status: 200, body: '{"type":"board"}', attempts: 3 })).toEqual({
+      ok: true,
+      reason: 'ok after 3 attempts',
+    });
+  });
+
+  it('names the final HTTP status with the attempt count — the 2026-09-13 signature', () => {
+    expect(outcome({ status: 404, body: '<!DOCTYPE html>', attempts: 3 })).toEqual({
+      ok: false,
+      reason: 'HTTP 404 after 3 attempts',
+    });
+    expect(outcome({ status: 503, body: '', attempts: 3 })).toEqual({ ok: false, reason: 'HTTP 503 after 3 attempts' });
+  });
+
+  it('names a request that never got an answer', () => {
+    expect(
+      outcome({ status: 0, body: '', error: 'TimeoutError: The operation was aborted due to timeout', attempts: 3 }),
+    ).toEqual({ ok: false, reason: 'request failed after 3 attempts: TimeoutError: The operation was aborted due to timeout' });
+  });
+
+  it('does not claim retries that never happened', () => {
+    expect(outcome({ status: 403, body: '', attempts: 1 })).toEqual({ ok: false, reason: 'HTTP 403' });
+    expect(outcome(undefined)).toEqual({ ok: false, reason: 'no response' });
   });
 });
