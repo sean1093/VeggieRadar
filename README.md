@@ -1011,11 +1011,18 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   so no secret), validates it with
   `node --experimental-strip-types scripts/validate-board.mjs`, and copies it
   to `frontend/public/data/board.json` — which `frontend/.gitignore` covers,
-  since the file belongs in the artifact and not in the history. **The step
+  since the file belongs in the artifact and not in the history. The fetch
+  **retries on the probe's terms** (§8, Monitoring): `--retry 3
+  --retry-all-errors`, so a cold-start 404, a 5xx or a timeout gets three more
+  attempts with 1 s, 2 s, 4 s between them, while a 200 is never retried and
+  goes to the validator as it is. One attempt was how the mirror froze for a
+  whole day on 2026-09-13 (#53): Apps Script answered each 2-hourly fetch with
+  a 404 after queueing it for ~15 s, every run "succeeded" by republishing the
+  same 04:22 board, and GAS itself was healthy the entire time. **The step
   never fails the job**: a failed fetch or a rejected board re-publishes the
   mirror already on Pages, and if that is missing too the site deploys without
   one and the client goes straight to GAS. Every run records which of the three
-  happened in its step summary:
+  happened in its step summary and in its log:
   ```
   mirror: fresh | reused (stale) | none
 
@@ -1084,7 +1091,9 @@ today.** The trading date legitimately stands still over weekends, holidays and
 typhoon closures (§2, "Trading date vs. refresh time"), so a `date`-based check
 would page a human every Sunday and be ignored by the second one.
 
-**The two GAS checks retry; nothing else does** (`scripts/gas-retry.mjs`).
+**The two GAS checks retry, and so does the deploy's mirror fetch (§8);
+nothing else does** (`scripts/gas-retry.mjs`; `curl --retry-all-errors` in
+`deploy-pages.yml`, same terms).
 Apps Script answers a cold start on `/exec` with a platform 404 HTML page, and
 an account near its quota queues a request until the deadline expires — the app
 itself makes three attempts for exactly this reason (§2). The probe made one,

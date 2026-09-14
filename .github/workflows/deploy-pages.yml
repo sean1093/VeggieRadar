@@ -72,6 +72,17 @@ jobs:
         # falls back: first to the mirror already published (stale prices the
         # client will still send to GAS), then to no mirror at all (the client
         # goes straight to GAS, exactly as it did before this step existed).
+        #
+        # The GAS request RETRIES, on the same terms as the production probe
+        # (`scripts/gas-retry.mjs`): Apps Script answers a cold start with a
+        # 404 — after queueing the request for ~15 s, in practice — and one
+        # attempt at :20 past every other hour hit exactly that all day on
+        # 2026-09-13, so every run "succeeded" by republishing the same
+        # 04:22 board until the probe paged (#53). `--retry-all-errors` is
+        # what makes curl retry an HTTP error under `-f` (404, 5xx) as well as
+        # a timeout; a 200 is never an error, so a bad body still goes to the
+        # validator once and is judged, not retried. No `--retry-delay`, so
+        # curl backs off 1 s, 2 s, 4 s between the three retries.
         run: |
           set -uo pipefail
           api_base="$(sed -n 's/^[[:space:]]*VITE_API_BASE_URL[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*$/\1/p' .env)"
@@ -81,8 +92,9 @@ jobs:
 
           if [ -z "$api_base" ]; then
             reason='VITE_API_BASE_URL missing from frontend/.env'
-          elif ! curl -fsSL --max-time 30 "${api_base}?action=board" -o /tmp/board.json; then
-            reason='GAS fetch failed (curl)'
+          elif ! curl -fsSL --max-time 30 --retry 3 --retry-all-errors --retry-max-time 150 \
+                 "${api_base}?action=board" -o /tmp/board.json; then
+            reason='GAS fetch failed (curl, after 4 attempts)'
           elif ! verdict="$(node --experimental-strip-types scripts/validate-board.mjs /tmp/board.json 2>&1)"; then
             reason="$verdict"
           else
@@ -104,7 +116,10 @@ jobs:
             fi
           fi
 
-          printf 'mirror: %s\n\nreason: %s\n' "$mirror" "$reason" >> "$GITHUB_STEP_SUMMARY"
+          # To the log as well as the step summary: the summary is not reachable
+          # through the API, and "which branch did this run take" is the first
+          # question when the mirror goes stale.
+          printf 'mirror: %s\n\nreason: %s\n' "$mirror" "$reason" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Build (embeds VITE_API_BASE_URL from frontend/.env)
         run: npm run build
