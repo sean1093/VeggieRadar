@@ -176,8 +176,12 @@ jobs:
               // incident started. Without this the title states only what the
               // first run saw, and the recovery branch above would read it as
               // the whole incident.
+              // Only a title this workflow still owns is rewritten: when
+              // `openFor` is null a human worded it, and overwriting that with
+              // machine categories would destroy what they wrote. Such an
+              // alert is already held open as unknown by the branch above.
               const covered = [...new Set([...(openFor || []), ...failing])];
-              if (titled && covered.length > openFor.length) {
+              if (openFor && covered.length > openFor.length) {
                 await github.rest.issues.update({
                   owner, repo, issue_number: existing.number,
                   title: `[prod-alert] ${covered.join(', ')} since ${titled[2]}`,
