@@ -41,7 +41,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BOARD_HEALTHY_ITEMS, boardMismatch } from '../src/types/board.schema.ts';
 import { BOARD_MAX_AGE_MS } from '../src/lib/utils/freshness.ts';
-import { get as request, outcome, withRetry } from './gas-retry.mjs';
+import { attemptSuffix, get as request, isTransientStatic, outcome, withRetry } from './gas-retry.mjs';
 import { applyVerdict, DEGRADED, reachabilityCategory } from './probe-verdict.mjs';
 
 const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -130,6 +130,19 @@ const get = (url) => request(url, { timeoutMs: TIMEOUT_MS, userAgent: 'VeggieRad
  */
 const getGas = (url) => withRetry(get, url, { attempts: GAS_ATTEMPTS, backoffMs: GAS_BACKOFF_MS });
 
+/**
+ * The same tolerance for the two static URLs, on GitHub Pages' terms: a 5xx or
+ * a dead connection is a CDN having a moment, while a **404 is the answer** —
+ * nothing is published there — and must not be retried. `deploy-pages.yml`
+ * already fetches this very mirror through `fetch-retry.mjs` on these terms.
+ *
+ * It matters more than it looks: `mirror` passing is what lets an unreachable
+ * backend be softened to `degraded`, so a lone CDN blip here would fail the
+ * mirror check, withdraw the softening, and open exactly the false alarm this
+ * probe's retry policy exists to prevent.
+ */
+const getStatic = (url) => withRetry(get, url, { transient: isTransientStatic });
+
 const ok = (name, detail) => ({ name, status: 'ok', detail });
 const skipped = (name, detail) => ({ name, status: 'skipped', detail });
 const failed = (name, category, detail, body = '') => ({
@@ -170,9 +183,9 @@ function boardProblem(board) {
 
 async function checkPages() {
   const name = 'pages';
-  const res = await get(PAGES_URL);
-  if (res.error) return failed(name, 'pages_down', `request failed: ${res.error}`);
-  if (res.status !== 200) return failed(name, 'pages_down', `HTTP ${res.status}`, res.body);
+  const res = await getStatic(PAGES_URL);
+  if (res.error) return failed(name, 'pages_down', `request failed${attemptSuffix(res)}: ${res.error}`);
+  if (res.status !== 200) return failed(name, 'pages_down', `HTTP ${res.status}${attemptSuffix(res)}`, res.body);
 
   const title = res.body.match(/<title>([^<]*)<\/title>/i);
   if (!title || !title[1].includes('今日菜價')) {
@@ -189,15 +202,15 @@ async function checkPages() {
 
 async function checkMirror() {
   const name = 'mirror';
-  const res = await get(MIRROR_URL);
-  if (res.error) return failed(name, 'mirror_stale', `request failed: ${res.error}`);
+  const res = await getStatic(MIRROR_URL);
+  if (res.error) return failed(name, 'mirror_stale', `request failed${attemptSuffix(res)}: ${res.error}`);
   // A deploy that could obtain neither a fresh board nor the previously
   // published mirror ships without one on purpose (README §2): absent is a
   // degraded state, not a broken one, and `gas_board` below covers the
   // visitors it sends to the backend. Failing here would hold the alert issue
   // permanently open and train its reader to ignore the one alert that matters.
   if (res.status === 404) return skipped(name, 'no mirror published');
-  if (res.status !== 200) return failed(name, 'mirror_stale', `HTTP ${res.status}`, res.body);
+  if (res.status !== 200) return failed(name, 'mirror_stale', `HTTP ${res.status}${attemptSuffix(res)}`, res.body);
 
   const parsed = parseObject(res.body);
   if (parsed.problem) return failed(name, 'mirror_stale', parsed.problem, res.body);

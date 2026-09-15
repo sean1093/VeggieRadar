@@ -1095,9 +1095,14 @@ today.** The trading date legitimately stands still over weekends, holidays and
 typhoon closures (§2, "Trading date vs. refresh time"), so a `date`-based check
 would page a human every Sunday and be ignored by the second one.
 
-**The two GAS checks retry, and so do the deploy's two mirror fetches (§8);
-nothing else does** — all through `scripts/gas-retry.mjs`, so there is one
-policy to tune.
+**Every scheduled request this repo makes retries** — the probe's four checks
+and the deploy's two mirror fetches (§8), all through `scripts/gas-retry.mjs`,
+so there is one policy to tune. What differs is whose 404 it is: on Apps
+Script a 404 is a cold start and is asked again, while on GitHub Pages it is
+the definitive “nothing published here” and is final (`isTransientStatic`).
+The two static checks matter more than they look, because `mirror` passing is
+what softens an unreachable backend — a lone CDN blip there would withdraw the
+softening and open the false alarm this policy exists to prevent.
 Apps Script answers a cold start on `/exec` with a platform 404 HTML page, and
 an account near its quota queues a request until the deadline expires — the app
 itself makes three attempts for exactly this reason (§2). The probe made one,
@@ -1141,9 +1146,13 @@ it honest:
 - **Only what was retried counts as unreachable** (404, 5xx, no answer at
   all). A 403 on a deployment whose access was narrowed, a redirect, or a 200
   with an empty body came *from* the backend and pages as `gas_error`.
-- **A degraded run never closes an open `prod-alert`**: it comments
-  「still degraded」 and leaves it open, because an over-quota backend moves
-  between answering wrongly and not answering at all.
+- **A degraded run closes only what it actually verified.** `pages` and
+  `mirror` ran and passed, so an alert about `pages_down` or `mirror_stale`
+  closes as recovered. Anything naming GAS stays open with a 「still
+  degraded」 comment: `gas_board` got no body to measure, `?action=diag` never
+  answered so the three checks behind it are `skipped`, and an over-quota
+  backend moves between answering wrongly and not answering at all. A title
+  that does not name known categories counts as unknown and stays open too.
 
 With no mirror published at all the `mirror` check is `skipped`, GAS is the
 only path a visitor has, and its silence pages like any other outage. Contract
@@ -1156,8 +1165,8 @@ label on first use). It also folds any category it found into that title, so
 the title always states what the whole incident covers — later runs only
 comment, and the recovery rule above reads the title to decide what a degraded
 run is allowed to close. A fully passing run comments 「recovered」 on that issue
-and closes it, unless that run is degraded (above), in which case the issue
-stays open. So at most one alert is ever open: a fresh issue every 6 hours
+and closes it, except for the categories a degraded run cannot vouch for
+(above), which keep it open. So at most one alert is ever open: a fresh issue every 6 hours
 would bury the first one and train its reader to ignore the label — the same
 reason the e-mail alerting has an incident window. The job also goes red
 whenever the probe did, and appends the summary table to the run's step

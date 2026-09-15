@@ -117,10 +117,17 @@ jobs:
             // at creation would let a degraded run "recover" something it
             // never measured.
             const TITLE = /^\[prod-alert\] (.*) since (\S+)$/;
+            const CATEGORIES = [
+              'pages_down', 'mirror_stale', 'gas_unreachable', 'gas_error',
+              'gas_stale', 'trigger_missing', 'incident_open', 'history_thin',
+            ];
             const titled = existing ? existing.title.match(TITLE) : null;
-            // null means the title was renamed by hand: treat what it covers
-            // as unknown, which holds it open rather than closing blind.
-            const openFor = titled ? titled[1].split(', ').filter(Boolean) : null;
+            const named = titled ? titled[1].split(', ').filter(Boolean) : [];
+            // null means the title does not say which categories this incident
+            // covers — renamed by hand, or reworded into prose that still fits
+            // the shape. Then what it covers is unknown, which holds it open
+            // rather than closing something blind.
+            const openFor = named.length && named.every((c) => CATEGORIES.includes(c)) ? named : null;
 
             if (result.ok) {
               // A degraded run proves nothing about the backend. `gas_board`
@@ -130,7 +137,7 @@ jobs:
               // all. None of those categories may be declared recovered here.
               // `pages` and `mirror` did run and did pass, so an alert about
               // only those is closed as usual.
-              const unverified = ['gas_unreachable', 'gas_error', 'gas_stale', 'trigger_missing', 'incident_open', 'history_thin'];
+              const unverified = CATEGORIES.filter((c) => c !== 'pages_down' && c !== 'mirror_stale');
               const holdOpen = degraded.length > 0
                 && (openFor === null || openFor.some((category) => unverified.includes(category)));
               const heading = holdOpen ? 'still degraded' : 'recovered';
