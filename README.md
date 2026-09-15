@@ -884,7 +884,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-515 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
+519 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1106,8 +1106,12 @@ closed again, with an e-mail each time. Reachability failures (a timeout, DNS,
 404, 5xx) are therefore retried, and the alert says `after N attempts` so a
 blip stays distinguishable from an outage. The shared default is 3 attempts
 with a 2 s then 4 s backoff; the probe's two GAS checks widen that to **4
-attempts, 5 s linear** (≈ 1 min of asking), because on 2026-09-15 a cold-start
-window outlasted the default and opened one more self-closing issue. A **200 is never retried**, whatever its body: a stale board, a short
+attempts, 5 s linear**, because on 2026-09-15 a cold-start window outlasted the
+default and opened one more self-closing issue. How long that actually takes
+depends on the symptom: a cold-start 404 comes back in about a second, so the
+default spent ~10 s and the widened budget spends ~35 s, while a request queued
+against the deadline can stretch either to 3 × or 4 × `TIMEOUT_MS` plus the
+backoff (66 s and 110 s respectively). A **200 is never retried**, whatever its body: a stale board, a short
 count, schema drift or a platform HTML page is evidence that `doGet` answered,
 and a second attempt would only hide a real fault for a minute.
 
@@ -1115,26 +1119,34 @@ and a second attempt would only hide a real fault for a minute.
 reads `data/board.json` before it ever reaches GAS (§3), so `/exec` answering
 404 for a minute still leaves every visitor with today's prices. Two things do
 degrade meanwhile: the drawer's trend sparkline is empty, and a search for a
-crop the board does not carry answers 「服務忙磌中，請稍後再試」 instead of a
+crop the board does not carry answers 「服務忙碌中，請稍後再試」 instead of a
 result. Both are bounded; neither is the board going dark. So
 `gas_unreachable` — a request that never reached `doGet` — is reported as ⚠️
-**`degraded`** rather than failed whenever the `mirror` check passed: a row in
-the summary and a run annotation, no issue and no red run.
-`frontend/scripts/probe-verdict.mjs` holds that one rule, and three guards keep
+**`degraded`** rather than failed while the mirror is genuinely carrying
+visitors: a row in the summary and a run annotation, no issue and no red run.
+`frontend/scripts/probe-verdict.mjs` holds that one rule, and four guards keep
 it honest:
 
-- The softening needs the mirror to be **`ok`**, never merely `skipped` — with
-  no mirror published, GAS is the only path a visitor has and its silence is an
-  outage.
-- Only what `isTransient` retried counts as unreachable (404, 5xx, no answer
-  at all). A 403 on a deployment whose access was narrowed, a redirect, or a
-  200 with an empty body came *from* the backend and pages as `gas_error`.
-- A degraded run never closes an open `prod-alert`: it comments
+- **“Carrying visitors” is the app's bar, not the probe's.** `useBoard` serves
+  the mirror without asking GAS only while it is under `BOARD_MAX_AGE_MS`
+  (6 h) — not the 8 h the `mirror` check allows. A mirror in the 6–8 h band
+  passes its own check while every visitor falls through to a backend that is
+  not answering, and that band is exactly where an outage lands, because the
+  deploy cannot refresh the mirror while GAS is down. Above 6 h, the probe
+  pages.
+- **A short board is not a served board.** The mirror must also carry
+  `BOARD_HEALTHY_ITEMS`. A throttled MOA batch is normally caught by
+  `gas_board`'s count guard, which during an outage never gets a body to
+  measure.
+- **Only what was retried counts as unreachable** (404, 5xx, no answer at
+  all). A 403 on a deployment whose access was narrowed, a redirect, or a 200
+  with an empty body came *from* the backend and pages as `gas_error`.
+- **A degraded run never closes an open `prod-alert`**: it comments
   「still degraded」 and leaves it open, because an over-quota backend moves
   between answering wrongly and not answering at all.
 
-Nothing is hidden by any of it: an outage long enough to matter stops the
-crawl, the mirror stops moving, and `mirror_stale` pages within 8 h. Contract
+With no mirror published at all the `mirror` check is `skipped`, GAS is the
+only path a visitor has, and its silence pages like any other outage. Contract
 failures (`gas_error`, `gas_stale`) always page — something answered, and
 answered wrongly.
 

@@ -40,6 +40,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BOARD_HEALTHY_ITEMS, boardMismatch } from '../src/types/board.schema.ts';
+import { BOARD_MAX_AGE_MS } from '../src/lib/utils/freshness.ts';
 import { get as request, outcome, withRetry } from './gas-retry.mjs';
 import { applyVerdict, DEGRADED, reachabilityCategory } from './probe-verdict.mjs';
 
@@ -51,9 +52,13 @@ const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // timeout or cold-start 404 is a blip, not an outage.
 const TIMEOUT_MS = 20_000;
 // How long the GAS checks keep asking before calling `/exec` unreachable.
-// Four attempts with a linear 5 s backoff spans roughly a minute of wall
-// clock; the three-attempt, 2 s default it replaces spanned under 30 s, which
-// the 2026-09-15 cold-start window outlasted (#61).
+// The shared default is 3 attempts with a 2 s then 4 s backoff; Apps Script
+// answers its cold-start 404 in about a second, so on 2026-09-15 that spent
+// roughly 10 s before giving up and opening #61. Four attempts with a linear
+// 5 s backoff spends around 35 s on the same symptom. The bound is what the
+// deadline makes it — 4 × TIMEOUT_MS + 30 s of backoff, so 110 s if every
+// attempt runs to its deadline, which is the queued-request case and is worth
+// waiting out in a job that runs four times a day.
 const GAS_ATTEMPTS = 4;
 const GAS_BACKOFF_MS = 5_000;
 // Two 4-hourly refresh cycles plus the crawl: one missed run is routine and
@@ -199,7 +204,11 @@ async function checkMirror() {
   const board = parsed.value;
   const problem = boardProblem(board);
   if (problem) return failed(name, 'mirror_stale', problem.detail, res.body);
-  return ok(name, `${board.count} items, crawled ${hours(ageMs(board.generated_at))} h ago`);
+  const age = ageMs(board.generated_at);
+  // `serving` is what `applyVerdict` measures against the app's own read
+  // order; the check's own verdict deliberately stays the looser one, because
+  // a mirror between the two bounds is degraded, not broken.
+  return { ...ok(name, `${board.count} items, crawled ${hours(age)} h ago`), serving: { ageMs: age, count: board.count } };
 }
 
 async function checkGasBoard() {
@@ -309,10 +318,11 @@ function renderSummary(checks, checkedAt) {
     lines.push(
       '',
       '> ⚠️ **degraded, not paging.** Apps Script never answered, but the mirror above is'
-        + ' serving a fresh board, so every visitor still sees today\u2019s prices. What is lost:'
-        + ' the drawer\u2019s trend chart, and a search for a crop the board does not carry.'
-        + ' An outage long enough to matter freezes that mirror, and the `mirror` check pages'
-        + ' on it within 8 h.',
+        + ' young enough and full enough that `useBoard` serves it without ever asking GAS,'
+        + ' so every visitor still sees today\u2019s prices. What is lost: the drawer\u2019s trend'
+        + ' chart, and a search for a crop the board does not carry. Once that mirror stops'
+        + ' moving \u2014 it cannot be refreshed while GAS is down \u2014 visitors start falling'
+        + ' through to the backend, and the next probe run pages.',
     );
   }
   for (const failure of checks.filter((c) => (c.status === 'failed' || c.status === DEGRADED) && c.excerpt)) {
@@ -340,7 +350,12 @@ const [pages, mirror, board, diag] = await Promise.all([
 ]);
 // The checks report endpoint health; `applyVerdict` decides what that means
 // for a visitor, which is the only thing worth paging about.
-const checks = applyVerdict([pages, mirror, board, ...diag]);
+const checks = applyVerdict([pages, mirror, board, ...diag], {
+  // The app's own bar, not the probe's: `useBoard` only skips GAS while the
+  // mirror is fresher than this, and a short board is not a served board.
+  maxAgeMs: BOARD_MAX_AGE_MS,
+  healthyItems: BOARD_HEALTHY_ITEMS,
+});
 const checkedAt = new Date().toISOString();
 const summaryMd = renderSummary(checks, checkedAt);
 

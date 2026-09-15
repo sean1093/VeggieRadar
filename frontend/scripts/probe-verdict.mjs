@@ -60,18 +60,43 @@ export function reachabilityCategory(res) {
 export const DEGRADED = 'degraded';
 
 /**
- * Downgrades unreachable-GAS failures to `degraded` while the mirror is
- * serving a fresh board, and leaves every other verdict exactly as the checks
- * reported it.
+ * Whether the published mirror alone would carry a visitor through a GAS
+ * outage — which is a stricter question than "did the `mirror` check pass".
  *
- * The mirror must be `ok`, not merely present: `skipped` means no mirror is
- * published at all, and then GAS is the only path a visitor has, so its
- * silence is an outage and must page. Contract failures are never softened —
- * they are evidence the backend answered and was wrong.
+ * `useBoard` serves the mirror without touching GAS only while `isFreshEnough`
+ * holds, and that threshold is `BOARD_MAX_AGE_MS` (6 h), not the probe's 8 h
+ * bound. In between, every visitor falls through to `fetchBoard()` — three
+ * doomed attempts and the 「目前連不上伺服器」 banner — so a mirror in the 6–8 h
+ * band is passing its own check and still not serving anyone. That band is
+ * reachable during exactly the outage this rule is about: `deploy-pages.yml`
+ * keeps republishing the last mirror it has while GAS is down, so the same
+ * board ages in place.
+ *
+ * The count matters for the same reason. A throttled MOA batch publishes a
+ * board that is complete enough to validate and clearly short of a day's
+ * produce; `checkGasBoard` is what normally catches it, and during an outage
+ * that check never gets a body to measure. Holding the mirror to
+ * `BOARD_HEALTHY_ITEMS` here keeps a thin board from being silently accepted
+ * as proof that visitors are fine.
  */
-export function applyVerdict(checks) {
-  const mirrorServes = checks.some((check) => check.name === 'mirror' && check.status === 'ok');
-  if (!mirrorServes) return checks;
+function mirrorCarriesVisitors(checks, { maxAgeMs, healthyItems }) {
+  const mirror = checks.find((check) => check.name === 'mirror');
+  // `skipped` means no mirror is published at all — then GAS is the only path
+  // a visitor has, and its silence is an outage, not a degradation.
+  if (!mirror || mirror.status !== 'ok' || !mirror.serving) return false;
+  return mirror.serving.ageMs < maxAgeMs && mirror.serving.count >= healthyItems;
+}
+
+/**
+ * Downgrades unreachable-GAS failures to `degraded` while the mirror is
+ * genuinely carrying visitors, and leaves every other verdict exactly as the
+ * checks reported it.
+ *
+ * Contract failures are never softened — they are evidence the backend
+ * answered and was wrong.
+ */
+export function applyVerdict(checks, thresholds) {
+  if (!mirrorCarriesVisitors(checks, thresholds)) return checks;
   return checks.map((check) =>
     check.status === 'failed' && check.category === GAS_UNREACHABLE ? { ...check, status: DEGRADED } : check,
   );
