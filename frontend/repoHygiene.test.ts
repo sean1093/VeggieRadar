@@ -57,6 +57,11 @@ describe('credential hygiene', () => {
     // download it makes: megabytes of derived JSON that must never be staged.
     'tools/calibrate/node_modules/anything',
     'tools/calibrate/.cache/moa/0123456789abcdef.json',
+    // `tools/region-spread` caches raw MOA windows the same way, and writes
+    // measurement reports that belong in an issue rather than in the tree.
+    'tools/region-spread/node_modules/anything',
+    'tools/region-spread/.cache/0123456789abcdef.json',
+    'tools/region-spread/report/2026-09-01_2026-09-30.md',
   ];
 
   it.each(mustBeIgnored)('ignores %s', (path) => {

@@ -1,0 +1,7 @@
+# Raw MOA responses, kept so a re-run (after fixing the region table) costs no
+# requests. Derived and re-downloadable.
+.cache/
+
+# Measurement output. Paste the relevant one into the issue rather than
+# committing every exploratory run.
+report/

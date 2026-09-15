@@ -1,0 +1,17 @@
+{
+  "name": "veggieradar-region-spread",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "One-off measurement for issue #23: how much wholesale prices really differ by region, and whether a regional board would have the sample to say so.",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "measure": "node --experimental-strip-types src/cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}
