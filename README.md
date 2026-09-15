@@ -1152,7 +1152,10 @@ answered wrongly.
 
 A failing run comments on the open issue labelled **`prod-alert`**, and only
 opens `[prod-alert] <categories> since <date>` when there is none (creating the
-label on first use). A fully passing run comments 「recovered」 on that issue
+label on first use). It also folds any category it found into that title, so
+the title always states what the whole incident covers — later runs only
+comment, and the recovery rule above reads the title to decide what a degraded
+run is allowed to close. A fully passing run comments 「recovered」 on that issue
 and closes it, unless that run is degraded (above), in which case the issue
 stays open. So at most one alert is ever open: a fresh issue every 6 hours
 would bury the first one and train its reader to ignore the label — the same

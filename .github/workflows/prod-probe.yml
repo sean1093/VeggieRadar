@@ -111,6 +111,17 @@ jobs:
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             const stamp = `${result.checked_at.slice(0, 16).replace('T', ' ')} UTC`;
 
+            // The title is this incident's record of what it covers, so it is
+            // kept current: a failing run that finds a new category rewrites
+            // it (below), because later runs only comment and a title frozen
+            // at creation would let a degraded run "recover" something it
+            // never measured.
+            const TITLE = /^\[prod-alert\] (.*) since (\S+)$/;
+            const titled = existing ? existing.title.match(TITLE) : null;
+            // null means the title was renamed by hand: treat what it covers
+            // as unknown, which holds it open rather than closing blind.
+            const openFor = titled ? titled[1].split(', ').filter(Boolean) : null;
+
             if (result.ok) {
               // A degraded run proves nothing about the backend. `gas_board`
               // never got a body to measure, `?action=diag` never answered, so
@@ -119,13 +130,9 @@ jobs:
               // all. None of those categories may be declared recovered here.
               // `pages` and `mirror` did run and did pass, so an alert about
               // only those is closed as usual.
-              const unverified = degraded.length
-                ? ['gas_unreachable', 'gas_error', 'gas_stale', 'trigger_missing', 'incident_open', 'history_thin']
-                : [];
-              const openFor = existing
-                ? (existing.title.match(/^\[prod-alert\] (.*) since /)?.[1] || '').split(', ').filter(Boolean)
-                : [];
-              const holdOpen = openFor.some((category) => unverified.includes(category));
+              const unverified = ['gas_unreachable', 'gas_error', 'gas_stale', 'trigger_missing', 'incident_open', 'history_thin'];
+              const holdOpen = degraded.length > 0
+                && (openFor === null || openFor.some((category) => unverified.includes(category)));
               const heading = holdOpen ? 'still degraded' : 'recovered';
               if (existing) {
                 await github.rest.issues.createComment({
@@ -133,7 +140,7 @@ jobs:
                   body: `**${heading}** — ${stamp}\n\n${result.summary_md}\n\n[Probe run](${runUrl})`,
                 });
                 if (holdOpen) {
-                  core.info(`left #${existing.number} open: ${openFor.join(', ')} not verified by a degraded run`);
+                  core.info(`left #${existing.number} open: ${openFor ? openFor.join(', ') : 'title renamed'} not verified by a degraded run`);
                 } else {
                   await github.rest.issues.update({
                     owner, repo, issue_number: existing.number,
@@ -150,13 +157,26 @@ jobs:
               return;
             }
 
-            const categories = [...new Set(
+            const failing = [...new Set(
               result.checks.filter((c) => c.status === 'failed').map((c) => c.category),
-            )].join(', ');
+            )];
+            const categories = failing.join(', ');
             const body = `**${categories}** — ${stamp}\n\n${result.summary_md}\n\n[Probe run](${runUrl})`;
 
             if (existing) {
               await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+              // Fold any new category into the title, keeping the date this
+              // incident started. Without this the title states only what the
+              // first run saw, and the recovery branch above would read it as
+              // the whole incident.
+              const covered = [...new Set([...(openFor || []), ...failing])];
+              if (titled && covered.length > openFor.length) {
+                await github.rest.issues.update({
+                  owner, repo, issue_number: existing.number,
+                  title: `[prod-alert] ${covered.join(', ')} since ${titled[2]}`,
+                });
+                core.info(`retitled #${existing.number}: ${covered.join(', ')}`);
+              }
               core.info(`commented on #${existing.number}`);
             } else {
               try {
