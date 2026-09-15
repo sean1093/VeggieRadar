@@ -112,18 +112,28 @@ jobs:
             const stamp = `${result.checked_at.slice(0, 16).replace('T', ' ')} UTC`;
 
             if (result.ok) {
-              // Degraded is not recovered. An open alert may well be about the
-              // very endpoint that is now merely unreachable — an over-quota
-              // backend goes from HTML error page to timing out between runs —
-              // and closing it there would lose a live incident.
-              const heading = degraded.length ? 'still degraded' : 'recovered';
+              // A degraded run proves nothing about the backend. `gas_board`
+              // never got a body to measure, `?action=diag` never answered, so
+              // the three checks behind it are `skipped` — and an over-quota
+              // backend moves between answering wrongly and not answering at
+              // all. None of those categories may be declared recovered here.
+              // `pages` and `mirror` did run and did pass, so an alert about
+              // only those is closed as usual.
+              const unverified = degraded.length
+                ? ['gas_unreachable', 'gas_error', 'gas_stale', 'trigger_missing', 'incident_open', 'history_thin']
+                : [];
+              const openFor = existing
+                ? (existing.title.match(/^\[prod-alert\] (.*) since /)?.[1] || '').split(', ').filter(Boolean)
+                : [];
+              const holdOpen = openFor.some((category) => unverified.includes(category));
+              const heading = holdOpen ? 'still degraded' : 'recovered';
               if (existing) {
                 await github.rest.issues.createComment({
                   owner, repo, issue_number: existing.number,
                   body: `**${heading}** — ${stamp}\n\n${result.summary_md}\n\n[Probe run](${runUrl})`,
                 });
-                if (degraded.length) {
-                  core.info(`left #${existing.number} open: ${degraded.length} check(s) degraded`);
+                if (holdOpen) {
+                  core.info(`left #${existing.number} open: ${openFor.join(', ')} not verified by a degraded run`);
                 } else {
                   await github.rest.issues.update({
                     owner, repo, issue_number: existing.number,

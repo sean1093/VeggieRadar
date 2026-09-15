@@ -1162,12 +1162,19 @@ summary. It needs no secret; every endpoint it touches is public (§2).
 
 ```bash
 cd frontend
-node --experimental-strip-types scripts/prod-probe.mjs   # writes probe-result.json, exit 1 on any failure
+node --experimental-strip-types scripts/prod-probe.mjs   # writes probe-result.json, exit 1 on anything that pages
 ```
-The flag is required on Node 22.6–22.17 and a no-op from 22.18 on.
+The flag is required on Node 22.6–22.17 and a no-op from 22.18 on. A degraded
+run exits **0** — the exit code is the paging decision, not a health score, and
+`probe-result.json` carries the per-check detail either way.
+
 `workflow_dispatch` takes `pages_url` / `api_base_url` inputs, so the alert
-path can be exercised against a deliberately bad URL instead of waiting for a
-real outage.
+path can be rehearsed against a deliberately bad URL instead of waiting for a
+real outage. Use `pages_url`: a bad `api_base_url` alongside the real, fresh
+mirror is precisely the case the degraded rule absorbs, so it now ends green
+with two ⚠️ rows and no issue — which rehearses the *softening*, not the
+alert. To exercise the alert through GAS, point `pages_url` somewhere with no
+`data/board.json`, so the mirror check is `skipped` and nothing is softened.
 
 Not UptimeRobot or a similar service: Actions is already free here, and what
 has to be verified is the schema and the freshness rather than an HTTP 200 —

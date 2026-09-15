@@ -65,12 +65,22 @@ export const DEGRADED = 'degraded';
  *
  * `useBoard` serves the mirror without touching GAS only while `isFreshEnough`
  * holds, and that threshold is `BOARD_MAX_AGE_MS` (6 h), not the probe's 8 h
- * bound. In between, every visitor falls through to `fetchBoard()` — three
- * doomed attempts and the 「目前連不上伺服器」 banner — so a mirror in the 6–8 h
- * band is passing its own check and still not serving anyone. That band is
- * reachable during exactly the outage this rule is about: `deploy-pages.yml`
- * keeps republishing the last mirror it has while GAS is down, so the same
- * board ages in place.
+ * bound. Past it every visitor falls through to `fetchBoard()` — three doomed
+ * attempts, then the board degrades onto that same stale mirror under
+ * 「目前連不上伺服器」. Prices stay on screen, so this is still not the board
+ * going dark; what changes is that every visit now pays for a dead round trip
+ * and is told the service is unreachable. That is a fault worth a human, and
+ * the band is reachable during exactly the outage this rule is about:
+ * `deploy-pages.yml` can only republish the mirror it already has while GAS is
+ * down, so the same board ages in place.
+ *
+ * The bar is the app's, with no safety margin added, and that is deliberate.
+ * The backend crawls every 4 h, so a perfectly healthy mirror is routinely
+ * 4–6 h old; a margin wide enough to matter would page for a momentary cold
+ * start that happened to land late in a crawl cycle — the false alarm this
+ * whole rule exists to stop. The cost is latency, not blindness: a mirror that
+ * crosses 6 h between probe runs is caught by the next one, at most 6 h later,
+ * and `checkMirror` pages on its own at 8 h regardless.
  *
  * The count matters for the same reason. A throttled MOA batch publishes a
  * board that is complete enough to validate and clearly short of a day's
