@@ -27,6 +27,9 @@
  *
  * Exit code 1 means at least one check failed; `OUT` always describes what
  * happened, so the workflow can report a failure without parsing stdout.
+ * Not every unhealthy endpoint is a failure: `probe-verdict.mjs` decides which
+ * ones a visitor would actually notice, and the rest are reported as
+ * `degraded` in the summary without paging anyone.
  *
  * Freshness is judged on `generated_at` ALONE. `date` is the trading date of
  * the prices and legitimately stands still over weekends, holidays and typhoon
@@ -38,6 +41,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BOARD_HEALTHY_ITEMS, boardMismatch } from '../src/types/board.schema.ts';
 import { get as request, outcome, withRetry } from './gas-retry.mjs';
+import { applyVerdict, DEGRADED, GAS_UNREACHABLE } from './probe-verdict.mjs';
 
 const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -46,6 +50,12 @@ const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // The two GAS checks retry that deadline (`gas-retry.mjs`), because a single
 // timeout or cold-start 404 is a blip, not an outage.
 const TIMEOUT_MS = 20_000;
+// How long the GAS checks keep asking before calling `/exec` unreachable.
+// Four attempts with a linear 5 s backoff spans roughly a minute of wall
+// clock; the three-attempt, 2 s default it replaces spanned under 30 s, which
+// the 2026-09-15 cold-start window outlasted (#61).
+const GAS_ATTEMPTS = 4;
+const GAS_BACKOFF_MS = 5_000;
 // Two 4-hourly refresh cycles plus the crawl: one missed run is routine and
 // self-heals, two in a row is a pipeline that stopped.
 const MAX_AGE_MS = 8 * 60 * 60 * 1000;
@@ -108,8 +118,12 @@ const get = (url) => request(url, { timeoutMs: TIMEOUT_MS, userAgent: 'VeggieRad
  * cold-start 404 and a queued request that times out. See `gas-retry.mjs` —
  * one attempt per GAS check is what turned two cold starts into two
  * self-closing prod-alert issues. Contract failures are never retried.
+ *
+ * The budget is deliberately wider than the module default: `/exec` stayed a
+ * 404 for longer than the default's ~30 s on 2026-09-15, and a minute of
+ * asking is cheap in a job that runs four times a day.
  */
-const getGas = (url) => withRetry(get, url);
+const getGas = (url) => withRetry(get, url, { attempts: GAS_ATTEMPTS, backoffMs: GAS_BACKOFF_MS });
 
 const ok = (name, detail) => ({ name, status: 'ok', detail });
 const skipped = (name, detail) => ({ name, status: 'skipped', detail });
@@ -193,7 +207,7 @@ async function checkGasBoard() {
   if (!API_BASE_URL) return failed(name, 'gas_error', 'no API base URL: set API_BASE_URL or VITE_API_BASE_URL');
   const res = await getGas(`${API_BASE_URL}?action=board`);
   const reached = outcome(res);
-  if (!reached.ok) return failed(name, 'gas_error', reached.reason, res.body);
+  if (!reached.ok) return failed(name, GAS_UNREACHABLE, reached.reason, res.body);
 
   // Apps Script answers 200 with an HTML page for platform-level failures
   // (over quota, a deploy that never re-consented to its scopes), so the
@@ -236,7 +250,7 @@ async function checkDiag() {
   }
   const res = await getGas(`${API_BASE_URL}?action=diag`);
   const reached = outcome(res);
-  if (!reached.ok) return unavailable(failed(name, 'gas_error', reached.reason, res.body));
+  if (!reached.ok) return unavailable(failed(name, GAS_UNREACHABLE, reached.reason, res.body));
 
   const parsed = parseObject(res.body);
   if (parsed.problem) {
@@ -276,7 +290,7 @@ async function checkDiag() {
   ];
 }
 
-const STATUS_ICON = { ok: '✅', failed: '❌', skipped: '⏭️' };
+const STATUS_ICON = { ok: '✅', failed: '❌', degraded: '⚠️', skipped: '⏭️' };
 
 /** Detail text inside a table cell: a pipe or a newline would break the row. */
 const cell = (text) => (text || '—').replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ');
@@ -291,7 +305,16 @@ function renderSummary(checks, checkedAt) {
     '| --- | --- | --- | --- |',
     ...checks.map((c) => `| ${c.name} | ${STATUS_ICON[c.status]} ${c.status} | ${c.category || '—'} | ${cell(c.detail)} |`),
   ];
-  for (const failure of checks.filter((c) => c.status === 'failed' && c.excerpt)) {
+  if (checks.some((c) => c.status === DEGRADED)) {
+    lines.push(
+      '',
+      '> ⚠️ **degraded, not paging.** Apps Script is unreachable, but the mirror above is'
+        + ' serving a fresh board, so visitors still see today\u2019s prices (only the drawer\u2019s'
+        + ' trend chart is affected). An outage long enough to matter freezes that mirror, and'
+        + ' the `mirror` check pages on it within 8 h.',
+    );
+  }
+  for (const failure of checks.filter((c) => (c.status === 'failed' || c.status === DEGRADED) && c.excerpt)) {
     // Fenced with four backticks so an HTML error page containing a code fence
     // cannot break out of the block.
     lines.push(
@@ -314,7 +337,9 @@ const [pages, mirror, board, diag] = await Promise.all([
   checkGasBoard(),
   checkDiag(),
 ]);
-const checks = [pages, mirror, board, ...diag];
+// The checks report endpoint health; `applyVerdict` decides what that means
+// for a visitor, which is the only thing worth paging about.
+const checks = applyVerdict([pages, mirror, board, ...diag]);
 const checkedAt = new Date().toISOString();
 const summaryMd = renderSummary(checks, checkedAt);
 

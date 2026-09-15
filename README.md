@@ -884,7 +884,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-504 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
+512 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1078,8 +1078,8 @@ could drift:
 | --- | --- | --- |
 | `pages` | 200, `<title>` still contains 今日菜價, and a `<script type="module">` is present — a Pages deploy that lost its bundle still serves a plausible shell | `pages_down` |
 | `mirror` | `data/board.json` is 200, matches the schema and was crawled < 8 h ago — the same bound the publish-side validator applies (§2). **A 404 stays `skipped`**, not a failure: a deploy that could obtain no mirror at all publishes without one on purpose, and the visitors it sends to GAS are covered by `gas_board` below | `mirror_stale` |
-| `gas_board` | the body is JSON (Apps Script answers platform errors with HTML and HTTP 200), matches the schema, `stale === false`, `count ≥ 60`, crawled < 8 h ago | `gas_error` / `gas_stale` |
-| `gas_diag` | `?action=diag` answers JSON | `gas_error` |
+| `gas_board` | the body is JSON (Apps Script answers platform errors with HTML and HTTP 200), matches the schema, `stale === false`, `count ≥ 60`, crawled < 8 h ago | `gas_unreachable` / `gas_error` / `gas_stale` |
+| `gas_diag` | `?action=diag` answers JSON | `gas_unreachable` / `gas_error` |
 | `gas_trigger` | `triggers` includes `refreshBoardCache` | `trigger_missing` |
 | `gas_incident` | `alert.incident_open === false` | `incident_open` |
 | `gas_history` | `history.items ≥ 60` | `history_thin` |
@@ -1103,11 +1103,27 @@ an account near its quota queues a request until the deadline expires — the ap
 itself makes three attempts for exactly this reason (§2). The probe made one,
 so two cold starts in two days opened two `prod-alert` issues that the next run
 closed again, with an e-mail each time. Reachability failures (a timeout, DNS,
-404, 5xx) are therefore retried up to 3 times with a 2 s then 4 s backoff, and
-the alert says `after 3 attempts` so a blip stays distinguishable from an
-outage. A **200 is never retried**, whatever its body: a stale board, a short
+404, 5xx) are therefore retried, and the alert says `after N attempts` so a
+blip stays distinguishable from an outage. The shared default is 3 attempts
+with a 2 s then 4 s backoff; the probe's two GAS checks widen that to **4
+attempts, 5 s linear** (≈ 1 min of asking), because on 2026-09-15 a cold-start
+window outlasted the default and opened one more self-closing issue. A **200 is never retried**, whatever its body: a stale board, a short
 count, schema drift or a platform HTML page is evidence that `doGet` answered,
 and a second attempt would only hide a real fault for a minute.
+
+**An unreachable backend does not page while the mirror is serving.** The app
+reads `data/board.json` before it ever reaches GAS (§3), so `/exec` answering
+404 for a minute costs a visitor nothing but the drawer's trend sparkline,
+which fails quietly by design. `gas_unreachable` — a request that never got an
+answer — is therefore reported as ⚠️ **`degraded`** rather than failed whenever
+the `mirror` check passed: a row in the summary and a run annotation, no issue
+and no red run. `frontend/scripts/probe-verdict.mjs` holds that one rule.
+Nothing is hidden by it: an outage long enough to matter stops the crawl, the
+mirror stops moving, and `mirror_stale` pages within 8 h. The softening needs
+the mirror to be **`ok`**, never merely `skipped` — with no mirror published,
+GAS is the only path a visitor has and its silence is an outage. Contract
+failures (`gas_error`, `gas_stale`) always page: something answered, and
+answered wrongly.
 
 A failing run comments on the open issue labelled **`prod-alert`**, and only
 opens `[prod-alert] <categories> since <date>` when there is none (creating the

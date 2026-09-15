@@ -8,6 +8,11 @@ name: Production probe
 # frontend/src/types/board.schema.ts and to a freshness bound, and turns a
 # violation into exactly one open `prod-alert` issue.
 #
+# Only a violation a visitor would notice opens that issue. An unreachable
+# Apps Script while the static mirror still serves a fresh board is reported as
+# `degraded` — an annotation and a row in the summary, no issue, no red run.
+# frontend/scripts/probe-verdict.mjs holds that rule and the reasoning for it.
+#
 # Every 6 hours at :40 — offset from the backend's 4-hourly refresh so a probe
 # never lands in the minutes while a crawl is replacing the board.
 on:
@@ -90,6 +95,13 @@ jobs:
 
             await core.summary.addRaw(result.summary_md).write();
 
+            // Visible in the run without failing it: a degraded check is a
+            // note for whoever is already looking, not a reason to page.
+            const degraded = result.checks.filter((c) => c.status === 'degraded');
+            for (const check of degraded) {
+              core.warning(`${check.name}: ${check.detail}`, { title: `degraded (${check.category})` });
+            }
+
             // One open issue, ever: a new issue every 6 hours would bury the
             // first one and train its reader to ignore the label.
             const { data: openAlerts } = await github.rest.issues.listForRepo({
@@ -111,7 +123,11 @@ jobs:
                 });
                 core.info(`closed #${existing.number}`);
               }
-              core.info('all checks passed');
+              core.info(
+                degraded.length
+                  ? `nothing a visitor would notice; ${degraded.length} check(s) degraded`
+                  : 'all checks passed',
+              );
               return;
             }
 
