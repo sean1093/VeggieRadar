@@ -41,7 +41,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BOARD_HEALTHY_ITEMS, boardMismatch } from '../src/types/board.schema.ts';
 import { get as request, outcome, withRetry } from './gas-retry.mjs';
-import { applyVerdict, DEGRADED, GAS_UNREACHABLE } from './probe-verdict.mjs';
+import { applyVerdict, DEGRADED, reachabilityCategory } from './probe-verdict.mjs';
 
 const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -207,7 +207,7 @@ async function checkGasBoard() {
   if (!API_BASE_URL) return failed(name, 'gas_error', 'no API base URL: set API_BASE_URL or VITE_API_BASE_URL');
   const res = await getGas(`${API_BASE_URL}?action=board`);
   const reached = outcome(res);
-  if (!reached.ok) return failed(name, GAS_UNREACHABLE, reached.reason, res.body);
+  if (!reached.ok) return failed(name, reachabilityCategory(res), reached.reason, res.body);
 
   // Apps Script answers 200 with an HTML page for platform-level failures
   // (over quota, a deploy that never re-consented to its scopes), so the
@@ -250,7 +250,7 @@ async function checkDiag() {
   }
   const res = await getGas(`${API_BASE_URL}?action=diag`);
   const reached = outcome(res);
-  if (!reached.ok) return unavailable(failed(name, GAS_UNREACHABLE, reached.reason, res.body));
+  if (!reached.ok) return unavailable(failed(name, reachabilityCategory(res), reached.reason, res.body));
 
   const parsed = parseObject(res.body);
   if (parsed.problem) {
@@ -308,10 +308,11 @@ function renderSummary(checks, checkedAt) {
   if (checks.some((c) => c.status === DEGRADED)) {
     lines.push(
       '',
-      '> ⚠️ **degraded, not paging.** Apps Script is unreachable, but the mirror above is'
-        + ' serving a fresh board, so visitors still see today\u2019s prices (only the drawer\u2019s'
-        + ' trend chart is affected). An outage long enough to matter freezes that mirror, and'
-        + ' the `mirror` check pages on it within 8 h.',
+      '> ⚠️ **degraded, not paging.** Apps Script never answered, but the mirror above is'
+        + ' serving a fresh board, so every visitor still sees today\u2019s prices. What is lost:'
+        + ' the drawer\u2019s trend chart, and a search for a crop the board does not carry.'
+        + ' An outage long enough to matter freezes that mirror, and the `mirror` check pages'
+        + ' on it within 8 h.',
     );
   }
   for (const failure of checks.filter((c) => (c.status === 'failed' || c.status === DEGRADED) && c.excerpt)) {

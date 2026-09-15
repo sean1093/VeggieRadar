@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyVerdict, DEGRADED, GAS_UNREACHABLE } from './probe-verdict.mjs';
+import { applyVerdict, DEGRADED, GAS_UNREACHABLE, reachabilityCategory } from './probe-verdict.mjs';
 
 const check = (name, status, category) => ({ name, status, ...(category ? { category } : {}) });
 const mirrorOk = check('mirror', 'ok');
@@ -74,5 +74,26 @@ describe('applyVerdict — the mirror is not serving', () => {
   it('is not fooled by a mirror check that never ran', () => {
     const out = applyVerdict([check('pages', 'ok'), gasDown]);
     expect(statusOf(out, 'gas_board')).toBe('failed');
+  });
+});
+
+describe('reachabilityCategory — what "no usable answer" was', () => {
+  it('calls the symptoms that never reached doGet unreachable', () => {
+    expect(reachabilityCategory({ status: 404, body: '<!DOCTYPE html>' })).toBe(GAS_UNREACHABLE);
+    expect(reachabilityCategory({ status: 503, body: '' })).toBe(GAS_UNREACHABLE);
+    expect(reachabilityCategory({ status: 0, body: '', error: 'TimeoutError: …' })).toBe(GAS_UNREACHABLE);
+  });
+
+  it('pages for anything the backend itself served, however useless', () => {
+    // A deployment whose access was narrowed to its owner answers 403 to every
+    // visitor; an empty 200 is `doGet` returning nothing. Softening either to
+    // a summary row would leave a real outage unreported for up to 8 h.
+    expect(reachabilityCategory({ status: 403, body: '' })).toBe('gas_error');
+    expect(reachabilityCategory({ status: 302, body: '' })).toBe('gas_error');
+    expect(reachabilityCategory({ status: 200, body: '' })).toBe('gas_error');
+  });
+
+  it('survives a response the probe never got to make', () => {
+    expect(reachabilityCategory(undefined)).toBe('gas_error');
   });
 });

@@ -884,7 +884,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-512 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
+515 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1113,22 +1113,36 @@ and a second attempt would only hide a real fault for a minute.
 
 **An unreachable backend does not page while the mirror is serving.** The app
 reads `data/board.json` before it ever reaches GAS (§3), so `/exec` answering
-404 for a minute costs a visitor nothing but the drawer's trend sparkline,
-which fails quietly by design. `gas_unreachable` — a request that never got an
-answer — is therefore reported as ⚠️ **`degraded`** rather than failed whenever
-the `mirror` check passed: a row in the summary and a run annotation, no issue
-and no red run. `frontend/scripts/probe-verdict.mjs` holds that one rule.
-Nothing is hidden by it: an outage long enough to matter stops the crawl, the
-mirror stops moving, and `mirror_stale` pages within 8 h. The softening needs
-the mirror to be **`ok`**, never merely `skipped` — with no mirror published,
-GAS is the only path a visitor has and its silence is an outage. Contract
-failures (`gas_error`, `gas_stale`) always page: something answered, and
+404 for a minute still leaves every visitor with today's prices. Two things do
+degrade meanwhile: the drawer's trend sparkline is empty, and a search for a
+crop the board does not carry answers 「服務忙磌中，請稍後再試」 instead of a
+result. Both are bounded; neither is the board going dark. So
+`gas_unreachable` — a request that never reached `doGet` — is reported as ⚠️
+**`degraded`** rather than failed whenever the `mirror` check passed: a row in
+the summary and a run annotation, no issue and no red run.
+`frontend/scripts/probe-verdict.mjs` holds that one rule, and three guards keep
+it honest:
+
+- The softening needs the mirror to be **`ok`**, never merely `skipped` — with
+  no mirror published, GAS is the only path a visitor has and its silence is an
+  outage.
+- Only what `isTransient` retried counts as unreachable (404, 5xx, no answer
+  at all). A 403 on a deployment whose access was narrowed, a redirect, or a
+  200 with an empty body came *from* the backend and pages as `gas_error`.
+- A degraded run never closes an open `prod-alert`: it comments
+  「still degraded」 and leaves it open, because an over-quota backend moves
+  between answering wrongly and not answering at all.
+
+Nothing is hidden by any of it: an outage long enough to matter stops the
+crawl, the mirror stops moving, and `mirror_stale` pages within 8 h. Contract
+failures (`gas_error`, `gas_stale`) always page — something answered, and
 answered wrongly.
 
 A failing run comments on the open issue labelled **`prod-alert`**, and only
 opens `[prod-alert] <categories> since <date>` when there is none (creating the
 label on first use). A fully passing run comments 「recovered」 on that issue
-and closes it. So at most one alert is ever open: a fresh issue every 6 hours
+and closes it, unless that run is degraded (above), in which case the issue
+stays open. So at most one alert is ever open: a fresh issue every 6 hours
 would bury the first one and train its reader to ignore the label — the same
 reason the e-mail alerting has an incident window. The job also goes red
 whenever the probe did, and appends the summary table to the run's step

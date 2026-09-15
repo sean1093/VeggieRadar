@@ -112,20 +112,29 @@ jobs:
             const stamp = `${result.checked_at.slice(0, 16).replace('T', ' ')} UTC`;
 
             if (result.ok) {
+              // Degraded is not recovered. An open alert may well be about the
+              // very endpoint that is now merely unreachable — an over-quota
+              // backend goes from HTML error page to timing out between runs —
+              // and closing it there would lose a live incident.
+              const heading = degraded.length ? 'still degraded' : 'recovered';
               if (existing) {
                 await github.rest.issues.createComment({
                   owner, repo, issue_number: existing.number,
-                  body: `**recovered** — ${stamp}\n\n${result.summary_md}\n\n[Probe run](${runUrl})`,
+                  body: `**${heading}** — ${stamp}\n\n${result.summary_md}\n\n[Probe run](${runUrl})`,
                 });
-                await github.rest.issues.update({
-                  owner, repo, issue_number: existing.number,
-                  state: 'closed', state_reason: 'completed',
-                });
-                core.info(`closed #${existing.number}`);
+                if (degraded.length) {
+                  core.info(`left #${existing.number} open: ${degraded.length} check(s) degraded`);
+                } else {
+                  await github.rest.issues.update({
+                    owner, repo, issue_number: existing.number,
+                    state: 'closed', state_reason: 'completed',
+                  });
+                  core.info(`closed #${existing.number}`);
+                }
               }
               core.info(
                 degraded.length
-                  ? `nothing a visitor would notice; ${degraded.length} check(s) degraded`
+                  ? `no visitor-facing failure; ${degraded.length} check(s) degraded`
                   : 'all checks passed',
               );
               return;

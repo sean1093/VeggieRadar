@@ -7,8 +7,15 @@
  * to show a board: `useBoard` reads the static mirror published next to the
  * bundle first and only reaches GAS when that mirror is missing or stale
  * (`src/services/api.ts`). So when `?action=board` is unreachable while the
- * mirror is fresh, every visitor still gets today's prices; what they lose is
- * the trend sparkline inside the drawer, which fails quietly by design.
+ * mirror is fresh, every visitor still gets today's prices.
+ *
+ * They do lose something, and it is worth naming rather than waving away: the
+ * drawer's trend sparkline is empty (`fetchTrend` fails quietly by design),
+ * and a search for anything the board does not carry — an out-of-season crop,
+ * a typo — reaches GAS (`useSearch`) and answers 「服務忙碌中，請稍後再試」
+ * instead of a result or a suggestion. Both are real; neither is the board
+ * going dark, which is what this project exists to deliver and what an alert
+ * at 3 a.m. should be reserved for.
  *
  * That distinction matters because Apps Script answers `/exec` with a platform
  * 404 HTML page for minutes at a time and then recovers on its own. Three
@@ -24,6 +31,8 @@
  * decides who reports the outage, not whether it is reported.
  */
 
+import { isTransient } from './gas-retry.mjs';
+
 /**
  * A GAS check that never got an answer — a cold-start 404, a 5xx, a timeout.
  * Kept separate from `gas_error`, which is a backend that answered *wrongly*
@@ -31,6 +40,21 @@
  * a page: something served that, so something is genuinely misconfigured.
  */
 export const GAS_UNREACHABLE = 'gas_unreachable';
+
+/**
+ * Which kind of "no usable answer" a GAS response is.
+ *
+ * `isTransient` is the same predicate the retry used, and it is exactly the
+ * set of symptoms proving the request never reached `doGet`: a cold-start 404,
+ * a 5xx, a request that got no answer at all. Everything else `outcome()`
+ * rejects came *from* the backend and is a fault that pages — a 403 on a
+ * deployment whose access was narrowed to its owner, a redirect, or a 200
+ * carrying an empty body. Reading `outcome().ok === false` as "unreachable"
+ * would quietly downgrade those to a summary row nobody is paged for.
+ */
+export function reachabilityCategory(res) {
+  return isTransient(res) ? GAS_UNREACHABLE : 'gas_error';
+}
 
 /** Checks with this status are shown and explained, but do not fail the run. */
 export const DEGRADED = 'degraded';
