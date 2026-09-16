@@ -898,7 +898,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-532 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
+538 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1229,6 +1229,7 @@ summary. It needs no secret; every endpoint it touches is public (§2).
 ```bash
 cd frontend
 node --experimental-strip-types scripts/prod-probe.mjs   # writes probe-result.json, exit 1 on anything that pages
+npx vitest run scripts/                                 # the verdict rules, and the probe end to end
 ```
 The flag is required on Node 22.6–22.17 and a no-op from 22.18 on. A degraded
 run exits **0** — the exit code is the paging decision, not a health score, and

@@ -4,9 +4,11 @@
  *
  * The mirror is a *file*: once written it keeps serving whatever was in it,
  * with its own `stale: false` frozen inside, until the next scheduled run
- * replaces it. A bad fetch is therefore not a bad request that self-heals in
- * four hours — it is up to four hours of wrong or empty prices in front of
- * every visitor, and it would also overwrite the last good mirror on the way.
+ * replaces it — which §2 measures at a median 4.5 h and a worst of 11.2 h,
+ * whatever interval the cron asks for. A bad fetch is therefore not a bad
+ * request that self-heals on the next tick: it is hours of wrong or empty
+ * prices in front of every visitor, and it would overwrite the last good
+ * mirror on the way.
  * So the payload is held to the same contract and the same freshness bound the
  * app and the production probe use, and a rejected board leaves the previously
  * published mirror in place.

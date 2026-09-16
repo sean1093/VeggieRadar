@@ -53,12 +53,13 @@ on:
     # Re-measure on runs that PUBLISHED, not on runs that were created — with
     # `cancel-in-progress: false` a tick can be cancelled while pending, which
     # would shrink the median while republishing nothing:
-    #   gh api --paginate --slurp \
+    #   gh api --paginate \
     #     '/repos/{owner}/{repo}/actions/workflows/deploy-pages.yml/runs?event=schedule&status=success&per_page=100' \
-    #     --jq '[.[].workflow_runs[].created_at] | sort'
-    # `--slurp` matters: without it `--jq` runs per page, so a week of hourly
-    # runs comes back as two separately sorted arrays with a bogus gap at the
-    # seam — in the one number the keep-or-revert decision turns on.
+    #     | jq -s '[.[].workflow_runs[].created_at] | sort'
+    # Pipe to `jq -s`, do not reach for `--jq`: gh applies that per page, so a
+    # week of hourly runs comes back as two separately sorted arrays with a
+    # bogus gap at the seam — in the one number the keep-or-revert decision
+    # turns on. `--slurp` would fix that but gh refuses it alongside `--jq`.
     # The baseline to beat is a 4.5 h median over a week; the 46 runs it came
     # from were all successful, so the two numbers compare. If it has not moved
     # below ~4 h, the floor is real: stop buying deploys and fix the mechanism
