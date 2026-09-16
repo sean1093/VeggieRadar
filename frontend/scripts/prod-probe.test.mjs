@@ -134,6 +134,23 @@ describe('prod-probe, end to end', () => {
     expect(result.exitCode).toBe(0);
   });
 
+  it('drops the body excerpt when it softens, since the board is valid', async () => {
+    // A green run must not dump 500 characters of correct prices into the job
+    // summary and into any open prod-alert comment.
+    mirrorBody = JSON.stringify(board(9 * HOUR));
+    const result = await probe();
+    expect(result.mirror.status).toBe('degraded');
+    expect(result.summary_md).not.toMatch(/mirror — response body/);
+  });
+
+  it('keeps the excerpt when the mirror really failed', async () => {
+    const drifted = board(9 * HOUR);
+    drifted.items[0].catty_price = 'NT$16.6';
+    mirrorBody = JSON.stringify(drifted);
+    const result = await probe();
+    expect(result.summary_md).toMatch(/mirror — response body/);
+  });
+
   it('pages for a mirror old enough to mean nothing is publishing', async () => {
     mirrorBody = JSON.stringify(board(MIRROR_BACKSTOP_MS + HOUR));
     const result = await probe();

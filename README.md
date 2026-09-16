@@ -900,7 +900,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-543 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
+545 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1192,9 +1192,10 @@ it honest:
   are in the `gas_board` row, so the issue says why. It stops at **16 h**: the worst lateness this project has produced is
   the 11.2 h deploy gap plus a 4 h crawl, and the margin above that is kept
   small because every hour of it is an hour the CDN fast path is bypassed with
-  nobody told. That is a bound on the verdict, not on the alert: the probe
-  samples every 6 h, so a frozen mirror can go unreported until 22 h, against
-  14 h before any softening existed. Past it the mirror is not late — #53's
+  nobody told. That is a bound on the verdict, not on the alert: the probe's
+  own schedule is measured at a 6.6 h median and an 8.8 h worst, so a frozen
+  mirror can go unreported until about 25 h, against 17 h before any softening
+  existed. Past it the mirror is not late — #53's
   froze while the deploys themselves kept succeeding, which no gap bounds. A mirror whose
   `generated_at` is missing, unparsable or in the future is corrupt rather
   than late and is never softened. Each softening requires the other path to

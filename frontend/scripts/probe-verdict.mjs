@@ -82,9 +82,11 @@ export const DEGRADED = 'degraded';
  * hour inside it is an hour the CDN fast path is bypassed on every visit with
  * nobody told.
  *
- * The probe samples every 6 h, so this is a bound on the *verdict*, not on the
- * alert: a mirror that freezes can go unreported until 22 h, against 14 h
- * before any softening existed. That is the price of not paging for ordinary
+ * The probe samples on its own schedule, so this is a bound on the *verdict*,
+ * not on the alert. That schedule is measured, not assumed — a 6.6 h median
+ * and an 8.8 h worst against a cron asking for 6 h, the same gap between ask
+ * and reality this project keeps rediscovering — so a mirror that freezes can
+ * go unreported until about 25 h, against 17 h before any softening existed. That is the price of not paging for ordinary
  * lateness, and it is only worth it while 16 h really is above ordinary — if
  * the deploy cadence changes, re-measure and move this with it.
  *
@@ -197,10 +199,13 @@ export const CLIENT_BOARD_TIMEOUT_MS = 12_000;
  *     read as an outage, where `fetchBoard` abandons each attempt at 12 s.
  *     Apps Script over quota queues rather than failing fast, so an answer at
  *     25 s is `ok` here and a timeout for everyone.
- *   - It retries four times over 30 s of backoff, where `fetchBoard` spends
- *     its three attempts in about 2.7 s. A cold-start 404 window outlasts the
- *     visitor and not the probe, so a board won on the fourth attempt — fast,
- *     once it arrives — is still a board nobody was served.
+ *   - It retries four times over 30 s of backoff. `fetchBoard` also retries a
+ *     404 — three attempts, 0.9 s then 1.8 s apart — but its *entire* retry
+ *     schedule is shorter than this probe's first backoff of 5 s. So any
+ *     answer that took more than one attempt here arrived after the client
+ *     had already given up, however fast the winning attempt itself was.
+ *     That is why the attempt count is asked about at all: latency alone
+ *     describes the queued backend, not the cold-started one.
  *
  * Either way every visitor is left on the old mirror under
  * 「目前連不上伺服器」, which is precisely the state a stale mirror must
@@ -243,7 +248,15 @@ export function applyVerdict(checks, thresholds) {
   // The mirror is the late one, and the backend answered a clean, current
   // board — so every visitor falling through to it sees correct prices.
   if (mirrorMerelyLate(checks, thresholds) && servesVisitors(checks)) {
-    return checks.map((check) => (check.name === 'mirror' ? { ...check, status: DEGRADED } : check));
+    return checks.map((check) => {
+      if (check.name !== 'mirror') return check;
+      // The excerpt goes with it. It was attached because the check failed,
+      // but a mirror softened here is a *valid* board by construction — the
+      // only thing wrong with it is its age — so 500 characters of correct
+      // prices in the summary and in any open alert comment is pure noise.
+      const { excerpt, ...rest } = check;
+      return { ...rest, status: DEGRADED };
+    });
   }
 
   return checks;
