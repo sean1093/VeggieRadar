@@ -884,7 +884,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-504 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
+522 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1078,8 +1078,8 @@ could drift:
 | --- | --- | --- |
 | `pages` | 200, `<title>` still contains 今日菜價, and a `<script type="module">` is present — a Pages deploy that lost its bundle still serves a plausible shell | `pages_down` |
 | `mirror` | `data/board.json` is 200, matches the schema and was crawled < 8 h ago — the same bound the publish-side validator applies (§2). **A 404 stays `skipped`**, not a failure: a deploy that could obtain no mirror at all publishes without one on purpose, and the visitors it sends to GAS are covered by `gas_board` below | `mirror_stale` |
-| `gas_board` | the body is JSON (Apps Script answers platform errors with HTML and HTTP 200), matches the schema, `stale === false`, `count ≥ 60`, crawled < 8 h ago | `gas_error` / `gas_stale` |
-| `gas_diag` | `?action=diag` answers JSON | `gas_error` |
+| `gas_board` | the body is JSON (Apps Script answers platform errors with HTML and HTTP 200), matches the schema, `stale === false`, `count ≥ 60`, crawled < 8 h ago | `gas_unreachable` / `gas_error` / `gas_stale` |
+| `gas_diag` | `?action=diag` answers JSON | `gas_unreachable` / `gas_error` |
 | `gas_trigger` | `triggers` includes `refreshBoardCache` | `trigger_missing` |
 | `gas_incident` | `alert.incident_open === false` | `incident_open` |
 | `gas_history` | `history.items ≥ 60` | `history_thin` |
@@ -1095,24 +1095,94 @@ today.** The trading date legitimately stands still over weekends, holidays and
 typhoon closures (§2, "Trading date vs. refresh time"), so a `date`-based check
 would page a human every Sunday and be ignored by the second one.
 
-**The two GAS checks retry, and so do the deploy's two mirror fetches (§8);
-nothing else does** — all through `scripts/gas-retry.mjs`, so there is one
-policy to tune.
+**Every scheduled request this repo makes retries** — the probe's four checks
+and the deploy's two mirror fetches (§8), all through `scripts/gas-retry.mjs`,
+so there is one policy to tune. What differs is whose 404 it is: on Apps
+Script a 404 is a cold start and is asked again, while on GitHub Pages it is
+the definitive “nothing published here” and is final (`isTransientStatic`).
+The two static checks matter more than they look, because `mirror` passing is
+what softens an unreachable backend — a lone CDN blip there would withdraw the
+softening and open the false alarm this policy exists to prevent.
 Apps Script answers a cold start on `/exec` with a platform 404 HTML page, and
 an account near its quota queues a request until the deadline expires — the app
 itself makes three attempts for exactly this reason (§2). The probe made one,
 so two cold starts in two days opened two `prod-alert` issues that the next run
 closed again, with an e-mail each time. Reachability failures (a timeout, DNS,
-404, 5xx) are therefore retried up to 3 times with a 2 s then 4 s backoff, and
-the alert says `after 3 attempts` so a blip stays distinguishable from an
-outage. A **200 is never retried**, whatever its body: a stale board, a short
+404, 5xx) are therefore retried, and the alert says `after N attempts` so a
+blip stays distinguishable from an outage. The shared default is 3 attempts
+with a 2 s then 4 s backoff; the probe's two GAS checks widen that to **4
+attempts, 5 s linear**, because on 2026-09-15 a cold-start window outlasted the
+default and opened one more self-closing issue. How long that actually takes
+depends on the symptom: a cold-start 404 comes back in about a second, so the
+default spent ~10 s and the widened budget spends ~35 s, while a request queued
+against the 30 s deadline can stretch either to 3 × or 4 × that plus the
+backoff (96 s and 150 s respectively). That deadline is deliberately no
+shorter than the deploy's: the deploy still refreshing the mirror is what
+softens an unreachable backend, so a probe that gave up sooner than the deploy
+does would hold a queued backend green forever. A **200 is never retried**, whatever its body: a stale board, a short
 count, schema drift or a platform HTML page is evidence that `doGet` answered,
 and a second attempt would only hide a real fault for a minute.
 
+**An unreachable backend does not page while the mirror is serving.** The app
+reads `data/board.json` before it ever reaches GAS (§3), so `/exec` answering
+404 for a minute still leaves every visitor with today's prices. Two things do
+degrade meanwhile: the drawer's trend sparkline is empty, and a search for a
+crop the board does not carry answers 「服務忙碌中，請稍後再試」 instead of a
+result. Both are bounded; neither is the board going dark. So
+`gas_unreachable` — a request that never reached `doGet` — is reported as ⚠️
+**`degraded`** rather than failed while the mirror is genuinely carrying
+visitors: a row in the summary and a run annotation, no issue and no red run.
+`frontend/scripts/probe-verdict.mjs` holds that one rule, and four guards keep
+it honest:
+
+- **“Carrying visitors” is the app's bar, not the probe's.** `useBoard` serves
+  the mirror without asking GAS only while it is under `BOARD_MAX_AGE_MS`
+  (6 h) — not the 8 h the `mirror` check allows. A mirror in the 6–8 h band
+  passes its own check while every visitor falls through to a backend that is
+  not answering, and that band is exactly where an outage lands, because the
+  deploy cannot refresh the mirror while GAS is down. Above 6 h, the probe
+  pages.
+- **Only the board endpoint may be softened.** The 8 h backstop exists because
+  `deploy-pages.yml` refreshes the mirror from `?action=board`, so it engages
+  when *that* endpoint is silent. A quiet `?action=diag` beside a healthy board
+  has no backstop at all — the mirror would keep refreshing forever while
+  `gas_trigger`, `gas_incident` and `gas_history` sat at `skipped` and nobody
+  learned the baselines stopped publishing — so it pages. `handleDiag` does
+  real work per call while `readBoard` is a cache read, which is exactly how
+  diag fails alone.
+- **A short board is not a served board.** The mirror must also carry
+  `BOARD_HEALTHY_ITEMS`. A throttled MOA batch is normally caught by
+  `gas_board`'s count guard, which during an outage never gets a body to
+  measure.
+- **Only what was retried counts as unreachable** (404, 5xx, no answer at
+  all). A 403 on a deployment whose access was narrowed, a redirect, or a 200
+  with an empty body came *from* the backend and pages as `gas_error`.
+- **A run closes only what it actually verified.** A category counts as
+  verified when every check that could report it came back `ok`, derived from
+  the run rather than assumed. On a degraded run that means an alert naming
+  only `pages_down` or `mirror_stale` closes as recovered, while anything
+  naming GAS stays open with a 「still degraded」 comment: `gas_board` got no
+  body to measure, the three checks behind `diag` are `skipped`, and an
+  over-quota backend moves between answering wrongly and not answering at all.
+  The same rule catches a quieter case — a deploy that published no mirror
+  leaves `mirror` at `skipped`, which is no evidence that a `mirror_stale`
+  alert recovered, so it is held open as 「not verified」. A title that does
+  not name known categories is read as covering everything, and closes only on
+  a run that measured the lot.
+
+With no mirror published at all the `mirror` check is `skipped`, GAS is the
+only path a visitor has, and its silence pages like any other outage. Contract
+failures (`gas_error`, `gas_stale`) always page — something answered, and
+answered wrongly.
+
 A failing run comments on the open issue labelled **`prod-alert`**, and only
 opens `[prod-alert] <categories> since <date>` when there is none (creating the
-label on first use). A fully passing run comments 「recovered」 on that issue
-and closes it. So at most one alert is ever open: a fresh issue every 6 hours
+label on first use). It also folds any category it found into that title, so
+the title always states what the whole incident covers — later runs only
+comment, and the recovery rule above reads the title to decide what a degraded
+run is allowed to close. A fully passing run comments 「recovered」 on that issue
+and closes it, except for the categories a degraded run cannot vouch for
+(above), which keep it open. So at most one alert is ever open: a fresh issue every 6 hours
 would bury the first one and train its reader to ignore the label — the same
 reason the e-mail alerting has an incident window. The job also goes red
 whenever the probe did, and appends the summary table to the run's step
@@ -1120,12 +1190,19 @@ summary. It needs no secret; every endpoint it touches is public (§2).
 
 ```bash
 cd frontend
-node --experimental-strip-types scripts/prod-probe.mjs   # writes probe-result.json, exit 1 on any failure
+node --experimental-strip-types scripts/prod-probe.mjs   # writes probe-result.json, exit 1 on anything that pages
 ```
-The flag is required on Node 22.6–22.17 and a no-op from 22.18 on.
+The flag is required on Node 22.6–22.17 and a no-op from 22.18 on. A degraded
+run exits **0** — the exit code is the paging decision, not a health score, and
+`probe-result.json` carries the per-check detail either way.
+
 `workflow_dispatch` takes `pages_url` / `api_base_url` inputs, so the alert
-path can be exercised against a deliberately bad URL instead of waiting for a
-real outage.
+path can be rehearsed against a deliberately bad URL instead of waiting for a
+real outage. Use `pages_url`: a bad `api_base_url` alongside the real, fresh
+mirror is precisely the case the degraded rule absorbs, so it now ends green
+with two ⚠️ rows and no issue — which rehearses the *softening*, not the
+alert. To exercise the alert through GAS, point `pages_url` somewhere with no
+`data/board.json`, so the mirror check is `skipped` and nothing is softened.
 
 Not UptimeRobot or a similar service: Actions is already free here, and what
 has to be verified is the schema and the freshness rather than an HTTP 200 —
