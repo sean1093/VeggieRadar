@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { applyVerdict, DEGRADED, GAS_UNREACHABLE, reachabilityCategory, servingFor } from './probe-verdict.mjs';
+import {
+  applyVerdict,
+  CLIENT_BOARD_TIMEOUT_MS,
+  DEGRADED,
+  GAS_UNREACHABLE,
+  reachabilityCategory,
+  servingFor,
+} from './probe-verdict.mjs';
 
 const HOUR = 60 * 60 * 1000;
 // The app's own thresholds, as `prod-probe.mjs` passes them: `useBoard` serves
@@ -152,7 +159,7 @@ const lateMirror = (ageMs) => ({
   ...check('mirror', 'failed', 'mirror_stale'),
   serving: { ageMs, count: 93 },
 });
-const boardOk = check('gas_board', 'ok');
+const boardOk = { ...check('gas_board', 'ok'), answeredInMs: 800 };
 
 describe('applyVerdict — the mirror is the late one', () => {
   it('does not page while the backend serves every visitor a current board', () => {
@@ -176,6 +183,28 @@ describe('applyVerdict — the mirror is the late one', () => {
     expect(statusOf(out, 'mirror')).toBe('failed');
     expect(statusOf(out, 'gas_board')).toBe('failed');
     expect(pages(out)).toBe(true);
+  });
+
+  it('pages when the backend answered, but slower than any visitor waits', () => {
+    // Apps Script over quota queues rather than failing fast. The probe waits
+    // 30 s and calls that ok; `fetchBoard` abandons each attempt at 12 s, so
+    // every visitor is on the stale mirror under 「目前連不上伺服器」.
+    const slow = { ...check('gas_board', 'ok'), answeredInMs: 25_000 };
+    const out = verdict([check('pages', 'ok'), lateMirror(9 * HOUR), slow]);
+    expect(statusOf(out, 'mirror')).toBe('failed');
+    expect(pages(out)).toBe(true);
+  });
+
+  it('softens on an answer that arrived just inside the client deadline', () => {
+    const justInTime = { ...check('gas_board', 'ok'), answeredInMs: CLIENT_BOARD_TIMEOUT_MS };
+    const out = verdict([check('pages', 'ok'), lateMirror(9 * HOUR), justInTime]);
+    expect(statusOf(out, 'mirror')).toBe(DEGRADED);
+  });
+
+  it('pages when nothing timed the backend at all', () => {
+    const untimed = check('gas_board', 'ok');
+    const out = verdict([check('pages', 'ok'), lateMirror(9 * HOUR), untimed]);
+    expect(statusOf(out, 'mirror')).toBe('failed');
   });
 
   it('pages when the backend answered a board that was itself wrong', () => {

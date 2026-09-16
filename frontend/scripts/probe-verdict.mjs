@@ -159,8 +159,31 @@ export function servingFor({ ageMs, count, problemKind, maxSkewMs }) {
   return { ageMs, count };
 }
 
-/** True when `name` reported a clean, current board this run. */
-const answered = (checks, name) => checks.some((check) => check.name === name && check.status === 'ok');
+/**
+ * The browser's own deadline for one `?action=board` attempt — `BOARD_TIMEOUT_MS`
+ * in `src/services/api.ts`, pinned to it by `api.timeouts.test.ts` because the
+ * probe cannot import that module without dragging the app in.
+ */
+export const CLIENT_BOARD_TIMEOUT_MS = 12_000;
+
+/**
+ * True when the backend answered a clean, current board *and did it fast
+ * enough that a visitor would have seen it*.
+ *
+ * The probe is deliberately more patient than the app: `TIMEOUT_MS` is 30 s
+ * so a queued request does not read as an outage. That patience must not be
+ * lent to this decision. Apps Script over quota queues rather than failing
+ * fast, and an answer at 25 s is `ok` here while `fetchBoard` has already
+ * abandoned all three of its 12 s attempts — every visitor then sees the old
+ * mirror under 「目前連不上伺服器」, which is precisely the state a stale
+ * mirror must still page for. A check with no timing recorded is treated as
+ * not having answered in time; only `gas_board` carries one.
+ */
+function servesVisitors(checks) {
+  const board = checks.find((check) => check.name === 'gas_board');
+  if (!board || board.status !== 'ok') return false;
+  return typeof board.answeredInMs === 'number' && board.answeredInMs <= CLIENT_BOARD_TIMEOUT_MS;
+}
 
 /**
  * Downgrades one path's failure to `degraded` while the other path is serving,
@@ -190,7 +213,7 @@ export function applyVerdict(checks, thresholds) {
 
   // The mirror is the late one, and the backend answered a clean, current
   // board — so every visitor falling through to it sees correct prices.
-  if (mirrorMerelyLate(checks, thresholds) && answered(checks, 'gas_board')) {
+  if (mirrorMerelyLate(checks, thresholds) && servesVisitors(checks)) {
     return checks.map((check) => (check.name === 'mirror' ? { ...check, status: DEGRADED } : check));
   }
 

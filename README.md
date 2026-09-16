@@ -898,7 +898,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-538 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
+542 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1179,9 +1179,15 @@ it honest:
   path down, a fault is both. `useBoard` paints the stale mirror and
   `fetchBoard` then replaces it with current prices, so what a late deploy
   costs is the CDN fast path — a round trip and a GAS execution per visit —
-  not the board. That softening needs `gas_board` to be **`ok`**, and it stops
-  at 24 h: past a day the deploy is not late, something stopped publishing,
-  and no amount of backend health makes that self-correcting. A mirror whose
+  not the board. That softening needs `gas_board` to be **`ok` and to have
+  answered inside `BOARD_TIMEOUT_MS`** — the probe waits 30 s where the browser
+  waits 12, and an answer a queued Apps Script took 25 s to give is one every
+  visitor already timed out on, which is exactly when a stale mirror must still
+  page. It stops at **16 h**: the worst lateness this project has produced is
+  the 11.2 h deploy gap plus a 4 h crawl, and the margin above that is kept
+  small because every hour of it is an hour the CDN fast path is bypassed with
+  nobody told. Past it the mirror is not late — #53's froze while the deploys
+  themselves kept succeeding, which no gap bounds. A mirror whose
   `generated_at` is missing, unparsable or in the future is corrupt rather
   than late and is never softened. Each softening requires the other path to
   be healthy, so they are mutually exclusive and a run where neither serves

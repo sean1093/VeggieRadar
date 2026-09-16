@@ -74,11 +74,17 @@ const MAX_AGE_MS = 8 * 60 * 60 * 1000;
 // A `generated_at` ahead of this clock is corrupt, not fresh; the allowance
 // covers ordinary clock skew between the runner and Google.
 const MAX_SKEW_MS = 5 * 60 * 1000;
-// A mirror this old is no longer a deploy that ran late — the longest gap
-// measured between scheduled deploys is 11.2 h, and the backend's own crawl
-// adds at most 4 h on top. Past a day, something stopped publishing, and that
-// pages even while the backend serves every visitor correctly.
-const MIRROR_BACKSTOP_MS = 24 * 60 * 60 * 1000;
+// A mirror this old is no longer a deploy that ran late. The longest gap
+// measured between scheduled deploys is 11.2 h and the backend's own crawl
+// adds at most 4 h on top, so 15.2 h is the worst lateness this project has
+// actually produced; the margin above it is deliberately small, because every
+// hour of it is an hour where the CDN fast path that carries almost all the
+// traffic is bypassed on every visit and nobody is told. Past it the mirror is
+// not late, something stopped publishing — #53's frozen mirror grew out of
+// repeated failed fetches while the deploys themselves kept succeeding, which
+// no deploy gap bounds — and that pages even while the backend serves every
+// visitor correctly.
+const MIRROR_BACKSTOP_MS = 16 * 60 * 60 * 1000;
 const EXCERPT_CHARS = 500;
 
 const PAGES_URL = withTrailingSlash(process.env.PAGES_URL || 'https://sean1093.github.io/VeggieRadar/');
@@ -270,7 +276,13 @@ async function checkGasBoard() {
   if (!(board.count >= BOARD_HEALTHY_ITEMS)) {
     return failed(name, 'gas_stale', `count ${board.count} < ${BOARD_HEALTHY_ITEMS}`, res.body);
   }
-  return ok(name, `${board.count} items, crawled ${hours(ageMs(board.generated_at))} h ago, stale=false`);
+  // `answeredInMs` is what lets `applyVerdict` ask whether a browser would
+  // have got this answer at all: the probe waits TIMEOUT_MS, `fetchBoard`
+  // waits BOARD_TIMEOUT_MS, and a queued Apps Script can sit between them.
+  return {
+    ...ok(name, `${board.count} items, crawled ${hours(ageMs(board.generated_at))} h ago, stale=false`),
+    answeredInMs: res.ms,
+  };
 }
 
 /**

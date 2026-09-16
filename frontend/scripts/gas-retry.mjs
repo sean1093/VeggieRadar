@@ -85,15 +85,24 @@ export function attemptSuffix(res) {
  * request must not hold a scheduled job open.
  */
 export async function get(url, { timeoutMs = 30_000, userAgent = 'VeggieRadar-fetch-retry' } = {}) {
+  const started = Date.now();
   try {
     const response = await fetch(url, {
       signal: AbortSignal.timeout(timeoutMs),
       headers: { 'user-agent': userAgent },
     });
-    return { status: response.status, body: await response.text() };
+    // `ms` is how long the answer took. A caller that gives the backend a
+    // longer deadline than the browser does needs it: an answer this probe
+    // waited 25 s for is one every visitor already timed out on.
+    return { status: response.status, body: await response.text(), ms: Date.now() - started };
   } catch (error) {
     // A deadline surfaces as TimeoutError, DNS/TLS failures as TypeError.
-    return { status: 0, body: '', error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) };
+    return {
+      status: 0,
+      body: '',
+      ms: Date.now() - started,
+      error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+    };
   }
 }
 

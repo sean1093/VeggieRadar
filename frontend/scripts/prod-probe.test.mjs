@@ -134,7 +134,7 @@ describe('prod-probe, end to end', () => {
   });
 
   it('pages for a mirror old enough to mean nothing is publishing', async () => {
-    mirrorBody = JSON.stringify(board(25 * HOUR));
+    mirrorBody = JSON.stringify(board(17 * HOUR));
     const result = await probe();
     expect(result.mirror.status).toBe('failed');
     expect(result.exitCode).toBe(1);
