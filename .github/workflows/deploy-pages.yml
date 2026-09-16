@@ -11,16 +11,32 @@ on:
   # The board mirror (README §2) is only as fresh as the last deploy, so the
   # deploy also runs on a clock of its own.
   schedule:
-    # Every two hours, not four. The backend's refresh trigger is installed by
-    # hand (`installDailyTrigger()`), so its 4-hourly phase is arbitrary: a
-    # 4-hourly fetch lands a fixed number of minutes before it forever and
-    # mirrors a board that is already ~4 h old. Production proved it — the
-    # probe opened issue #42 with a mirror 8.4 h old while GAS held one 0.4 h
-    # old. At this cadence the mirror trails the backend by at most ~2 h, which
-    # keeps it inside the client's 6 h authority window and the probe's 8 h
-    # bound whatever the trigger's phase. 12 Pages deploys a day, against a
-    # soft limit of 10 per hour.
-    - cron: '20 */2 * * *'
+    # Hourly, because what this cron *asks for* and what GitHub *runs* are not
+    # the same number. Measured over the 8 days to 2026-09-16, the `20 */2`
+    # schedule this replaces asked for 94 runs and fired 39 — 41 %, a median
+    # gap of 4.5 h and a worst of 7.9 h, against the 2 h it was written for.
+    #
+    # That gap is the whole budget. The mirror's age is the board's age when
+    # the deploy ran (0–4 h, the backend's hand-installed trigger phase) plus
+    # everything since, so a 4.5 h median gap puts a typical mirror near 6 h —
+    # the client's authority window, past which every visitor falls through to
+    # GAS — and the tail past the probe's 8 h bound. It did: issue #66, a
+    # mirror 8.8 h old while GAS held one 0.8 h old. Issue #42 was the same
+    # fault at the previous cadence, and halving the interval did not fix it
+    # because the misses scale with it.
+    #
+    # Asking twice an hour buys back the same 41 % on a much smaller interval.
+    # The tail is what matters, not the median: a 4 h gap needs three straight
+    # misses at hourly (~21 %) but seven at half-hourly (~2.5 %), and it is a
+    # 4 h gap landing on a 4 h-old board that puts the mirror past 8 h. At most
+    # 48 Pages deploys a day, against a soft limit of 10 per hour, and one GAS
+    # execution each — a cache read.
+    #
+    # Each run still installs, lints and runs the full suite before publishing.
+    # That is deliberate: skipping it on scheduled runs would save free minutes
+    # and open a hole, because a master whose own deploy failed on a red test
+    # would be published by the next tick half an hour later.
+    - cron: '20,50 * * * *'
   workflow_dispatch:
 
 # Allow the workflow to publish to GitHub Pages.
