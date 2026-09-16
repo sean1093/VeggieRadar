@@ -11,32 +11,52 @@ on:
   # The board mirror (README §2) is only as fresh as the last deploy, so the
   # deploy also runs on a clock of its own.
   schedule:
-    # Hourly, because what this cron *asks for* and what GitHub *runs* are not
-    # the same number. Measured over the 8 days to 2026-09-16, the `20 */2`
-    # schedule this replaces asked for 94 runs and fired 39 — 41 %, a median
-    # gap of 4.5 h and a worst of 7.9 h, against the 2 h it was written for.
+    # An EXPERIMENT, not a settled cadence — re-measure before trusting it.
+    #
+    # What this cron asks for and what GitHub runs are different numbers. Over
+    # the 222 h to 2026-09-16 the `20 */2 * * *` this replaces asked for ~111
+    # runs and GitHub created 46: a median gap of 4.5 h against the 2 h it was
+    # written for, and a worst of 11.2 h. None were cancelled or skipped —
+    # the ticks were simply never created. Delivery, when it happens, is
+    # punctual: a median 29 min past the slot and never more than 58.
     #
     # That gap is the whole budget. The mirror's age is the board's age when
     # the deploy ran (0–4 h, the backend's hand-installed trigger phase) plus
-    # everything since, so a 4.5 h median gap puts a typical mirror near 6 h —
-    # the client's authority window, past which every visitor falls through to
-    # GAS — and the tail past the probe's 8 h bound. It did: issue #66, a
-    # mirror 8.8 h old while GAS held one 0.8 h old. Issue #42 was the same
-    # fault at the previous cadence, and halving the interval did not fix it
-    # because the misses scale with it.
+    # everything since, so a 4.5 h median put a typical mirror near the
+    # client's 6 h authority window — past which every visitor falls through
+    # to GAS — and the tail past the probe's 8 h bound. It did: #66, a mirror
+    # 8.8 h old beside a board crawled 0.8 h earlier. #42 was the same fault
+    # one cadence earlier.
     #
-    # Asking twice an hour buys back the same 41 % on a much smaller interval.
-    # The tail is what matters, not the median: a 4 h gap needs three straight
-    # misses at hourly (~21 %) but seven at half-hourly (~2.5 %), and it is a
-    # 4 h gap landing on a 4 h-old board that puts the mirror past 8 h. At most
-    # 48 Pages deploys a day, against a soft limit of 10 per hour, and one GAS
-    # execution each — a cache read.
+    # Two explanations fit, and they disagree about this change. If ticks are
+    # dropped at ~59 %, halving the interval halves the realised gap. If
+    # instead this repo has an effective floor near 4 h, halving it changes
+    # nothing — and the data leans that way: only 5 of 45 gaps are under 3 h,
+    # where independent drops would put ~40 % of them at 2 h, and the
+    # 6-hourly `prod-probe.yml` on this same repo realises 6.6 h, i.e. nearly
+    # every tick, because its ask already clears the floor.
     #
-    # Each run still installs, lints and runs the full suite before publishing.
-    # That is deliberate: skipping it on scheduled runs would save free minutes
-    # and open a hole, because a master whose own deploy failed on a red test
-    # would be published by the next tick half an hour later.
-    - cron: '20,50 * * * *'
+    # So this asks hourly and nothing more. If the floor is real, GitHub drops
+    # the extra ticks and little changes; if it is not, the gap halves. Either
+    # way the answer is a week of runs away, and hourly bounds the cost while
+    # we wait: at most 24 Pages deploys a day against a soft limit of 10 per
+    # hour, and at most 24 `?action=board` reads. Those matter in one state —
+    # a board already past BOARD_MAX_AGE_MS makes `readBoard` queue a rebuild
+    # behind a 15-minute lock that any of these cadences clears, so a broken
+    # refresh trigger costs one crawl per deploy either way.
+    #
+    # Re-measure with the gaps between `event=schedule` runs of this workflow:
+    #   gh api '/repos/{owner}/{repo}/actions/workflows/deploy-pages.yml/runs?event=schedule&per_page=60'
+    # If the median gap has not moved below ~4 h, the floor is real: stop
+    # buying deploys and fix the mechanism instead (see the follow-up issue —
+    # have the backend dispatch a deploy when a crawl lands, which removes
+    # both terms rather than shrinking one).
+    #
+    # Each run still installs, lints and runs the full suite before
+    # publishing. Skipping that on scheduled runs would save free minutes and
+    # open a hole: a master whose own deploy failed on a red test would be
+    # published by the next tick an hour later.
+    - cron: '20 * * * *'
   workflow_dispatch:
 
 # Allow the workflow to publish to GitHub Pages.
@@ -45,10 +65,14 @@ permissions:
   pages: write
   id-token: write
 
-# One deploy at a time; cancel superseded runs.
+# One deploy at a time. Never cancel in flight: the only thing a cancellation
+# buys is skipping an already-obsolete build, and the thing it risks is killing
+# a run inside `actions/deploy-pages`. GitHub's own Pages starter workflow pins
+# this to false for that reason, and a shorter cron interval only raises the
+# odds of a scheduled tick landing on a push deploy.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -94,7 +118,7 @@ jobs:
         # 404, a 5xx or a timeout; a 200 is never retried, whatever its body,
         # because that is the validator's question (an empty one is refused). One attempt is how the
         # mirror froze for a whole day on 2026-09-13 (#53): Apps Script
-        # answered each 2-hourly fetch with its cold-start 404 — after queueing
+        # answered each scheduled fetch with its cold-start 404 — after queueing
         # the request for ~15 s — and every run "succeeded" by republishing the
         # same 04:22 board while GAS itself was healthy throughout. The reuse
         # fetch retries too: its failure mode is a site with no mirror at all,

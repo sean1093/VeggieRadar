@@ -82,7 +82,7 @@ MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ CacheServic
                                                                       │
                                                             GET /exec │
                                                                       ▼
-Frontend (GitHub Pages) ◀── validate ◀── GitHub Actions (deploy-pages, cron :20/:50)
+Frontend (GitHub Pages) ◀── validate ◀── GitHub Actions (deploy-pages, cron :20 hourly)
   data/board.json, published inside the bundle's own artifact
         │
         ▼
@@ -384,22 +384,30 @@ Three reasons, none of which the client-side fallback could reach:
   that has already loaded the board once. The mirror is the last good board for
   *every* visitor, including a first-time one arriving while GAS is down.
 
-The mirror is republished every half hour (plus on every code deploy). It
+The mirror is republished on an hourly cron (plus on every code deploy). It
 trails the backend by the board's age when the deploy ran — 0–4 h, since the
 refresh trigger is installed by hand and its phase is arbitrary — plus
-everything since that deploy, and that second term is not what the cron says it
-is. **GitHub fires roughly 41 % of a schedule's ticks on this repo**: measured
-over the 8 days to 2026-09-16, the previous `20 */2 * * *` asked for 94 runs
-and ran 39, a median gap of 4.5 h and a worst of 7.9 h. So the mirror sat near
-the client's 6 h authority window most of the time and past the probe's 8 h
-bound some of it — `[prod-alert] mirror_stale` on a mirror 8.8 h old while GAS
-held one 0.8 h old (#66), the same fault as #42 one cadence earlier. Halving
-the interval had not fixed #42 because the misses scale with it; asking twice
-an hour buys back the same 41 % on a much smaller one. The tail is what
-matters: a 4 h gap needs three straight misses at hourly (~21 %) but seven at
-half-hourly (~2.5 %), and it is a 4 h gap landing on a 4 h-old board that puts
-the mirror past 8 h. For a board of wholesale *closing* prices, published
-once a day after market close, the remaining lag is invisible.
+everything since that deploy. **That second term is not what the cron says it
+is.** Over the 222 h to 2026-09-16 the previous `20 */2 * * *` asked for ~111
+runs and GitHub created 46: a median gap of 4.5 h against the 2 h it was
+written for, a worst of 11.2 h, none cancelled or skipped. So a typical mirror
+sat near the client's 6 h authority window, past which every visitor falls
+through to GAS, and the tail sat past the probe's 8 h bound —
+`[prod-alert] mirror_stale` on a mirror 8.8 h old beside a board crawled 0.8 h
+earlier (#66), the same fault as #42 one cadence earlier.
+
+The hourly cron is an **experiment, not a settled cadence**. Two explanations
+fit the data and they disagree about it: if ticks are dropped independently,
+halving the interval halves the realised gap; if this repo has an effective
+floor near 4 h, halving it changes nothing. The evidence leans to the floor —
+only 5 of 45 gaps are under 3 h, where independent drops would put ~40 % of
+them at 2 h, and the 6-hourly probe on this same repo realises 6.6 h, nearly
+every tick, because its ask already clears the floor. Hourly bounds the cost of
+finding out; if the median gap has not moved below ~4 h after a week
+([#68](https://github.com/sean1093/VeggieRadar/issues/68) says how to
+re-measure), the answer is to fix the mechanism rather than buy more deploys.
+For a board of wholesale *closing* prices, published once a day after market
+close, the remaining lag is invisible.
 
 **A mirror is a file, and a file cannot know it went stale.** The `stale: false`
 and `age_ms` inside it froze the moment it was written, so the client recomputes
@@ -425,7 +433,7 @@ passes `frontend/scripts/validate-board.mjs` (the §3 contract, ≥ 60 items,
 crawled < 8 h ago, every item priced), and a failed fetch or a rejected board
 re-publishes the *previous* mirror rather than failing the deploy — a code
 change must not be blocked by a backend outage, and an unvalidated file would
-serve wrong prices for two hours (§8).
+serve wrong prices until the next deploy republishes the mirror (§8).
 
 ### Alerting: a broken pipeline has to reach a human
 
@@ -1006,16 +1014,17 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   the default branch runs the tests, builds `frontend/` and publishes to Pages. In
   the repo, set **Settings → Pages → Source: GitHub Actions**. Live at
   `https://<user>.github.io/VeggieRadar/` (`vite.config.ts` `base` is `/VeggieRadar/`).
-  It also runs on `schedule: '20,50 * * * *'`, because the static board mirror
+  It also runs on `schedule: '20 * * * *'`, because the static board mirror
   (§2) is only as fresh as the last deploy — and the backend's refresh trigger
   is installed by hand, so a fetch on the *same* 4-hourly period can sit
-  permanently on the wrong side of it. Twice an hour rather than the 2-hourly
-  it asked for before, because GitHub runs about 41 % of the ticks either way
-  and only the interval is ours to choose (§2). At most 48 deploys a day still
-  sits below Pages' soft limit of ten per hour, and `concurrency: pages` keeps
-  one deploy at a time. Every run lints and tests before publishing, scheduled
-  ones included: skipping that would let the next tick publish a master whose
-  own deploy had just failed on a red test.
+  permanently on the wrong side of it. Hourly rather than the 2-hourly it asked
+  for before, as a bounded experiment in whether the interval is what GitHub is
+  actually honouring (§2). At most 24 deploys a day still sits below Pages'
+  soft limit of ten per hour, and `concurrency: pages` keeps one deploy at a
+  time — with `cancel-in-progress: false`, so a scheduled tick can never kill a
+  push deploy inside `actions/deploy-pages`. Every run lints and tests before
+  publishing, scheduled ones included: skipping that would let the next tick
+  publish a master whose own deploy had just failed on a red test.
   The **Fetch board mirror** step runs after the suite and before the build:
   it fetches `?action=board` with `scripts/fetch-retry.mjs` (the URL read from
   the committed `frontend/.env`, so no secret), validates it with
@@ -1065,7 +1074,8 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
     rotate it if the secret ever leaks.
 
 > A board rebuilt out of band — after `warm`, or after a backfill — reaches the
-> mirror only on the next scheduled deploy, up to two hours later. Running
+> mirror only on the next scheduled deploy, which §2 measures at a median
+> 4.5 h rather than the interval the cron asks for. Running
 > `deploy-pages` by `workflow_dispatch` refreshes it immediately; visitors see
 > the new prices either way, since a mirror older than 6 h sends the client to
 > GAS (§2).
