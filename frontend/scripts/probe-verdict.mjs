@@ -29,6 +29,15 @@
  * crawl, the mirror it publishes stops moving, and `checkMirror`'s freshness
  * bound fails within 8 hours with a category that *does* page. This rule only
  * decides who reports the outage, not whether it is reported.
+ *
+ * That backstop is also the limit of what may be softened. It exists only
+ * because `deploy-pages.yml` refreshes the mirror from `?action=board`, so it
+ * engages when *that* endpoint is the one not answering. A quiet
+ * `?action=diag` beside a healthy board is a different fault with no backstop
+ * at all — `handleDiag` does real work per call while `readBoard` is a cache
+ * read, so diag can fail alone — and the mirror would keep refreshing forever
+ * while `gas_trigger`, `gas_incident` and `gas_history` sat at `skipped` and
+ * nobody was ever told the baselines stopped publishing. So it pages.
  */
 
 import { isTransient } from './gas-retry.mjs';
@@ -107,6 +116,12 @@ function mirrorCarriesVisitors(checks, { maxAgeMs, healthyItems }) {
  */
 export function applyVerdict(checks, thresholds) {
   if (!mirrorCarriesVisitors(checks, thresholds)) return checks;
+  // Only while the board endpoint is the silent one, because that is what the
+  // 8 h mirror backstop watches. See the note at the top of this module.
+  const boardSilent = checks.some(
+    (check) => check.name === 'gas_board' && check.status === 'failed' && check.category === GAS_UNREACHABLE,
+  );
+  if (!boardSilent) return checks;
   return checks.map((check) =>
     check.status === 'failed' && check.category === GAS_UNREACHABLE ? { ...check, status: DEGRADED } : check,
   );

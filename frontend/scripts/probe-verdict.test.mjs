@@ -66,6 +66,40 @@ describe('applyVerdict — the mirror is carrying visitors', () => {
   });
 });
 
+describe('applyVerdict — only the board endpoint has a backstop', () => {
+  it('pages when only diag is silent, however fresh the mirror', () => {
+    // `deploy-pages.yml` refreshes the mirror from `?action=board`, so a
+    // healthy board keeps the mirror moving forever and the 8 h freshness
+    // bound never fires. Meanwhile gas_trigger / gas_incident / gas_history
+    // sit at `skipped` and nobody learns the baselines stopped publishing.
+    const out = verdict([
+      check('pages', 'ok'),
+      mirrorOk,
+      check('gas_board', 'ok'),
+      check('gas_diag', 'failed', GAS_UNREACHABLE),
+      check('gas_history', 'skipped'),
+    ]);
+    expect(statusOf(out, 'gas_diag')).toBe('failed');
+    expect(pages(out)).toBe(true);
+  });
+
+  it('softens diag alongside a silent board — the outage they share is backstopped', () => {
+    const out = verdict([check('pages', 'ok'), mirrorOk, gasDown, check('gas_diag', 'failed', GAS_UNREACHABLE)]);
+    expect(statusOf(out, 'gas_diag')).toBe(DEGRADED);
+    expect(pages(out)).toBe(false);
+  });
+
+  it('pages when the board answered wrongly and only diag went quiet', () => {
+    const out = verdict([
+      check('pages', 'ok'),
+      mirrorOk,
+      check('gas_board', 'failed', 'gas_stale'),
+      check('gas_diag', 'failed', GAS_UNREACHABLE),
+    ]);
+    expect(out.filter((c) => c.status === 'failed')).toHaveLength(2);
+  });
+});
+
 describe('applyVerdict — the mirror is not carrying visitors', () => {
   it('pages when no mirror is published: GAS is the only path a visitor has', () => {
     const out = verdict([check('pages', 'ok'), check('mirror', 'skipped'), gasDown]);

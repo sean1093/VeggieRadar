@@ -330,7 +330,7 @@ function renderSummary(checks, checkedAt) {
   if (checks.some((c) => c.status === DEGRADED)) {
     lines.push(
       '',
-      '> ⚠️ **degraded, not paging.** Apps Script never answered, but the mirror above is'
+      '> ⚠️ **degraded, not paging.** The Apps Script board endpoint never answered, but the mirror above is'
         + ' young enough and full enough that `useBoard` serves it without ever asking GAS,'
         + ' so every visitor still sees today\u2019s prices. What is lost: the drawer\u2019s trend'
         + ' chart, and a search for a crop the board does not carry. Once that mirror stops'

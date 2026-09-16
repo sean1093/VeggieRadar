@@ -884,7 +884,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-519 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
+522 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1139,6 +1139,14 @@ it honest:
   not answering, and that band is exactly where an outage lands, because the
   deploy cannot refresh the mirror while GAS is down. Above 6 h, the probe
   pages.
+- **Only the board endpoint may be softened.** The 8 h backstop exists because
+  `deploy-pages.yml` refreshes the mirror from `?action=board`, so it engages
+  when *that* endpoint is silent. A quiet `?action=diag` beside a healthy board
+  has no backstop at all — the mirror would keep refreshing forever while
+  `gas_trigger`, `gas_incident` and `gas_history` sat at `skipped` and nobody
+  learned the baselines stopped publishing — so it pages. `handleDiag` does
+  real work per call while `readBoard` is a cache read, which is exactly how
+  diag fails alone.
 - **A short board is not a served board.** The mirror must also carry
   `BOARD_HEALTHY_ITEMS`. A throttled MOA batch is normally caught by
   `gas_board`'s count guard, which during an outage never gets a body to
