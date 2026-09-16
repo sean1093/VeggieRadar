@@ -20,6 +20,7 @@ import { readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { MIRROR_BACKSTOP_MS } from './probe-verdict.mjs';
 
 const HOUR = 60 * 60 * 1000;
 // Paths from the working directory, not from `import.meta.url`: vitest
@@ -134,7 +135,7 @@ describe('prod-probe, end to end', () => {
   });
 
   it('pages for a mirror old enough to mean nothing is publishing', async () => {
-    mirrorBody = JSON.stringify(board(17 * HOUR));
+    mirrorBody = JSON.stringify(board(MIRROR_BACKSTOP_MS + HOUR));
     const result = await probe();
     expect(result.mirror.status).toBe('failed');
     expect(result.exitCode).toBe(1);

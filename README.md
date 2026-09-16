@@ -403,9 +403,11 @@ floor near 4 h, halving it changes nothing. The evidence leans to the floor —
 only 5 of 45 gaps are under 3 h, where independent drops would put ~40 % of
 them at 2 h, and the 6-hourly probe on this same repo realises 6.6 h, nearly
 every tick, because its ask already clears the floor. Hourly bounds the cost of
-finding out; if the median gap has not moved below ~4 h after a week
-([#68](https://github.com/sean1093/VeggieRadar/issues/68) says how to
-re-measure), the answer is to fix the mechanism rather than buy more deploys.
+finding out. The `schedule:` comment in `.github/workflows/deploy-pages.yml`
+carries the re-measurement — gaps between runs that *succeeded*, slurped with
+`jq -s` rather than gh's per-page `--jq`, both of which change the answer — and
+if the median has not moved below ~4 h after a week, the fix is the mechanism
+rather than more deploys ([#68](https://github.com/sean1093/VeggieRadar/issues/68)).
 For a board of wholesale *closing* prices, published once a day after market
 close, the remaining lag is invisible.
 
@@ -1190,8 +1192,10 @@ it honest:
   are in the `gas_board` row, so the issue says why. It stops at **16 h**: the worst lateness this project has produced is
   the 11.2 h deploy gap plus a 4 h crawl, and the margin above that is kept
   small because every hour of it is an hour the CDN fast path is bypassed with
-  nobody told. Past it the mirror is not late — #53's froze while the deploys
-  themselves kept succeeding, which no gap bounds. A mirror whose
+  nobody told. That is a bound on the verdict, not on the alert: the probe
+  samples every 6 h, so a frozen mirror can go unreported until 22 h, against
+  14 h before any softening existed. Past it the mirror is not late — #53's
+  froze while the deploys themselves kept succeeding, which no gap bounds. A mirror whose
   `generated_at` is missing, unparsable or in the future is corrupt rather
   than late and is never softened. Each softening requires the other path to
   be healthy, so they are mutually exclusive and a run where neither serves

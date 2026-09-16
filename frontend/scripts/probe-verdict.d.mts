@@ -24,6 +24,7 @@ export interface VerdictThresholds {
 export const GAS_UNREACHABLE: 'gas_unreachable';
 export const DEGRADED: 'degraded';
 export const CLIENT_BOARD_TIMEOUT_MS: number;
+export const MIRROR_BACKSTOP_MS: number;
 
 export function reachabilityCategory(res: unknown): string;
 export function servingFor(input: {

@@ -74,6 +74,26 @@ export function reachabilityCategory(res) {
 export const DEGRADED = 'degraded';
 
 /**
+ * How late a mirror may be before lateness stops being the explanation.
+ *
+ * The worst lateness this project has produced is 15.2 h: an 11.2 h gap
+ * between scheduled deploys plus a 4 h crawl on top. The margin above that is
+ * one hour on purpose, because the cost of the margin is one-sided — every
+ * hour inside it is an hour the CDN fast path is bypassed on every visit with
+ * nobody told.
+ *
+ * The probe samples every 6 h, so this is a bound on the *verdict*, not on the
+ * alert: a mirror that freezes can go unreported until 22 h, against 14 h
+ * before any softening existed. That is the price of not paging for ordinary
+ * lateness, and it is only worth it while 16 h really is above ordinary — if
+ * the deploy cadence changes, re-measure and move this with it.
+ *
+ * Past it, the mirror is not late. #53's froze on repeated failed fetches
+ * while the deploys themselves kept succeeding, which no deploy gap bounds.
+ */
+export const MIRROR_BACKSTOP_MS = 16 * 60 * 60 * 1000;
+
+/**
  * Whether the published mirror alone would carry a visitor through a GAS
  * outage — which is a stricter question than "did the `mirror` check pass".
  *

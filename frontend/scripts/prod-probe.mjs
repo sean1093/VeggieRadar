@@ -42,7 +42,7 @@ import { fileURLToPath } from 'node:url';
 import { BOARD_HEALTHY_ITEMS, boardMismatch } from '../src/types/board.schema.ts';
 import { BOARD_MAX_AGE_MS } from '../src/lib/utils/freshness.ts';
 import { attemptSuffix, get as request, isTransientStatic, outcome, withRetry } from './gas-retry.mjs';
-import { applyVerdict, DEGRADED, reachabilityCategory, servingFor } from './probe-verdict.mjs';
+import { applyVerdict, DEGRADED, MIRROR_BACKSTOP_MS, reachabilityCategory, servingFor } from './probe-verdict.mjs';
 
 const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -74,17 +74,6 @@ const MAX_AGE_MS = 8 * 60 * 60 * 1000;
 // A `generated_at` ahead of this clock is corrupt, not fresh; the allowance
 // covers ordinary clock skew between the runner and Google.
 const MAX_SKEW_MS = 5 * 60 * 1000;
-// A mirror this old is no longer a deploy that ran late. The longest gap
-// measured between scheduled deploys is 11.2 h and the backend's own crawl
-// adds at most 4 h on top, so 15.2 h is the worst lateness this project has
-// actually produced; the margin above it is deliberately small, because every
-// hour of it is an hour where the CDN fast path that carries almost all the
-// traffic is bypassed on every visit and nobody is told. Past it the mirror is
-// not late, something stopped publishing — #53's frozen mirror grew out of
-// repeated failed fetches while the deploys themselves kept succeeding, which
-// no deploy gap bounds — and that pages even while the backend serves every
-// visitor correctly.
-const MIRROR_BACKSTOP_MS = 16 * 60 * 60 * 1000;
 const EXCERPT_CHARS = 500;
 
 const PAGES_URL = withTrailingSlash(process.env.PAGES_URL || 'https://sean1093.github.io/VeggieRadar/');
@@ -377,8 +366,8 @@ function renderSummary(checks, checkedAt) {
         + ' moving \u2014 it cannot be refreshed while GAS is down \u2014 visitors start falling'
         + ' through to the backend, and the next probe run pages. Where the mirror is the stale'
         + ' one: every visitor falls through to a healthy backend and sees correct, current'
-        + ' prices, paying a round trip for them. Past 16 h that stops being a late deploy and'
-        + ' pages.',
+        + ` prices, paying a round trip for them. Past ${MIRROR_BACKSTOP_MS / 3_600_000} h that stops`
+        + ' being a late deploy and pages.',
     );
   }
   for (const failure of checks.filter((c) => (c.status === 'failed' || c.status === DEGRADED) && c.excerpt)) {

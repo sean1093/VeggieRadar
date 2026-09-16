@@ -4,6 +4,7 @@ import {
   CLIENT_BOARD_TIMEOUT_MS,
   DEGRADED,
   GAS_UNREACHABLE,
+  MIRROR_BACKSTOP_MS,
   reachabilityCategory,
   servingFor,
 } from './probe-verdict.mjs';
@@ -12,7 +13,11 @@ const HOUR = 60 * 60 * 1000;
 // The app's own thresholds, as `prod-probe.mjs` passes them: `useBoard` serves
 // the mirror without asking GAS only under BOARD_MAX_AGE_MS (6 h), and a day's
 // produce is BOARD_HEALTHY_ITEMS (60) or more.
-const THRESHOLDS = { maxAgeMs: 6 * HOUR, healthyItems: 60, staleBackstopMs: 24 * HOUR };
+// The real thresholds, so widening one in production cannot leave these
+// passing: `prod-probe.mjs` passes exactly these two constants, and 6 h / 60
+// are `BOARD_MAX_AGE_MS` and `BOARD_HEALTHY_ITEMS` from the app's own modules.
+const THRESHOLDS = { maxAgeMs: 6 * HOUR, healthyItems: 60, staleBackstopMs: MIRROR_BACKSTOP_MS };
+const PAST_BACKSTOP_MS = MIRROR_BACKSTOP_MS + HOUR;
 
 const check = (name, status, category) => ({ name, status, ...(category ? { category } : {}) });
 const servingMirror = (ageMs = 0.9 * HOUR, count = 93) => ({ ...check('mirror', 'ok'), serving: { ageMs, count } });
@@ -171,7 +176,7 @@ describe('applyVerdict — the mirror is the late one', () => {
   });
 
   it('pages once a late deploy becomes a pipeline that stopped publishing', () => {
-    const out = verdict([check('pages', 'ok'), lateMirror(25 * HOUR), boardOk]);
+    const out = verdict([check('pages', 'ok'), lateMirror(PAST_BACKSTOP_MS), boardOk]);
     expect(statusOf(out, 'mirror')).toBe('failed');
     expect(pages(out)).toBe(true);
   });
