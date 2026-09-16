@@ -40,6 +40,12 @@ concurrency:
 jobs:
   probe:
     runs-on: ubuntu-latest
+    # The two GAS checks are serial (`gas_board` is timed alone, so its latency
+    # is evidence rather than the probe's own contention) and each retries four
+    # times against a 30 s deadline, so a fully queued backend is ~5 minutes.
+    # Bounded anyway: a hung run holds the `prod-probe` concurrency group, and
+    # nothing else would notice production while it did.
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -160,7 +166,15 @@ jobs:
               const holdOpen = openFor === null
                 ? unverified.length > 0
                 : openFor.some((category) => unverified.includes(category));
-              const heading = holdOpen ? (degraded.length ? 'still degraded' : 'not verified') : 'recovered';
+              // The heading names what is degraded, not just that something is:
+              // both softenings read "still degraded" otherwise, so an alert
+              // flipping from a silent backend to a late mirror would dedupe
+              // against the previous note and leave the thread describing the
+              // opposite fault.
+              const what = degraded.map((c) => c.name).sort().join(', ');
+              const heading = holdOpen
+                ? (degraded.length ? `still degraded — ${what}` : 'not verified')
+                : 'recovered';
               if (existing) {
                 // Say it once. A held-open alert can stay held for as long as
                 // the condition lasts — a project that publishes no mirror

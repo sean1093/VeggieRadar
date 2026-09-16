@@ -42,7 +42,7 @@ import { fileURLToPath } from 'node:url';
 import { BOARD_HEALTHY_ITEMS, boardMismatch } from '../src/types/board.schema.ts';
 import { BOARD_MAX_AGE_MS } from '../src/lib/utils/freshness.ts';
 import { attemptSuffix, get as request, isTransientStatic, outcome, withRetry } from './gas-retry.mjs';
-import { applyVerdict, DEGRADED, reachabilityCategory } from './probe-verdict.mjs';
+import { applyVerdict, DEGRADED, MIRROR_BACKSTOP_MS, reachabilityCategory, servingFor } from './probe-verdict.mjs';
 
 const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -222,13 +222,22 @@ async function checkMirror() {
   const parsed = parseObject(res.body);
   if (parsed.problem) return failed(name, 'mirror_stale', parsed.problem, res.body);
   const board = parsed.value;
-  const problem = boardProblem(board);
-  if (problem) return failed(name, 'mirror_stale', problem.detail, res.body);
   const age = ageMs(board.generated_at);
+  const problem = boardProblem(board);
   // `serving` is what `applyVerdict` measures against the app's own read
   // order; the check's own verdict deliberately stays the looser one, because
   // a mirror between the two bounds is degraded, not broken.
-  return { ...ok(name, `${board.count} items, crawled ${hours(age)} h ago`), serving: { ageMs: age, count: board.count } };
+  //
+  // Which boards may be softened is `servingFor`'s call, where the tests are.
+  const measured = servingFor({
+    ageMs: age,
+    count: board.count,
+    problemKind: problem && problem.kind,
+    maxSkewMs: MAX_SKEW_MS,
+  });
+  const serving = measured ? { serving: measured } : {};
+  if (problem) return { ...failed(name, 'mirror_stale', problem.detail, res.body), ...serving };
+  return { ...ok(name, `${board.count} items, crawled ${hours(age)} h ago`), ...serving };
 }
 
 async function checkGasBoard() {
@@ -256,7 +265,20 @@ async function checkGasBoard() {
   if (!(board.count >= BOARD_HEALTHY_ITEMS)) {
     return failed(name, 'gas_stale', `count ${board.count} < ${BOARD_HEALTHY_ITEMS}`, res.body);
   }
-  return ok(name, `${board.count} items, crawled ${hours(ageMs(board.generated_at))} h ago, stale=false`);
+  // `answeredInMs` and `attempts` are what let `applyVerdict` ask whether a
+  // browser would have got this answer at all: the probe waits TIMEOUT_MS and
+  // retries four times over 30 s of backoff, `fetchBoard` waits
+  // BOARD_TIMEOUT_MS and spends its whole three-attempt schedule in 2.7 s of
+  // backoff — less than this probe's first wait. A queued or cold Apps Script
+  // sits between them; `servesVisitors` is where that is reasoned about. Both go in the detail too, because they are the numbers that decide
+  // whether a stale mirror beside this board pages, and a reader of the issue
+  // should not have to infer them.
+  const answered = `answered in ${(res.elapsedMs / 1000).toFixed(1)} s${attemptSuffix(res)}`;
+  return {
+    ...ok(name, `${board.count} items, crawled ${hours(ageMs(board.generated_at))} h ago, stale=false, ${answered}`),
+    answeredInMs: res.elapsedMs,
+    attempts: res.attempts,
+  };
 }
 
 /**
@@ -334,15 +356,37 @@ function renderSummary(checks, checkedAt) {
     '| --- | --- | --- | --- |',
     ...checks.map((c) => `| ${c.name} | ${STATUS_ICON[c.status]} ${c.status} | ${c.category || '—'} | ${cell(c.detail)} |`),
   ];
-  if (checks.some((c) => c.status === DEGRADED)) {
+  // Exactly one of the two softenings can have applied (`probe-verdict.mjs`),
+  // so the note says which — narrating both would tell the reader of a GAS
+  // outage that every visitor is being served by a healthy backend, in the
+  // same summary whose table shows that backend degraded.
+  const degradedMirror = checks.some((c) => c.name === 'mirror' && c.status === DEGRADED);
+  const degradedBackend = checks.some((c) => c.name !== 'mirror' && c.status === DEGRADED);
+  // Only when nothing else in the run pages. A softened mirror beside a
+  // missing `refreshBoardCache` still opens `[prod-alert] trigger_missing`,
+  // and a note headed "not paging" inside that issue would be a plain lie.
+  const paging = checks.some((c) => c.status === 'failed');
+  if (paging) {
+    // Nothing: the table's ⚠️ rows say what was softened, and the reader is
+    // here for the ❌ one.
+  } else if (degradedBackend) {
     lines.push(
       '',
-      '> ⚠️ **degraded, not paging.** The Apps Script board endpoint never answered, but the mirror above is'
+      '> \u26a0\ufe0f **degraded, not paging.** Apps Script never answered, but the mirror above is'
         + ' young enough and full enough that `useBoard` serves it without ever asking GAS,'
         + ' so every visitor still sees today\u2019s prices. What is lost: the drawer\u2019s trend'
         + ' chart, and a search for a crop the board does not carry. Once that mirror stops'
         + ' moving \u2014 it cannot be refreshed while GAS is down \u2014 visitors start falling'
         + ' through to the backend, and the next probe run pages.',
+    );
+  } else if (degradedMirror) {
+    lines.push(
+      '',
+      '> \u26a0\ufe0f **degraded, not paging.** The published mirror is past its bound, but the backend'
+        + ' answered a current board on the first attempt and inside the deadline a browser gives'
+        + ' one, so every visitor falls through to it and sees correct, current prices \u2014 paying a'
+        + ' round trip and a GAS execution for them, which is what a late deploy costs.'
+        + ` Past ${MIRROR_BACKSTOP_MS / 3_600_000} h that stops being a late deploy and pages.`,
     );
   }
   for (const failure of checks.filter((c) => (c.status === 'failed' || c.status === DEGRADED) && c.excerpt)) {
@@ -362,12 +406,15 @@ function renderSummary(checks, checkedAt) {
   return lines.join('\n');
 }
 
-const [pages, mirror, board, diag] = await Promise.all([
-  checkPages(),
-  checkMirror(),
-  checkGasBoard(),
-  checkDiag(),
-]);
+// `gas_board` runs alone against the backend, and everything else follows.
+// Its latency is evidence — `servesVisitors` compares it with the deadline a
+// browser gives one attempt — and a probe that fired `?action=diag` alongside
+// it would be timing its own contention: `handleDiag` walks the project's
+// triggers and summarises a growing history sheet on every call, where
+// `readBoard` is a cache read. The two static checks cost the backend nothing
+// and stay alongside.
+const [board, pages, mirror] = await Promise.all([checkGasBoard(), checkPages(), checkMirror()]);
+const diag = await checkDiag();
 // The checks report endpoint health; `applyVerdict` decides what that means
 // for a visitor, which is the only thing worth paging about.
 const checks = applyVerdict([pages, mirror, board, ...diag], {
@@ -375,6 +422,9 @@ const checks = applyVerdict([pages, mirror, board, ...diag], {
   // mirror is fresher than this, and a short board is not a served board.
   maxAgeMs: BOARD_MAX_AGE_MS,
   healthyItems: BOARD_HEALTHY_ITEMS,
+  // Past this a late mirror stops being late and starts being a publish
+  // pipeline that is broken, which pages whatever the backend is doing.
+  staleBackstopMs: MIRROR_BACKSTOP_MS,
 });
 const checkedAt = new Date().toISOString();
 const summaryMd = renderSummary(checks, checkedAt);

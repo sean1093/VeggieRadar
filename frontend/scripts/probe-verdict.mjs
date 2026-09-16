@@ -30,6 +30,11 @@
  * bound fails within 8 hours with a category that *does* page. This rule only
  * decides who reports the outage, not whether it is reported.
  *
+ * The same argument runs the other way, and `mirrorMerelyLate` below is where:
+ * a stale mirror beside a healthy backend is the CDN fast path lost, not a
+ * board lost. The two softenings each require the other path to be `ok`, so
+ * they can never both apply, and a run where neither path serves always pages.
+ *
  * That backstop is also the limit of what may be softened. It exists only
  * because `deploy-pages.yml` refreshes the mirror from `?action=board`, so it
  * engages when *that* endpoint is the one not answering. A quiet
@@ -67,6 +72,34 @@ export function reachabilityCategory(res) {
 
 /** Checks with this status are shown and explained, but do not fail the run. */
 export const DEGRADED = 'degraded';
+
+/**
+ * How late a mirror may be before lateness stops being the explanation.
+ *
+ * The worst lateness this project has produced is 15.2 h: an 11.2 h gap
+ * between scheduled deploys plus a 4 h crawl on top. The margin above that is
+ * one hour on purpose, because the cost of the margin is one-sided — every
+ * hour inside it is an hour the CDN fast path is bypassed on every visit with
+ * nobody told.
+ *
+ * The crawl term is the backend's 4 h cadence, deliberately, not the 8 h
+ * ceiling `validate-board.mjs` will publish up to. That ceiling is a reject
+ * bound, not an expectation: a board approaching it means the backend already
+ * missed a crawl, and a mirror inheriting that is not a deploy running late
+ * — it is two things behind at once, which is worth saying out loud.
+ *
+ * The probe samples on its own schedule, so this is a bound on the *verdict*,
+ * not on the alert. That schedule is measured, not assumed — a 6.6 h median
+ * and an 8.8 h worst against a cron asking for 6 h, the same gap between ask
+ * and reality this project keeps rediscovering — so a mirror that freezes can
+ * go unreported until about 25 h, against 17 h before any softening existed. That is the price of not paging for ordinary
+ * lateness, and it is only worth it while 16 h really is above ordinary — if
+ * the deploy cadence changes, re-measure and move this with it.
+ *
+ * Past it, the mirror is not late. #53's froze on repeated failed fetches
+ * while the deploys themselves kept succeeding, which no deploy gap bounds.
+ */
+export const MIRROR_BACKSTOP_MS = 16 * 60 * 60 * 1000;
 
 /**
  * Whether the published mirror alone would carry a visitor through a GAS
@@ -107,22 +140,135 @@ function mirrorCarriesVisitors(checks, { maxAgeMs, healthyItems }) {
 }
 
 /**
- * Downgrades unreachable-GAS failures to `degraded` while the mirror is
- * genuinely carrying visitors, and leaves every other verdict exactly as the
- * checks reported it.
+ * The mirror of the rule above, for the other path.
+ *
+ * A stale mirror beside a healthy backend costs a visitor nothing they can
+ * see: `useBoard` paints the old board, `fetchBoard` succeeds, and current
+ * prices replace it. What it costs is the CDN fast path — a round trip and a
+ * GAS execution on every visit instead of none. That is worth fixing and not
+ * worth waking anyone, and it is the ordinary shape of this project's worst
+ * measured week: scheduled deploys land a median 4.5 h apart against a cron
+ * asking for 2 h, and the mirror's age is that gap plus the board's age when
+ * the deploy ran (issue #66, #68).
+ *
+ * `staleBackstopMs` is what stops this from being a blanket excuse. Past it
+ * the deploy is not running late; something stopped publishing, and no amount
+ * of backend health makes that self-correcting. A mirror whose `generated_at`
+ * is missing, unparsable or in the future never carries a `serving` at all
+ * (`checkMirror`), so it is never softened either — those are corrupt, not
+ * late.
+ */
+function mirrorMerelyLate(checks, { staleBackstopMs }) {
+  const mirror = checks.find((check) => check.name === 'mirror');
+  if (!mirror || mirror.status !== 'failed' || mirror.category !== 'mirror_stale') return false;
+  if (!mirror.serving) return false;
+  return mirror.serving.ageMs < staleBackstopMs;
+}
+
+/**
+ * What `checkMirror` may hand `applyVerdict` about the board it fetched, or
+ * null when this mirror must never be softened.
+ *
+ * The decision lives here rather than in the check because it is a policy
+ * question, not an I/O one: `mirror_stale` is the category for schema drift
+ * and for a `generated_at` that is missing or in the future as much as for a
+ * board that is merely old, and only the last of those is a deploy running
+ * late. Softening the others would be exactly the contract failure this module
+ * says it never softens.
+ *
+ * `problemKind` is `boardProblem`'s verdict — null when the board is clean,
+ * `'schema'` or `'stale'` otherwise. `maxSkewMs` mirrors the tolerance the
+ * check itself applies, so a board it calls fresh is never left unmeasurable
+ * and a concurrent backend outage still softens.
+ */
+export function servingFor({ ageMs, count, problemKind, maxSkewMs }) {
+  if (ageMs === null || ageMs < -maxSkewMs) return null;
+  if (problemKind && problemKind !== 'stale') return null;
+  return { ageMs, count };
+}
+
+/**
+ * The browser's own deadline for one `?action=board` attempt — `BOARD_TIMEOUT_MS`
+ * in `src/services/api.ts`, pinned to it by `api.timeouts.test.ts` because the
+ * probe cannot import that module without dragging the app in.
+ */
+export const CLIENT_BOARD_TIMEOUT_MS = 12_000;
+
+/**
+ * True when the backend answered a clean, current board *and did it the way a
+ * visitor would have got it*.
+ *
+ * The probe is deliberately more patient than the app, in two directions, and
+ * neither may be lent to this decision:
+ *
+ *   - It waits 30 s per attempt (`TIMEOUT_MS`) so a queued request does not
+ *     read as an outage, where `fetchBoard` abandons each attempt at 12 s.
+ *     Apps Script over quota queues rather than failing fast, so an answer at
+ *     25 s is `ok` here and a timeout for everyone.
+ *   - It retries four times over 30 s of backoff. `fetchBoard` also retries a
+ *     404 — three attempts, 0.9 s then 1.8 s apart — and how long that spans
+ *     depends on what it is failing against: about 5 s when the backend
+ *     refuses quickly, up to ~38 s when each attempt runs to its 12 s
+ *     deadline. Against a queued backend the probe's own first attempt would
+ *     have burned 30 s before retrying, so a retry there means the client's
+ *     three had timed out too; against a fast refusal the probe's first
+ *     backoff of 5 s already outlasts the client's whole schedule. So a
+ *     second attempt means the client was served only in a narrow band — a
+ *     refusal that cleared between roughly 1 s and 5 s — and this errs
+ *     toward paging in it, because the alternative is telling nobody while
+ *     visitors sit on a stale mirror under 「目前連不上伺服器」.
+ *
+ * Either way every visitor is left on the old mirror under
+ * 「目前連不上伺服器」, which is precisely the state a stale mirror must
+ * still page for. A check that carries no timing is treated as not having
+ * answered in time; only `gas_board` carries one.
+ */
+function servesVisitors(checks) {
+  const board = checks.find((check) => check.name === 'gas_board');
+  if (!board || board.status !== 'ok') return false;
+  if (board.attempts !== 1) return false;
+  return typeof board.answeredInMs === 'number' && board.answeredInMs <= CLIENT_BOARD_TIMEOUT_MS;
+}
+
+/**
+ * Downgrades one path's failure to `degraded` while the other path is serving,
+ * and leaves every other verdict exactly as the checks reported it.
+ *
+ * The app reads a board from two places, so an outage is one path down and a
+ * fault is both. Each softening therefore requires the other path to be `ok`,
+ * which makes them mutually exclusive: whatever else happens, a run in which
+ * neither the mirror nor the backend is serving pages.
  *
  * Contract failures are never softened — they are evidence the backend
  * answered and was wrong.
  */
 export function applyVerdict(checks, thresholds) {
-  if (!mirrorCarriesVisitors(checks, thresholds)) return checks;
-  // Only while the board endpoint is the silent one, because that is what the
-  // 8 h mirror backstop watches. See the note at the top of this module.
+  // The backend is the silent one, and the mirror is carrying visitors on the
+  // app's own terms. Restricted to `gas_board` because the 8 h mirror bound is
+  // what backstops it, and that bound only moves when the board endpoint is
+  // what stopped answering. See the note at the top of this module.
   const boardSilent = checks.some(
     (check) => check.name === 'gas_board' && check.status === 'failed' && check.category === GAS_UNREACHABLE,
   );
-  if (!boardSilent) return checks;
-  return checks.map((check) =>
-    check.status === 'failed' && check.category === GAS_UNREACHABLE ? { ...check, status: DEGRADED } : check,
-  );
+  if (boardSilent && mirrorCarriesVisitors(checks, thresholds)) {
+    return checks.map((check) =>
+      check.status === 'failed' && check.category === GAS_UNREACHABLE ? { ...check, status: DEGRADED } : check,
+    );
+  }
+
+  // The mirror is the late one, and the backend answered a clean, current
+  // board — so every visitor falling through to it sees correct prices.
+  if (mirrorMerelyLate(checks, thresholds) && servesVisitors(checks)) {
+    return checks.map((check) => {
+      if (check.name !== 'mirror') return check;
+      // The excerpt goes with it. It was attached because the check failed,
+      // but a mirror softened here is a *valid* board by construction — the
+      // only thing wrong with it is its age — so 500 characters of correct
+      // prices in the summary and in any open alert comment is pure noise.
+      const { excerpt, ...rest } = check;
+      return { ...rest, status: DEGRADED };
+    });
+  }
+
+  return checks;
 }

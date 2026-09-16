@@ -4,13 +4,13 @@
  * mirror step.
  *
  * Both of those used to be a single `curl`. On 2026-09-13 Apps Script
- * answered every 2-hourly fetch of `?action=board` with its cold-start 404
+ * answered every scheduled fetch of `?action=board` with its cold-start 404
  * (after queueing the request for ~15 s), so every run "succeeded" by
  * republishing the same 04:22 board until the probe paged (#53) — while the
  * probe itself rode the same 404s out, because `gas-retry.mjs` had given it
  * three attempts. The fallback fetch of the already-published mirror was one
  * attempt too, and its failure mode is worse: no mirror at all, and every
- * visitor for the next two hours pays a GAS execution and a cold start.
+ * visitor pays a GAS execution and a cold start until the next deploy lands.
  *
  * The third argument says whose 404 this is. `gas` (default): a 404 is Apps
  * Script's cold start and is asked again. `static`: the URL is GitHub Pages,
