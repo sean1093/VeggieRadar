@@ -162,12 +162,28 @@ jobs:
                 : openFor.some((category) => unverified.includes(category));
               const heading = holdOpen ? (degraded.length ? 'still degraded' : 'not verified') : 'recovered';
               if (existing) {
-                await github.rest.issues.createComment({
-                  owner, repo, issue_number: existing.number,
-                  body: `**${heading}** — ${stamp}\n\n${result.summary_md}\n\n[Probe run](${runUrl})`,
-                });
+                // Say it once. A held-open alert can stay held for as long as
+                // the condition lasts — a project that publishes no mirror
+                // holds a `mirror_stale` one indefinitely — and a fresh
+                // summary table every 6 hours would bury the history that
+                // makes the issue worth reading. The last note already says
+                // this, so only a change in it is worth a comment.
+                const { data: recent } = holdOpen
+                  ? await github.rest.issues.listComments({
+                      owner, repo, issue_number: existing.number,
+                      per_page: 1, sort: 'created', direction: 'desc',
+                    })
+                  : { data: [] };
+                const alreadySaid = recent[0] && recent[0].body.startsWith(`**${heading}**`);
+                if (!alreadySaid) {
+                  await github.rest.issues.createComment({
+                    owner, repo, issue_number: existing.number,
+                    body: `**${heading}** — ${stamp}\n\n${result.summary_md}\n\n[Probe run](${runUrl})`,
+                  });
+                }
                 if (holdOpen) {
-                  core.info(`left #${existing.number} open: ${openFor ? openFor.join(', ') : 'title renamed'} not verified by this run`);
+                  const covers = openFor ? openFor.join(', ') : 'title renamed';
+                  core.info(`left #${existing.number} open: ${covers} not verified by this run${alreadySaid ? ' (already noted)' : ''}`);
                 } else {
                   await github.rest.issues.update({
                     owner, repo, issue_number: existing.number,

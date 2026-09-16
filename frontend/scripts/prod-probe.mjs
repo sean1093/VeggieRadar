@@ -50,13 +50,20 @@ const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // of failing fast, and a queued probe must not hold a scheduled job open.
 // The two GAS checks retry that deadline (`gas-retry.mjs`), because a single
 // timeout or cold-start 404 is a blip, not an outage.
-const TIMEOUT_MS = 20_000;
+//
+// It must not be shorter than the deploy's (`fetch-retry.mjs`, 30 s), because
+// the deploy refreshing the mirror is the backstop that lets an unreachable
+// backend be softened to `degraded` (`probe-verdict.mjs`). A stricter probe
+// would invert that: a queued backend answering in, say, 25 s would keep the
+// mirror fresh on every deploy while every probe attempt timed out, and the
+// softening would hold green forever with the diag checks never evaluated.
+const TIMEOUT_MS = 30_000;
 // How long the GAS checks keep asking before calling `/exec` unreachable.
 // The shared default is 3 attempts with a 2 s then 4 s backoff; Apps Script
 // answers its cold-start 404 in about a second, so on 2026-09-15 that spent
 // roughly 10 s before giving up and opening #61. Four attempts with a linear
 // 5 s backoff spends around 35 s on the same symptom. The bound is what the
-// deadline makes it — 4 × TIMEOUT_MS + 30 s of backoff, so 110 s if every
+// deadline makes it — 4 × TIMEOUT_MS + 30 s of backoff, so 150 s if every
 // attempt runs to its deadline, which is the queued-request case and is worth
 // waiting out in a job that runs four times a day.
 const GAS_ATTEMPTS = 4;

@@ -38,6 +38,10 @@ if (!url || !out || !['gas', 'static'].includes(kind)) {
   process.stderr.write('usage: fetch-retry.mjs <url> <out> [gas|static]\n');
   process.exitCode = 2;
 } else {
+  // Keep this at or below the probe's TIMEOUT_MS (`prod-probe.mjs`): the probe
+  // treats "the deploy can still refresh the mirror" as proof that visitors
+  // are served, so a deploy that waits longer than the probe does would let a
+  // queued backend look healthy to the deploy and unreachable to the probe.
   const timeoutMs = Number(process.env.FETCH_TIMEOUT_MS) || 30_000;
   const res = await withRetry((u) => get(u, { timeoutMs, userAgent: 'VeggieRadar-deploy-mirror' }), url, {
     transient: kind === 'static' ? isTransientStatic : isTransient,

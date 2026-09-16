@@ -1115,8 +1115,11 @@ attempts, 5 s linear**, because on 2026-09-15 a cold-start window outlasted the
 default and opened one more self-closing issue. How long that actually takes
 depends on the symptom: a cold-start 404 comes back in about a second, so the
 default spent ~10 s and the widened budget spends ~35 s, while a request queued
-against the deadline can stretch either to 3 × or 4 × `TIMEOUT_MS` plus the
-backoff (66 s and 110 s respectively). A **200 is never retried**, whatever its body: a stale board, a short
+against the 30 s deadline can stretch either to 3 × or 4 × that plus the
+backoff (96 s and 150 s respectively). That deadline is deliberately no
+shorter than the deploy's: the deploy still refreshing the mirror is what
+softens an unreachable backend, so a probe that gave up sooner than the deploy
+does would hold a queued backend green forever. A **200 is never retried**, whatever its body: a stale board, a short
 count, schema drift or a platform HTML page is evidence that `doGet` answered,
 and a second attempt would only hide a real fault for a minute.
 
