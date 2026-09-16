@@ -267,9 +267,10 @@ async function checkGasBoard() {
   }
   // `answeredInMs` and `attempts` are what let `applyVerdict` ask whether a
   // browser would have got this answer at all: the probe waits TIMEOUT_MS and
-  // retries four times, `fetchBoard` waits BOARD_TIMEOUT_MS and gives up after
-  // three attempts ~2.7 s apart. A queued or cold Apps Script sits between
-  // them. Both go in the detail too, because they are the numbers that decide
+  // retries four times over 30 s of backoff, `fetchBoard` waits
+  // BOARD_TIMEOUT_MS and spends its whole three-attempt schedule in 2.7 s of
+  // backoff — less than this probe's first wait. A queued or cold Apps Script
+  // sits between them; `servesVisitors` is where that is reasoned about. Both go in the detail too, because they are the numbers that decide
   // whether a stale mirror beside this board pages, and a reader of the issue
   // should not have to infer them.
   const answered = `answered in ${(res.ms / 1000).toFixed(1)} s${attemptSuffix(res)}`;

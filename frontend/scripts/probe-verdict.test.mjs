@@ -8,15 +8,23 @@ import {
   reachabilityCategory,
   servingFor,
 } from './probe-verdict.mjs';
+import { BOARD_HEALTHY_ITEMS } from '../src/types/board.schema.ts';
+import { BOARD_MAX_AGE_MS } from '../src/lib/utils/freshness.ts';
 
 const HOUR = 60 * 60 * 1000;
-// The app's own thresholds, as `prod-probe.mjs` passes them: `useBoard` serves
-// the mirror without asking GAS only under BOARD_MAX_AGE_MS (6 h), and a day's
-// produce is BOARD_HEALTHY_ITEMS (60) or more.
-// The real thresholds, so widening one in production cannot leave these
-// passing: `prod-probe.mjs` passes exactly these two constants, and 6 h / 60
-// are `BOARD_MAX_AGE_MS` and `BOARD_HEALTHY_ITEMS` from the app's own modules.
-const THRESHOLDS = { maxAgeMs: 6 * HOUR, healthyItems: 60, staleBackstopMs: MIRROR_BACKSTOP_MS };
+// Exactly what `prod-probe.mjs` passes, imported rather than copied: these are
+// the app's own bars — `useBoard` serves the mirror without asking GAS only
+// under BOARD_MAX_AGE_MS, and a day's produce is BOARD_HEALTHY_ITEMS or more —
+// so moving one in production can never leave these tests asserting the old
+// boundary and still passing.
+const THRESHOLDS = {
+  maxAgeMs: BOARD_MAX_AGE_MS,
+  healthyItems: BOARD_HEALTHY_ITEMS,
+  staleBackstopMs: MIRROR_BACKSTOP_MS,
+};
+// Ages either side of the freshness bar, whatever it is set to.
+const INSIDE_BAR_MS = BOARD_MAX_AGE_MS - 6 * 60 * 1000;
+const PAST_BAR_MS = BOARD_MAX_AGE_MS + HOUR;
 const PAST_BACKSTOP_MS = MIRROR_BACKSTOP_MS + HOUR;
 
 const check = (name, status, category) => ({ name, status, ...(category ? { category } : {}) });
@@ -131,20 +139,20 @@ describe('applyVerdict — the mirror is not carrying visitors', () => {
     // through to a backend that is not answering and sees the
     // 「目前連不上伺服器」 banner. The deploy cannot refresh the mirror while GAS
     // is down, so this band is exactly where a real outage lands.
-    const out = verdict([check('pages', 'ok'), servingMirror(7 * HOUR), gasDown]);
+    const out = verdict([check('pages', 'ok'), servingMirror(PAST_BAR_MS), gasDown]);
     expect(statusOf(out, 'gas_board')).toBe('failed');
     expect(pages(out)).toBe(true);
   });
 
   it('still softens a mirror just inside the app’s bound', () => {
-    const out = verdict([check('pages', 'ok'), servingMirror(5.9 * HOUR), gasDown]);
+    const out = verdict([check('pages', 'ok'), servingMirror(INSIDE_BAR_MS), gasDown]);
     expect(statusOf(out, 'gas_board')).toBe(DEGRADED);
   });
 
   it('pages when the mirror is fresh but only half a board', () => {
     // A throttled MOA batch. `gas_board`'s count guard normally catches it,
     // and during an outage that check never gets a body to measure.
-    const out = verdict([check('pages', 'ok'), servingMirror(0.5 * HOUR, 35), gasDown]);
+    const out = verdict([check('pages', 'ok'), servingMirror(0.5 * HOUR, BOARD_HEALTHY_ITEMS - 1), gasDown]);
     expect(statusOf(out, 'gas_board')).toBe('failed');
     expect(pages(out)).toBe(true);
   });
