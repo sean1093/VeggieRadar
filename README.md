@@ -898,7 +898,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-528 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
+532 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1195,11 +1195,13 @@ it honest:
   with an empty body came *from* the backend and pages as `gas_error`.
 - **A run closes only what it actually verified.** A category counts as
   verified when every check that could report it came back `ok`, derived from
-  the run rather than assumed. On a degraded run that means an alert naming
-  only `pages_down` or `mirror_stale` closes as recovered, while anything
-  naming GAS stays open with a 「still degraded」 comment: `gas_board` got no
-  body to measure, the three checks behind `diag` are `skipped`, and an
-  over-quota backend moves between answering wrongly and not answering at all.
+  the run rather than assumed — and a `degraded` check is not `ok`. So a run
+  with a silent backend closes an alert naming only `pages_down` or
+  `mirror_stale`, while one with a late mirror holds `mirror_stale` open and
+  closes `pages_down`. Whatever a run did not measure stays open with a
+  「still degraded」 comment: `gas_board` got no body, the three checks behind
+  `diag` are `skipped`, and an over-quota backend moves between answering
+  wrongly and not answering at all.
   The same rule catches a quieter case — a deploy that published no mirror
   leaves `mirror` at `skipped`, which is no evidence that a `mirror_stale`
   alert recovered, so it is held open as 「not verified」. A title that does

@@ -137,6 +137,28 @@ function mirrorMerelyLate(checks, { staleBackstopMs }) {
   return mirror.serving.ageMs < staleBackstopMs;
 }
 
+/**
+ * What `checkMirror` may hand `applyVerdict` about the board it fetched, or
+ * null when this mirror must never be softened.
+ *
+ * The decision lives here rather than in the check because it is a policy
+ * question, not an I/O one: `mirror_stale` is the category for schema drift
+ * and for a `generated_at` that is missing or in the future as much as for a
+ * board that is merely old, and only the last of those is a deploy running
+ * late. Softening the others would be exactly the contract failure this module
+ * says it never softens.
+ *
+ * `problemKind` is `boardProblem`'s verdict — null when the board is clean,
+ * `'schema'` or `'stale'` otherwise. `maxSkewMs` mirrors the tolerance the
+ * check itself applies, so a board it calls fresh is never left unmeasurable
+ * and a concurrent backend outage still softens.
+ */
+export function servingFor({ ageMs, count, problemKind, maxSkewMs }) {
+  if (ageMs === null || ageMs < -maxSkewMs) return null;
+  if (problemKind && problemKind !== 'stale') return null;
+  return { ageMs, count };
+}
+
 /** True when `name` reported a clean, current board this run. */
 const answered = (checks, name) => checks.some((check) => check.name === name && check.status === 'ok');
 

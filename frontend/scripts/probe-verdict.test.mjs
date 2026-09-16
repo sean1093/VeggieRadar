@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyVerdict, DEGRADED, GAS_UNREACHABLE, reachabilityCategory } from './probe-verdict.mjs';
+import { applyVerdict, DEGRADED, GAS_UNREACHABLE, reachabilityCategory, servingFor } from './probe-verdict.mjs';
 
 const HOUR = 60 * 60 * 1000;
 // The app's own thresholds, as `prod-probe.mjs` passes them: `useBoard` serves
@@ -183,9 +183,8 @@ describe('applyVerdict — the mirror is the late one', () => {
     expect(statusOf(out, 'mirror')).toBe('failed');
   });
 
-  it('never softens a mirror that is corrupt rather than late', () => {
-    // No `serving`: `checkMirror` withholds it for a schema failure, a
-    // missing `generated_at` and one dated in the future.
+  it('never softens a mirror that arrived without a measured age', () => {
+    // `servingFor` below is what withholds it, and from which boards.
     const out = verdict([check('pages', 'ok'), check('mirror', 'failed', 'mirror_stale'), boardOk]);
     expect(statusOf(out, 'mirror')).toBe('failed');
   });
@@ -214,5 +213,34 @@ describe('reachabilityCategory — what "no usable answer" was', () => {
 
   it('survives a response the probe never got to make', () => {
     expect(reachabilityCategory(undefined)).toBe('gas_error');
+  });
+});
+
+describe('servingFor — which mirrors may be softened at all', () => {
+  const SKEW = 5 * 60 * 1000;
+  const measure = (over) => servingFor({ ageMs: HOUR, count: 93, problemKind: null, maxSkewMs: SKEW, ...over });
+
+  it('measures a clean board, whatever its age', () => {
+    expect(measure()).toEqual({ ageMs: HOUR, count: 93 });
+    expect(measure({ ageMs: 9 * HOUR, problemKind: 'stale' })).toEqual({ ageMs: 9 * HOUR, count: 93 });
+  });
+
+  it('refuses schema drift, which shares the mirror_stale category but is not lateness', () => {
+    // The bug this pins: a contract violation reaching `applyVerdict` with an
+    // age attached would be softened for 24 h and never page.
+    expect(measure({ problemKind: 'schema' })).toBeNull();
+    expect(measure({ ageMs: 9 * HOUR, problemKind: 'schema' })).toBeNull();
+  });
+
+  it('refuses a board that cannot be dated, or one dated past the skew allowance', () => {
+    expect(measure({ ageMs: null, problemKind: 'stale' })).toBeNull();
+    expect(measure({ ageMs: -2 * HOUR, problemKind: 'stale' })).toBeNull();
+  });
+
+  it('accepts the clock skew the check itself tolerates', () => {
+    // Inside the allowance the check calls the board fresh, so withholding a
+    // measurement here would withdraw the other softening and page for a
+    // backend outage the mirror is covering.
+    expect(measure({ ageMs: -60 * 1000 })).toEqual({ ageMs: -60 * 1000, count: 93 });
   });
 });

@@ -42,7 +42,7 @@ import { fileURLToPath } from 'node:url';
 import { BOARD_HEALTHY_ITEMS, boardMismatch } from '../src/types/board.schema.ts';
 import { BOARD_MAX_AGE_MS } from '../src/lib/utils/freshness.ts';
 import { attemptSuffix, get as request, isTransientStatic, outcome, withRetry } from './gas-retry.mjs';
-import { applyVerdict, DEGRADED, reachabilityCategory } from './probe-verdict.mjs';
+import { applyVerdict, DEGRADED, reachabilityCategory, servingFor } from './probe-verdict.mjs';
 
 const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -227,14 +227,20 @@ async function checkMirror() {
   const parsed = parseObject(res.body);
   if (parsed.problem) return failed(name, 'mirror_stale', parsed.problem, res.body);
   const board = parsed.value;
+  const age = ageMs(board.generated_at);
+  const problem = boardProblem(board);
   // `serving` is what `applyVerdict` measures against the app's own read
   // order; the check's own verdict deliberately stays the looser one, because
-  // a mirror between the two bounds is degraded, not broken. It is attached
-  // only when the age is a real elapsed time, so a board with no usable
-  // `generated_at`, or one dated in the future, can never be softened.
-  const age = ageMs(board.generated_at);
-  const serving = age !== null && age >= 0 ? { serving: { ageMs: age, count: board.count } } : {};
-  const problem = boardProblem(board);
+  // a mirror between the two bounds is degraded, not broken.
+  //
+  // Which boards may be softened is `servingFor`'s call, where the tests are.
+  const measured = servingFor({
+    ageMs: age,
+    count: board.count,
+    problemKind: problem && problem.kind,
+    maxSkewMs: MAX_SKEW_MS,
+  });
+  const serving = measured ? { serving: measured } : {};
   if (problem) return { ...failed(name, 'mirror_stale', problem.detail, res.body), ...serving };
   return { ...ok(name, `${board.count} items, crawled ${hours(age)} h ago`), ...serving };
 }
