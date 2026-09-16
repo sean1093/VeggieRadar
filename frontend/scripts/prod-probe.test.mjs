@@ -6,7 +6,7 @@
  * cannot be imported, and every rule it applies is only as good as the values
  * `checkMirror` hands to `servingFor`. That call site is exactly where a
  * schema-invalid mirror was briefly softened to `degraded` and would not have
- * paged for 24 h, with the unit test passing throughout because its fixture
+ * paged for the whole backstop window, with the unit test passing throughout because its fixture
  * built `serving` by hand rather than taking what the check produces.
  *
  * So these run the real script as a subprocess and read the result file it

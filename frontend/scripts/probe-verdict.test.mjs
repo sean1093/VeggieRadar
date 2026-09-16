@@ -267,7 +267,7 @@ describe('servingFor — which mirrors may be softened at all', () => {
 
   it('refuses schema drift, which shares the mirror_stale category but is not lateness', () => {
     // The bug this pins: a contract violation reaching `applyVerdict` with an
-    // age attached would be softened for 24 h and never page.
+    // age attached would be softened for the whole backstop window and never page.
     expect(measure({ problemKind: 'schema' })).toBeNull();
     expect(measure({ ageMs: 9 * HOUR, problemKind: 'schema' })).toBeNull();
   });
