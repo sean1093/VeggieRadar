@@ -74,6 +74,11 @@ const MAX_AGE_MS = 8 * 60 * 60 * 1000;
 // A `generated_at` ahead of this clock is corrupt, not fresh; the allowance
 // covers ordinary clock skew between the runner and Google.
 const MAX_SKEW_MS = 5 * 60 * 1000;
+// A mirror this old is no longer a deploy that ran late — the longest gap
+// measured between scheduled deploys is 11.2 h, and the backend's own crawl
+// adds at most 4 h on top. Past a day, something stopped publishing, and that
+// pages even while the backend serves every visitor correctly.
+const MIRROR_BACKSTOP_MS = 24 * 60 * 60 * 1000;
 const EXCERPT_CHARS = 500;
 
 const PAGES_URL = withTrailingSlash(process.env.PAGES_URL || 'https://sean1093.github.io/VeggieRadar/');
@@ -222,13 +227,16 @@ async function checkMirror() {
   const parsed = parseObject(res.body);
   if (parsed.problem) return failed(name, 'mirror_stale', parsed.problem, res.body);
   const board = parsed.value;
-  const problem = boardProblem(board);
-  if (problem) return failed(name, 'mirror_stale', problem.detail, res.body);
-  const age = ageMs(board.generated_at);
   // `serving` is what `applyVerdict` measures against the app's own read
   // order; the check's own verdict deliberately stays the looser one, because
-  // a mirror between the two bounds is degraded, not broken.
-  return { ...ok(name, `${board.count} items, crawled ${hours(age)} h ago`), serving: { ageMs: age, count: board.count } };
+  // a mirror between the two bounds is degraded, not broken. It is attached
+  // only when the age is a real elapsed time, so a board with no usable
+  // `generated_at`, or one dated in the future, can never be softened.
+  const age = ageMs(board.generated_at);
+  const serving = age !== null && age >= 0 ? { serving: { ageMs: age, count: board.count } } : {};
+  const problem = boardProblem(board);
+  if (problem) return { ...failed(name, 'mirror_stale', problem.detail, res.body), ...serving };
+  return { ...ok(name, `${board.count} items, crawled ${hours(age)} h ago`), ...serving };
 }
 
 async function checkGasBoard() {
@@ -337,12 +345,16 @@ function renderSummary(checks, checkedAt) {
   if (checks.some((c) => c.status === DEGRADED)) {
     lines.push(
       '',
-      '> ⚠️ **degraded, not paging.** The Apps Script board endpoint never answered, but the mirror above is'
+      '> ⚠️ **degraded, not paging.** One of the two paths to a board is down and the other is serving.'
+        + ' Where the backend is the silent one: the mirror above is'
         + ' young enough and full enough that `useBoard` serves it without ever asking GAS,'
         + ' so every visitor still sees today\u2019s prices. What is lost: the drawer\u2019s trend'
         + ' chart, and a search for a crop the board does not carry. Once that mirror stops'
         + ' moving \u2014 it cannot be refreshed while GAS is down \u2014 visitors start falling'
-        + ' through to the backend, and the next probe run pages.',
+        + ' through to the backend, and the next probe run pages. Where the mirror is the stale'
+        + ' one: every visitor falls through to a healthy backend and sees correct, current'
+        + ' prices, paying a round trip for them. Past 24 h that stops being a late deploy and'
+        + ' pages.',
     );
   }
   for (const failure of checks.filter((c) => (c.status === 'failed' || c.status === DEGRADED) && c.excerpt)) {
@@ -375,6 +387,9 @@ const checks = applyVerdict([pages, mirror, board, ...diag], {
   // mirror is fresher than this, and a short board is not a served board.
   maxAgeMs: BOARD_MAX_AGE_MS,
   healthyItems: BOARD_HEALTHY_ITEMS,
+  // Past this a late mirror stops being late and starts being a publish
+  // pipeline that is broken, which pages whatever the backend is doing.
+  staleBackstopMs: MIRROR_BACKSTOP_MS,
 });
 const checkedAt = new Date().toISOString();
 const summaryMd = renderSummary(checks, checkedAt);

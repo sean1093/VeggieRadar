@@ -53,9 +53,12 @@ on:
     # Re-measure on runs that PUBLISHED, not on runs that were created — with
     # `cancel-in-progress: false` a tick can be cancelled while pending, which
     # would shrink the median while republishing nothing:
-    #   gh api --paginate \
+    #   gh api --paginate --slurp \
     #     '/repos/{owner}/{repo}/actions/workflows/deploy-pages.yml/runs?event=schedule&status=success&per_page=100' \
-    #     --jq '[.workflow_runs[].created_at] | sort'
+    #     --jq '[.[].workflow_runs[].created_at] | sort'
+    # `--slurp` matters: without it `--jq` runs per page, so a week of hourly
+    # runs comes back as two separately sorted arrays with a bogus gap at the
+    # seam — in the one number the keep-or-revert decision turns on.
     # The baseline to beat is a 4.5 h median over a week; the 46 runs it came
     # from were all successful, so the two numbers compare. If it has not moved
     # below ~4 h, the floor is real: stop buying deploys and fix the mechanism
@@ -89,8 +92,9 @@ jobs:
     runs-on: ubuntu-latest
     # Bounded because `cancel-in-progress` is false: a hung run holds the
     # `pages` group, and every tick that queues behind it is cancelled while
-    # pending. At the default 6 h job timeout that is six hours with no
-    # republished mirror. The suite and build take about two minutes.
+    # pending. The group is held for the whole workflow, so the two jobs'
+    # timeouts add up — half an hour here, against the 6 h the default would
+    # allow. The suite and build take about two minutes.
     timeout-minutes: 15
     defaults:
       run:

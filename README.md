@@ -898,7 +898,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-522 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
+528 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1023,9 +1023,9 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   soft limit of ten per hour, and `concurrency: pages` keeps one deploy at a
   time — with `cancel-in-progress: false`, so a scheduled tick can never kill a
   push deploy inside `actions/deploy-pages`. Both jobs carry
-  `timeout-minutes: 15` for the same reason: a hung run holds the group, and
-  the default 6 h timeout would mean six hours of ticks queuing and being
-  cancelled with nothing republished. Every run lints and tests before
+  `timeout-minutes: 15` for the same reason: a hung run holds the group for the
+  whole workflow, so the worst case is half an hour of ticks queuing and being
+  cancelled with nothing republished, against the 6 h the default would allow. Every run lints and tests before
   publishing, scheduled ones included: skipping that would let the next tick
   publish a master whose own deploy had just failed on a red test.
   The **Fetch board mirror** step runs after the suite and before the build:
@@ -1174,6 +1174,18 @@ it honest:
   learned the baselines stopped publishing — so it pages. `handleDiag` does
   real work per call while `readBoard` is a cache read, which is exactly how
   diag fails alone.
+- **A stale mirror beside a healthy backend is degraded too.** The rule runs
+  both ways, because the app reads a board from two places: an outage is one
+  path down, a fault is both. `useBoard` paints the stale mirror and
+  `fetchBoard` then replaces it with current prices, so what a late deploy
+  costs is the CDN fast path — a round trip and a GAS execution per visit —
+  not the board. That softening needs `gas_board` to be **`ok`**, and it stops
+  at 24 h: past a day the deploy is not late, something stopped publishing,
+  and no amount of backend health makes that self-correcting. A mirror whose
+  `generated_at` is missing, unparsable or in the future is corrupt rather
+  than late and is never softened. Each softening requires the other path to
+  be healthy, so they are mutually exclusive and a run where neither serves
+  always pages.
 - **A short board is not a served board.** The mirror must also carry
   `BOARD_HEALTHY_ITEMS`. A throttled MOA batch is normally caught by
   `gas_board`'s count guard, which during an outage never gets a body to

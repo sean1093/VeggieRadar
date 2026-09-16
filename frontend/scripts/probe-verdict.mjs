@@ -30,6 +30,11 @@
  * bound fails within 8 hours with a category that *does* page. This rule only
  * decides who reports the outage, not whether it is reported.
  *
+ * The same argument runs the other way, and `mirrorMerelyLate` below is where:
+ * a stale mirror beside a healthy backend is the CDN fast path lost, not a
+ * board lost. The two softenings each require the other path to be `ok`, so
+ * they can never both apply, and a run where neither path serves always pages.
+ *
  * That backstop is also the limit of what may be softened. It exists only
  * because `deploy-pages.yml` refreshes the mirror from `?action=board`, so it
  * engages when *that* endpoint is the one not answering. A quiet
@@ -107,22 +112,65 @@ function mirrorCarriesVisitors(checks, { maxAgeMs, healthyItems }) {
 }
 
 /**
- * Downgrades unreachable-GAS failures to `degraded` while the mirror is
- * genuinely carrying visitors, and leaves every other verdict exactly as the
- * checks reported it.
+ * The mirror of the rule above, for the other path.
+ *
+ * A stale mirror beside a healthy backend costs a visitor nothing they can
+ * see: `useBoard` paints the old board, `fetchBoard` succeeds, and current
+ * prices replace it. What it costs is the CDN fast path — a round trip and a
+ * GAS execution on every visit instead of none. That is worth fixing and not
+ * worth waking anyone, and it is the ordinary shape of this project's worst
+ * measured week: scheduled deploys land a median 4.5 h apart against a cron
+ * asking for 2 h, and the mirror's age is that gap plus the board's age when
+ * the deploy ran (issue #66, #68).
+ *
+ * `staleBackstopMs` is what stops this from being a blanket excuse. Past a day
+ * the deploy is not running late; something stopped publishing, and no amount
+ * of backend health makes that self-correcting. A mirror whose `generated_at`
+ * is missing, unparsable or in the future never carries a `serving` at all
+ * (`checkMirror`), so it is never softened either — those are corrupt, not
+ * late.
+ */
+function mirrorMerelyLate(checks, { staleBackstopMs }) {
+  const mirror = checks.find((check) => check.name === 'mirror');
+  if (!mirror || mirror.status !== 'failed' || mirror.category !== 'mirror_stale') return false;
+  if (!mirror.serving) return false;
+  return mirror.serving.ageMs < staleBackstopMs;
+}
+
+/** True when `name` reported a clean, current board this run. */
+const answered = (checks, name) => checks.some((check) => check.name === name && check.status === 'ok');
+
+/**
+ * Downgrades one path's failure to `degraded` while the other path is serving,
+ * and leaves every other verdict exactly as the checks reported it.
+ *
+ * The app reads a board from two places, so an outage is one path down and a
+ * fault is both. Each softening therefore requires the other path to be `ok`,
+ * which makes them mutually exclusive: whatever else happens, a run in which
+ * neither the mirror nor the backend is serving pages.
  *
  * Contract failures are never softened — they are evidence the backend
  * answered and was wrong.
  */
 export function applyVerdict(checks, thresholds) {
-  if (!mirrorCarriesVisitors(checks, thresholds)) return checks;
-  // Only while the board endpoint is the silent one, because that is what the
-  // 8 h mirror backstop watches. See the note at the top of this module.
+  // The backend is the silent one, and the mirror is carrying visitors on the
+  // app's own terms. Restricted to `gas_board` because the 8 h mirror bound is
+  // what backstops it, and that bound only moves when the board endpoint is
+  // what stopped answering. See the note at the top of this module.
   const boardSilent = checks.some(
     (check) => check.name === 'gas_board' && check.status === 'failed' && check.category === GAS_UNREACHABLE,
   );
-  if (!boardSilent) return checks;
-  return checks.map((check) =>
-    check.status === 'failed' && check.category === GAS_UNREACHABLE ? { ...check, status: DEGRADED } : check,
-  );
+  if (boardSilent && mirrorCarriesVisitors(checks, thresholds)) {
+    return checks.map((check) =>
+      check.status === 'failed' && check.category === GAS_UNREACHABLE ? { ...check, status: DEGRADED } : check,
+    );
+  }
+
+  // The mirror is the late one, and the backend answered a clean, current
+  // board — so every visitor falling through to it sees correct prices.
+  if (mirrorMerelyLate(checks, thresholds) && answered(checks, 'gas_board')) {
+    return checks.map((check) => (check.name === 'mirror' ? { ...check, status: DEGRADED } : check));
+  }
+
+  return checks;
 }

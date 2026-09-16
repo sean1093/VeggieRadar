@@ -5,7 +5,7 @@ const HOUR = 60 * 60 * 1000;
 // The app's own thresholds, as `prod-probe.mjs` passes them: `useBoard` serves
 // the mirror without asking GAS only under BOARD_MAX_AGE_MS (6 h), and a day's
 // produce is BOARD_HEALTHY_ITEMS (60) or more.
-const THRESHOLDS = { maxAgeMs: 6 * HOUR, healthyItems: 60 };
+const THRESHOLDS = { maxAgeMs: 6 * HOUR, healthyItems: 60, staleBackstopMs: 24 * HOUR };
 
 const check = (name, status, category) => ({ name, status, ...(category ? { category } : {}) });
 const servingMirror = (ageMs = 0.9 * HOUR, count = 93) => ({ ...check('mirror', 'ok'), serving: { ageMs, count } });
@@ -145,6 +145,54 @@ describe('applyVerdict — the mirror is not carrying visitors', () => {
   it('is not fooled by a mirror check that never ran', () => {
     const out = verdict([check('pages', 'ok'), gasDown]);
     expect(statusOf(out, 'gas_board')).toBe('failed');
+  });
+});
+
+const lateMirror = (ageMs) => ({
+  ...check('mirror', 'failed', 'mirror_stale'),
+  serving: { ageMs, count: 93 },
+});
+const boardOk = check('gas_board', 'ok');
+
+describe('applyVerdict — the mirror is the late one', () => {
+  it('does not page while the backend serves every visitor a current board', () => {
+    // `useBoard` paints the stale mirror, `fetchBoard` succeeds, correct
+    // prices replace it. What is lost is the CDN fast path, not the board.
+    const out = verdict([check('pages', 'ok'), lateMirror(9 * HOUR), boardOk, check('gas_diag', 'ok')]);
+    expect(statusOf(out, 'mirror')).toBe(DEGRADED);
+    expect(pages(out)).toBe(false);
+  });
+
+  it('pages once a late deploy becomes a pipeline that stopped publishing', () => {
+    const out = verdict([check('pages', 'ok'), lateMirror(25 * HOUR), boardOk]);
+    expect(statusOf(out, 'mirror')).toBe('failed');
+    expect(pages(out)).toBe(true);
+  });
+
+  it('pages when neither path is serving', () => {
+    // The whole point of the pair: one path down is degraded, both is an
+    // outage. Softening either here would leave nobody serving a board.
+    const out = verdict([check('pages', 'ok'), lateMirror(9 * HOUR), gasDown]);
+    expect(statusOf(out, 'mirror')).toBe('failed');
+    expect(statusOf(out, 'gas_board')).toBe('failed');
+    expect(pages(out)).toBe(true);
+  });
+
+  it('pages when the backend answered a board that was itself wrong', () => {
+    const out = verdict([check('pages', 'ok'), lateMirror(9 * HOUR), check('gas_board', 'failed', 'gas_stale')]);
+    expect(statusOf(out, 'mirror')).toBe('failed');
+  });
+
+  it('never softens a mirror that is corrupt rather than late', () => {
+    // No `serving`: `checkMirror` withholds it for a schema failure, a
+    // missing `generated_at` and one dated in the future.
+    const out = verdict([check('pages', 'ok'), check('mirror', 'failed', 'mirror_stale'), boardOk]);
+    expect(statusOf(out, 'mirror')).toBe('failed');
+  });
+
+  it('leaves a mirror that failed for any other reason alone', () => {
+    const out = verdict([check('pages', 'ok'), { ...check('mirror', 'failed', 'pages_down'), serving: { ageMs: 1, count: 93 } }, boardOk]);
+    expect(statusOf(out, 'mirror')).toBe('failed');
   });
 });
 
