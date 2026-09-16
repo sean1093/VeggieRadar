@@ -1027,7 +1027,8 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   push deploy inside `actions/deploy-pages`. Both jobs carry
   `timeout-minutes: 15` for the same reason: a hung run holds the group for the
   whole workflow, so the worst case is half an hour of ticks queuing and being
-  cancelled with nothing republished, against the 6 h the default would allow. Every run lints and tests before
+  cancelled with nothing republished, against the 12 h two jobs at the default
+  would allow. Every run lints and tests before
   publishing, scheduled ones included: skipping that would let the next tick
   publish a master whose own deploy had just failed on a red test.
   The **Fetch board mirror** step runs after the suite and before the build:

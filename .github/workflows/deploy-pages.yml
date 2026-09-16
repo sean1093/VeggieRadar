@@ -94,8 +94,8 @@ jobs:
     # Bounded because `cancel-in-progress` is false: a hung run holds the
     # `pages` group, and every tick that queues behind it is cancelled while
     # pending. The group is held for the whole workflow, so the two jobs'
-    # timeouts add up — half an hour here, against the 6 h the default would
-    # allow. The suite and build take about two minutes.
+    # timeouts add up — half an hour here, against the 12 h two jobs at the 6 h
+    # default would allow. The suite and build take about two minutes.
     timeout-minutes: 15
     defaults:
       run:

@@ -356,19 +356,30 @@ function renderSummary(checks, checkedAt) {
     '| --- | --- | --- | --- |',
     ...checks.map((c) => `| ${c.name} | ${STATUS_ICON[c.status]} ${c.status} | ${c.category || '—'} | ${cell(c.detail)} |`),
   ];
-  if (checks.some((c) => c.status === DEGRADED)) {
+  // Exactly one of the two softenings can have applied (`probe-verdict.mjs`),
+  // so the note says which — narrating both would tell the reader of a GAS
+  // outage that every visitor is being served by a healthy backend, in the
+  // same summary whose table shows that backend degraded.
+  const degradedMirror = checks.some((c) => c.name === 'mirror' && c.status === DEGRADED);
+  const degradedBackend = checks.some((c) => c.name !== 'mirror' && c.status === DEGRADED);
+  if (degradedBackend) {
     lines.push(
       '',
-      '> ⚠️ **degraded, not paging.** One of the two paths to a board is down and the other is serving.'
-        + ' Where the backend is the silent one: the mirror above is'
+      '> \u26a0\ufe0f **degraded, not paging.** Apps Script never answered, but the mirror above is'
         + ' young enough and full enough that `useBoard` serves it without ever asking GAS,'
         + ' so every visitor still sees today\u2019s prices. What is lost: the drawer\u2019s trend'
         + ' chart, and a search for a crop the board does not carry. Once that mirror stops'
         + ' moving \u2014 it cannot be refreshed while GAS is down \u2014 visitors start falling'
-        + ' through to the backend, and the next probe run pages. Where the mirror is the stale'
-        + ' one: every visitor falls through to a healthy backend and sees correct, current'
-        + ` prices, paying a round trip for them. Past ${MIRROR_BACKSTOP_MS / 3_600_000} h that stops`
-        + ' being a late deploy and pages.',
+        + ' through to the backend, and the next probe run pages.',
+    );
+  } else if (degradedMirror) {
+    lines.push(
+      '',
+      '> \u26a0\ufe0f **degraded, not paging.** The published mirror is past its bound, but the backend'
+        + ' answered a current board on the first attempt and inside the deadline a browser gives'
+        + ' one, so every visitor falls through to it and sees correct, current prices \u2014 paying a'
+        + ' round trip and a GAS execution for them, which is what a late deploy costs.'
+        + ` Past ${MIRROR_BACKSTOP_MS / 3_600_000} h that stops being a late deploy and pages.`,
     );
   }
   for (const failure of checks.filter((c) => (c.status === 'failed' || c.status === DEGRADED) && c.excerpt)) {

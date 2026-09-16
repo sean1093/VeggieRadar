@@ -40,6 +40,12 @@ concurrency:
 jobs:
   probe:
     runs-on: ubuntu-latest
+    # The two GAS checks are serial (`gas_board` is timed alone, so its latency
+    # is evidence rather than the probe's own contention) and each retries four
+    # times against a 30 s deadline, so a fully queued backend is ~5 minutes.
+    # Bounded anyway: a hung run holds the `prod-probe` concurrency group, and
+    # nothing else would notice production while it did.
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
