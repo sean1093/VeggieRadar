@@ -151,18 +151,23 @@ jobs:
               const unverified = CATEGORIES.filter((category) =>
                 result.checks.some((c) => (OWNS[c.name] || []).includes(category) && c.status !== 'ok'),
               );
-              // Only a degraded run withholds recovery; a fully healthy one
-              // closes the alert exactly as it always has.
-              const holdOpen = degraded.length > 0
-                && (openFor === null || openFor.some((category) => unverified.includes(category)));
-              const heading = holdOpen ? 'still degraded' : 'recovered';
+              // An alert closes only when this run verified everything it
+              // names. A title that names nothing recognisable is read as
+              // covering everything, so it closes only on a run that measured
+              // the lot. Degradation is not the only way to measure nothing:
+              // a deploy that published no mirror leaves `mirror` at `skipped`,
+              // which is no evidence that a `mirror_stale` alert recovered.
+              const holdOpen = openFor === null
+                ? unverified.length > 0
+                : openFor.some((category) => unverified.includes(category));
+              const heading = holdOpen ? (degraded.length ? 'still degraded' : 'not verified') : 'recovered';
               if (existing) {
                 await github.rest.issues.createComment({
                   owner, repo, issue_number: existing.number,
                   body: `**${heading}** — ${stamp}\n\n${result.summary_md}\n\n[Probe run](${runUrl})`,
                 });
                 if (holdOpen) {
-                  core.info(`left #${existing.number} open: ${openFor ? openFor.join(', ') : 'title renamed'} not verified by a degraded run`);
+                  core.info(`left #${existing.number} open: ${openFor ? openFor.join(', ') : 'title renamed'} not verified by this run`);
                 } else {
                   await github.rest.issues.update({
                     owner, repo, issue_number: existing.number,

@@ -1154,17 +1154,18 @@ it honest:
 - **Only what was retried counts as unreachable** (404, 5xx, no answer at
   all). A 403 on a deployment whose access was narrowed, a redirect, or a 200
   with an empty body came *from* the backend and pages as `gas_error`.
-- **A degraded run closes only what it actually verified.** A category counts
-  as verified when every check that could report it came back `ok` — derived
-  from the run, not assumed, since either GAS check can be the one that went
-  quiet. So an alert naming only `pages_down` or `mirror_stale` closes as
-  recovered, and so does a `gas_stale` one if `gas_board` answered a healthy
-  board while only `?action=diag` was unreachable. What the run did not measure
-  stays open with a 「still degraded」 comment: a check that got no body
-  measured nothing, the three checks behind `diag` are `skipped` when it never
-  answers, and an over-quota backend moves between answering wrongly and not
-  answering at all. A title that does not name known categories counts as
-  unknown and stays open too.
+- **A run closes only what it actually verified.** A category counts as
+  verified when every check that could report it came back `ok`, derived from
+  the run rather than assumed. On a degraded run that means an alert naming
+  only `pages_down` or `mirror_stale` closes as recovered, while anything
+  naming GAS stays open with a 「still degraded」 comment: `gas_board` got no
+  body to measure, the three checks behind `diag` are `skipped`, and an
+  over-quota backend moves between answering wrongly and not answering at all.
+  The same rule catches a quieter case — a deploy that published no mirror
+  leaves `mirror` at `skipped`, which is no evidence that a `mirror_stale`
+  alert recovered, so it is held open as 「not verified」. A title that does
+  not name known categories is read as covering everything, and closes only on
+  a run that measured the lot.
 
 With no mirror published at all the `mirror` check is `skipped`, GAS is the
 only path a visitor has, and its silence pages like any other outage. Contract
