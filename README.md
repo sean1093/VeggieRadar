@@ -1022,7 +1022,10 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   actually honouring (§2). At most 24 deploys a day still sits below Pages'
   soft limit of ten per hour, and `concurrency: pages` keeps one deploy at a
   time — with `cancel-in-progress: false`, so a scheduled tick can never kill a
-  push deploy inside `actions/deploy-pages`. Every run lints and tests before
+  push deploy inside `actions/deploy-pages`. Both jobs carry
+  `timeout-minutes: 15` for the same reason: a hung run holds the group, and
+  the default 6 h timeout would mean six hours of ticks queuing and being
+  cancelled with nothing republished. Every run lints and tests before
   publishing, scheduled ones included: skipping that would let the next tick
   publish a master whose own deploy had just failed on a red test.
   The **Fetch board mirror** step runs after the suite and before the build:
@@ -1074,8 +1077,9 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
     rotate it if the secret ever leaks.
 
 > A board rebuilt out of band — after `warm`, or after a backfill — reaches the
-> mirror only on the next scheduled deploy, which §2 measures at a median
-> 4.5 h rather than the interval the cron asks for. Running
+> mirror only on the next scheduled deploy — and §2 measures that wait at a
+> median 4.5 h under the previous cadence, rather than the interval the cron
+> asks for. Running
 > `deploy-pages` by `workflow_dispatch` refreshes it immediately; visitors see
 > the new prices either way, since a mirror older than 6 h sends the client to
 > GAS (§2).

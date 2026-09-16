@@ -45,12 +45,22 @@ on:
     # behind a 15-minute lock that any of these cadences clears, so a broken
     # refresh trigger costs one crawl per deploy either way.
     #
-    # Re-measure with the gaps between `event=schedule` runs of this workflow:
-    #   gh api '/repos/{owner}/{repo}/actions/workflows/deploy-pages.yml/runs?event=schedule&per_page=60'
-    # If the median gap has not moved below ~4 h, the floor is real: stop
-    # buying deploys and fix the mechanism instead (see the follow-up issue —
-    # have the backend dispatch a deploy when a crawl lands, which removes
-    # both terms rather than shrinking one).
+    # Whatever the floor is, it is per workflow and not per repo, so this
+    # experiment cannot starve the monitor that judges it: over the same
+    # 222 h these two workflows produced 82 scheduled runs between them, one
+    # every 2.7 h, which no repo-wide floor near 4 h would allow.
+    #
+    # Re-measure on runs that PUBLISHED, not on runs that were created — with
+    # `cancel-in-progress: false` a tick can be cancelled while pending, which
+    # would shrink the median while republishing nothing:
+    #   gh api --paginate \
+    #     '/repos/{owner}/{repo}/actions/workflows/deploy-pages.yml/runs?event=schedule&status=success&per_page=100' \
+    #     --jq '[.workflow_runs[].created_at] | sort'
+    # The baseline to beat is a 4.5 h median over a week; the 46 runs it came
+    # from were all successful, so the two numbers compare. If it has not moved
+    # below ~4 h, the floor is real: stop buying deploys and fix the mechanism
+    # instead (issue #68 — have the backend dispatch a deploy when a crawl
+    # lands, which removes both terms rather than shrinking one).
     #
     # Each run still installs, lints and runs the full suite before
     # publishing. Skipping that on scheduled runs would save free minutes and
@@ -77,6 +87,11 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Bounded because `cancel-in-progress` is false: a hung run holds the
+    # `pages` group, and every tick that queues behind it is cancelled while
+    # pending. At the default 6 h job timeout that is six hours with no
+    # republished mirror. The suite and build take about two minutes.
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend
@@ -180,6 +195,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Same reason as `build`, and the likelier place to hang: this job is one
+    # call into `actions/deploy-pages`, which waits on GitHub's own Pages API.
+    timeout-minutes: 15
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
