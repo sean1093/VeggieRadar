@@ -273,10 +273,10 @@ async function checkGasBoard() {
   // sits between them; `servesVisitors` is where that is reasoned about. Both go in the detail too, because they are the numbers that decide
   // whether a stale mirror beside this board pages, and a reader of the issue
   // should not have to infer them.
-  const answered = `answered in ${(res.ms / 1000).toFixed(1)} s${attemptSuffix(res)}`;
+  const answered = `answered in ${(res.elapsedMs / 1000).toFixed(1)} s${attemptSuffix(res)}`;
   return {
     ...ok(name, `${board.count} items, crawled ${hours(ageMs(board.generated_at))} h ago, stale=false, ${answered}`),
-    answeredInMs: res.ms,
+    answeredInMs: res.elapsedMs,
     attempts: res.attempts,
   };
 }
@@ -362,7 +362,14 @@ function renderSummary(checks, checkedAt) {
   // same summary whose table shows that backend degraded.
   const degradedMirror = checks.some((c) => c.name === 'mirror' && c.status === DEGRADED);
   const degradedBackend = checks.some((c) => c.name !== 'mirror' && c.status === DEGRADED);
-  if (degradedBackend) {
+  // Only when nothing else in the run pages. A softened mirror beside a
+  // missing `refreshBoardCache` still opens `[prod-alert] trigger_missing`,
+  // and a note headed "not paging" inside that issue would be a plain lie.
+  const paging = checks.some((c) => c.status === 'failed');
+  if (paging) {
+    // Nothing: the table's ⚠️ rows say what was softened, and the reader is
+    // here for the ❌ one.
+  } else if (degradedBackend) {
     lines.push(
       '',
       '> \u26a0\ufe0f **degraded, not paging.** Apps Script never answered, but the mirror above is'

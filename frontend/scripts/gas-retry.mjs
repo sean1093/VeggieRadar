@@ -61,15 +61,21 @@ const wait = (ms) => new Promise((done) => setTimeout(done, ms));
  * deadline belong to `get` — wrap it.
  */
 export async function withRetry(get, url, { attempts = 3, backoffMs = 2_000, sleep = wait, transient = isTransient } = {}) {
+  // `elapsedMs` spans every attempt and every wait between them, where `ms`
+  // is only the last request. A caller reporting "answered in 0.8 s after 4
+  // attempts" from `ms` alone would describe 75 s of waiting as under a
+  // second, and a caller comparing it with a browser's deadline would be
+  // comparing the wrong number.
+  const started = Date.now();
   let res;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     res = await get(url);
-    if (!transient(res)) return { ...res, attempts: attempt };
+    if (!transient(res)) return { ...res, attempts: attempt, elapsedMs: Date.now() - started };
     // Linear, not exponential: a cold start takes seconds, and the probe runs
     // on a schedule where a bounded wait is cheaper than a false alarm.
     if (attempt < attempts) await sleep(backoffMs * attempt);
   }
-  return { ...res, attempts };
+  return { ...res, attempts, elapsedMs: Date.now() - started };
 }
 
 /** `" after 3 attempts"`, or nothing when the first attempt settled it. */

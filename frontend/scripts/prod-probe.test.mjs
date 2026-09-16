@@ -59,6 +59,8 @@ const PAGE = '<html><head><title>今日菜價 · VeggieRadar</title></head>'
 
 /** What `/data/board.json` serves; each test sets it before probing. */
 let mirrorBody = JSON.stringify(board());
+/** Flipped by the one test that needs `?action=diag` to report a fault. */
+let triggersInstalled = true;
 let server;
 let origin;
 
@@ -74,7 +76,11 @@ beforeAll(async () => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
         req.url.includes('diag')
-          ? JSON.stringify({ triggers: ['refreshBoardCache'], alert: { incident_open: false }, history: { items: 93 } })
+          ? JSON.stringify({
+              triggers: triggersInstalled ? ['refreshBoardCache'] : [],
+              alert: { incident_open: false },
+              history: { items: 93 },
+            })
           : JSON.stringify(board()),
       );
       return;
@@ -149,6 +155,18 @@ describe('prod-probe, end to end', () => {
     mirrorBody = JSON.stringify(drifted);
     const result = await probe();
     expect(result.summary_md).toMatch(/mirror — response body/);
+  });
+
+  it('drops the not-paging note when the run pages for something else', async () => {
+    // A softened mirror beside a real failure still opens an alert, and a note
+    // headed "not paging" inside that issue would be a plain lie.
+    mirrorBody = JSON.stringify(board(9 * HOUR));
+    triggersInstalled = false;
+    const result = await probe();
+    expect(result.mirror.status).toBe('degraded');
+    expect(result.exitCode).toBe(1);
+    expect(result.summary_md).not.toMatch(/not paging/);
+    triggersInstalled = true;
   });
 
   it('pages for a mirror old enough to mean nothing is publishing', async () => {

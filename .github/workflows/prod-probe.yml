@@ -166,7 +166,15 @@ jobs:
               const holdOpen = openFor === null
                 ? unverified.length > 0
                 : openFor.some((category) => unverified.includes(category));
-              const heading = holdOpen ? (degraded.length ? 'still degraded' : 'not verified') : 'recovered';
+              // The heading names what is degraded, not just that something is:
+              // both softenings read "still degraded" otherwise, so an alert
+              // flipping from a silent backend to a late mirror would dedupe
+              // against the previous note and leave the thread describing the
+              // opposite fault.
+              const what = degraded.map((c) => c.name).sort().join(', ');
+              const heading = holdOpen
+                ? (degraded.length ? `still degraded — ${what}` : 'not verified')
+                : 'recovered';
               if (existing) {
                 // Say it once. A held-open alert can stay held for as long as
                 // the condition lasts — a project that publishes no mirror
