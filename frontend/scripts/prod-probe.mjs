@@ -388,12 +388,15 @@ function renderSummary(checks, checkedAt) {
   return lines.join('\n');
 }
 
-const [pages, mirror, board, diag] = await Promise.all([
-  checkPages(),
-  checkMirror(),
-  checkGasBoard(),
-  checkDiag(),
-]);
+// `gas_board` runs alone against the backend, and everything else follows.
+// Its latency is evidence — `servesVisitors` compares it with the deadline a
+// browser gives one attempt — and a probe that fired `?action=diag` alongside
+// it would be timing its own contention: `handleDiag` walks the project's
+// triggers and summarises a growing history sheet on every call, where
+// `readBoard` is a cache read. The two static checks cost the backend nothing
+// and stay alongside.
+const [board, pages, mirror] = await Promise.all([checkGasBoard(), checkPages(), checkMirror()]);
+const diag = await checkDiag();
 // The checks report endpoint health; `applyVerdict` decides what that means
 // for a visitor, which is the only thing worth paging about.
 const checks = applyVerdict([pages, mirror, board, ...diag], {

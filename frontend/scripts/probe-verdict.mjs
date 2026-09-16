@@ -82,6 +82,12 @@ export const DEGRADED = 'degraded';
  * hour inside it is an hour the CDN fast path is bypassed on every visit with
  * nobody told.
  *
+ * The crawl term is the backend's 4 h cadence, deliberately, not the 8 h
+ * ceiling `validate-board.mjs` will publish up to. That ceiling is a reject
+ * bound, not an expectation: a board approaching it means the backend already
+ * missed a crawl, and a mirror inheriting that is not a deploy running late
+ * — it is two things behind at once, which is worth saying out loud.
+ *
  * The probe samples on its own schedule, so this is a bound on the *verdict*,
  * not on the alert. That schedule is measured, not assumed — a 6.6 h median
  * and an 8.8 h worst against a cron asking for 6 h, the same gap between ask
@@ -200,12 +206,17 @@ export const CLIENT_BOARD_TIMEOUT_MS = 12_000;
  *     Apps Script over quota queues rather than failing fast, so an answer at
  *     25 s is `ok` here and a timeout for everyone.
  *   - It retries four times over 30 s of backoff. `fetchBoard` also retries a
- *     404 — three attempts, 0.9 s then 1.8 s apart — but its *entire* retry
- *     schedule is shorter than this probe's first backoff of 5 s. So any
- *     answer that took more than one attempt here arrived after the client
- *     had already given up, however fast the winning attempt itself was.
- *     That is why the attempt count is asked about at all: latency alone
- *     describes the queued backend, not the cold-started one.
+ *     404 — three attempts, 0.9 s then 1.8 s apart — and how long that spans
+ *     depends on what it is failing against: about 5 s when the backend
+ *     refuses quickly, up to ~38 s when each attempt runs to its 12 s
+ *     deadline. Against a queued backend the probe's own first attempt would
+ *     have burned 30 s before retrying, so a retry there means the client's
+ *     three had timed out too; against a fast refusal the probe's first
+ *     backoff of 5 s already outlasts the client's whole schedule. So a
+ *     second attempt means the client was served only in a narrow band — a
+ *     refusal that cleared between roughly 1 s and 5 s — and this errs
+ *     toward paging in it, because the alternative is telling nobody while
+ *     visitors sit on a stale mirror under 「目前連不上伺服器」.
  *
  * Either way every visitor is left on the old mirror under
  * 「目前連不上伺服器」, which is precisely the state a stale mirror must
