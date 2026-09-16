@@ -159,7 +159,7 @@ const lateMirror = (ageMs) => ({
   ...check('mirror', 'failed', 'mirror_stale'),
   serving: { ageMs, count: 93 },
 });
-const boardOk = { ...check('gas_board', 'ok'), answeredInMs: 800 };
+const boardOk = { ...check('gas_board', 'ok'), answeredInMs: 800, attempts: 1 };
 
 describe('applyVerdict — the mirror is the late one', () => {
   it('does not page while the backend serves every visitor a current board', () => {
@@ -189,20 +189,31 @@ describe('applyVerdict — the mirror is the late one', () => {
     // Apps Script over quota queues rather than failing fast. The probe waits
     // 30 s and calls that ok; `fetchBoard` abandons each attempt at 12 s, so
     // every visitor is on the stale mirror under 「目前連不上伺服器」.
-    const slow = { ...check('gas_board', 'ok'), answeredInMs: 25_000 };
+    const slow = { ...check('gas_board', 'ok'), answeredInMs: 25_000, attempts: 1 };
     const out = verdict([check('pages', 'ok'), lateMirror(9 * HOUR), slow]);
     expect(statusOf(out, 'mirror')).toBe('failed');
     expect(pages(out)).toBe(true);
   });
 
   it('softens on an answer that arrived just inside the client deadline', () => {
-    const justInTime = { ...check('gas_board', 'ok'), answeredInMs: CLIENT_BOARD_TIMEOUT_MS };
+    const justInTime = { ...check('gas_board', 'ok'), answeredInMs: CLIENT_BOARD_TIMEOUT_MS, attempts: 1 };
     const out = verdict([check('pages', 'ok'), lateMirror(9 * HOUR), justInTime]);
     expect(statusOf(out, 'mirror')).toBe(DEGRADED);
   });
 
+  it('pages when the probe had to retry for the answer', () => {
+    // Four attempts over 30 s of backoff is a cold-start window that outlasts
+    // the visitor: `fetchBoard` spends its three attempts in about 2.7 s. The
+    // winning attempt is fast once it arrives, which is why latency alone is
+    // not the question.
+    const retried = { ...check('gas_board', 'ok'), answeredInMs: 800, attempts: 4 };
+    const out = verdict([check('pages', 'ok'), lateMirror(9 * HOUR), retried]);
+    expect(statusOf(out, 'mirror')).toBe('failed');
+    expect(pages(out)).toBe(true);
+  });
+
   it('pages when nothing timed the backend at all', () => {
-    const untimed = check('gas_board', 'ok');
+    const untimed = { ...check('gas_board', 'ok'), attempts: 1 };
     const out = verdict([check('pages', 'ok'), lateMirror(9 * HOUR), untimed]);
     expect(statusOf(out, 'mirror')).toBe('failed');
   });

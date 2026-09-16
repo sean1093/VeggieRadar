@@ -123,7 +123,7 @@ function mirrorCarriesVisitors(checks, { maxAgeMs, healthyItems }) {
  * asking for 2 h, and the mirror's age is that gap plus the board's age when
  * the deploy ran (issue #66, #68).
  *
- * `staleBackstopMs` is what stops this from being a blanket excuse. Past a day
+ * `staleBackstopMs` is what stops this from being a blanket excuse. Past it
  * the deploy is not running late; something stopped publishing, and no amount
  * of backend health makes that self-correcting. A mirror whose `generated_at`
  * is missing, unparsable or in the future never carries a `serving` at all
@@ -167,21 +167,30 @@ export function servingFor({ ageMs, count, problemKind, maxSkewMs }) {
 export const CLIENT_BOARD_TIMEOUT_MS = 12_000;
 
 /**
- * True when the backend answered a clean, current board *and did it fast
- * enough that a visitor would have seen it*.
+ * True when the backend answered a clean, current board *and did it the way a
+ * visitor would have got it*.
  *
- * The probe is deliberately more patient than the app: `TIMEOUT_MS` is 30 s
- * so a queued request does not read as an outage. That patience must not be
- * lent to this decision. Apps Script over quota queues rather than failing
- * fast, and an answer at 25 s is `ok` here while `fetchBoard` has already
- * abandoned all three of its 12 s attempts — every visitor then sees the old
- * mirror under 「目前連不上伺服器」, which is precisely the state a stale
- * mirror must still page for. A check with no timing recorded is treated as
- * not having answered in time; only `gas_board` carries one.
+ * The probe is deliberately more patient than the app, in two directions, and
+ * neither may be lent to this decision:
+ *
+ *   - It waits 30 s per attempt (`TIMEOUT_MS`) so a queued request does not
+ *     read as an outage, where `fetchBoard` abandons each attempt at 12 s.
+ *     Apps Script over quota queues rather than failing fast, so an answer at
+ *     25 s is `ok` here and a timeout for everyone.
+ *   - It retries four times over 30 s of backoff, where `fetchBoard` spends
+ *     its three attempts in about 2.7 s. A cold-start 404 window outlasts the
+ *     visitor and not the probe, so a board won on the fourth attempt — fast,
+ *     once it arrives — is still a board nobody was served.
+ *
+ * Either way every visitor is left on the old mirror under
+ * 「目前連不上伺服器」, which is precisely the state a stale mirror must
+ * still page for. A check that carries no timing is treated as not having
+ * answered in time; only `gas_board` carries one.
  */
 function servesVisitors(checks) {
   const board = checks.find((check) => check.name === 'gas_board');
   if (!board || board.status !== 'ok') return false;
+  if (board.attempts !== 1) return false;
   return typeof board.answeredInMs === 'number' && board.answeredInMs <= CLIENT_BOARD_TIMEOUT_MS;
 }
 

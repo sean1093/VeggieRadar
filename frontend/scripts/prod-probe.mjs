@@ -276,12 +276,18 @@ async function checkGasBoard() {
   if (!(board.count >= BOARD_HEALTHY_ITEMS)) {
     return failed(name, 'gas_stale', `count ${board.count} < ${BOARD_HEALTHY_ITEMS}`, res.body);
   }
-  // `answeredInMs` is what lets `applyVerdict` ask whether a browser would
-  // have got this answer at all: the probe waits TIMEOUT_MS, `fetchBoard`
-  // waits BOARD_TIMEOUT_MS, and a queued Apps Script can sit between them.
+  // `answeredInMs` and `attempts` are what let `applyVerdict` ask whether a
+  // browser would have got this answer at all: the probe waits TIMEOUT_MS and
+  // retries four times, `fetchBoard` waits BOARD_TIMEOUT_MS and gives up after
+  // three attempts ~2.7 s apart. A queued or cold Apps Script sits between
+  // them. Both go in the detail too, because they are the numbers that decide
+  // whether a stale mirror beside this board pages, and a reader of the issue
+  // should not have to infer them.
+  const answered = `answered in ${(res.ms / 1000).toFixed(1)} s${attemptSuffix(res)}`;
   return {
-    ...ok(name, `${board.count} items, crawled ${hours(ageMs(board.generated_at))} h ago, stale=false`),
+    ...ok(name, `${board.count} items, crawled ${hours(ageMs(board.generated_at))} h ago, stale=false, ${answered}`),
     answeredInMs: res.ms,
+    attempts: res.attempts,
   };
 }
 
@@ -371,7 +377,7 @@ function renderSummary(checks, checkedAt) {
         + ' moving \u2014 it cannot be refreshed while GAS is down \u2014 visitors start falling'
         + ' through to the backend, and the next probe run pages. Where the mirror is the stale'
         + ' one: every visitor falls through to a healthy backend and sees correct, current'
-        + ' prices, paying a round trip for them. Past 24 h that stops being a late deploy and'
+        + ' prices, paying a round trip for them. Past 16 h that stops being a late deploy and'
         + ' pages.',
     );
   }

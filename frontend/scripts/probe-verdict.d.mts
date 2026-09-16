@@ -12,6 +12,7 @@ export interface ProbeCheck {
   detail?: string;
   serving?: { ageMs: number; count: number };
   answeredInMs?: number;
+  attempts?: number;
 }
 
 export interface VerdictThresholds {

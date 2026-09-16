@@ -898,7 +898,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-542 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
+543 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1180,10 +1180,14 @@ it honest:
   `fetchBoard` then replaces it with current prices, so what a late deploy
   costs is the CDN fast path — a round trip and a GAS execution per visit —
   not the board. That softening needs `gas_board` to be **`ok` and to have
-  answered inside `BOARD_TIMEOUT_MS`** — the probe waits 30 s where the browser
-  waits 12, and an answer a queued Apps Script took 25 s to give is one every
-  visitor already timed out on, which is exactly when a stale mirror must still
-  page. It stops at **16 h**: the worst lateness this project has produced is
+  answered on its first attempt, inside `BOARD_TIMEOUT_MS`** — the probe is
+  more patient than the app in two directions, and neither may count here. It
+  waits 30 s per attempt where the browser waits 12, so an answer a queued Apps
+  Script took 25 s to give is one every visitor timed out on; and it retries
+  four times over 30 s where `fetchBoard` spends three attempts in about 2.7 s,
+  so a board won on the fourth attempt is fast on arrival and still a board
+  nobody was served. Either way a stale mirror must still page. Both numbers
+  are in the `gas_board` row, so the issue says why. It stops at **16 h**: the worst lateness this project has produced is
   the 11.2 h deploy gap plus a 4 h crawl, and the margin above that is kept
   small because every hour of it is an hour the CDN fast path is bypassed with
   nobody told. Past it the mirror is not late — #53's froze while the deploys
