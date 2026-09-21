@@ -40,9 +40,16 @@ npm run calibrate -- --keep-shipped
 ```
 
 Every download is cached under `.cache/` (gitignored, derived, re-downloadable),
-so iterating on the fit is offline and instant. Delete it to force a refetch.
-A cold run makes ~3,700 MOA requests at 4 concurrent with a pause between
-batches — budget a couple of hours.
+so iterating on the fit is offline and instant. Delete it to force a refetch,
+or point `CALIBRATE_CACHE_DIR` somewhere else. A cold run makes ~3,700 MOA
+requests at 4 concurrent with a pause between batches — budget a couple of
+hours.
+
+Only a response the caller *accepts* is cached. MOA answers a burst with empty
+bodies, and the cache is keyed by URL with no expiry, so one throttled body
+stored here would be read back by every later run — the monthly refit included
+— until someone deleted the directory. A response that fails its predicate
+twice fails the run instead.
 
 ## What it reads
 
