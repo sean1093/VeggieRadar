@@ -8,6 +8,11 @@ name: Production probe
 # frontend/src/types/board.schema.ts and to a freshness bound, and turns a
 # violation into exactly one open `prod-alert` issue.
 #
+# Only a violation a visitor would notice opens that issue. An unreachable
+# Apps Script while the static mirror still serves a fresh board is reported as
+# `degraded` — an annotation and a row in the summary, no issue, no red run.
+# frontend/scripts/probe-verdict.mjs holds that rule and the reasoning for it.
+#
 # Every 6 hours at :40 — offset from the backend's 4-hourly refresh so a probe
 # never lands in the minutes while a crawl is replacing the board.
 on:
@@ -35,6 +40,12 @@ concurrency:
 jobs:
   probe:
     runs-on: ubuntu-latest
+    # The two GAS checks are serial (`gas_board` is timed alone, so its latency
+    # is evidence rather than the probe's own contention) and each retries four
+    # times against a 30 s deadline, so a fully queued backend is ~5 minutes.
+    # Bounded anyway: a hung run holds the `prod-probe` concurrency group, and
+    # nothing else would notice production while it did.
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -90,6 +101,13 @@ jobs:
 
             await core.summary.addRaw(result.summary_md).write();
 
+            // Visible in the run without failing it: a degraded check is a
+            // note for whoever is already looking, not a reason to page.
+            const degraded = result.checks.filter((c) => c.status === 'degraded');
+            for (const check of degraded) {
+              core.warning(`${check.name}: ${check.detail}`, { title: `degraded (${check.category})` });
+            }
+
             // One open issue, ever: a new issue every 6 hours would bury the
             // first one and train its reader to ignore the label.
             const { data: openAlerts } = await github.rest.issues.listForRepo({
@@ -99,29 +117,127 @@ jobs:
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             const stamp = `${result.checked_at.slice(0, 16).replace('T', ' ')} UTC`;
 
+            // The title is this incident's record of what it covers, so it is
+            // kept current: a failing run that finds a new category rewrites
+            // it (below), because later runs only comment and a title frozen
+            // at creation would let a degraded run "recover" something it
+            // never measured.
+            const TITLE = /^\[prod-alert\] (.*) since (\S+)$/;
+            // Which check can report which category. Two checks can report the
+            // same one — either GAS request can come back unreachable or
+            // wrong — and a category is only verified when every check that
+            // could report it came back `ok`.
+            const OWNS = {
+              pages: ['pages_down'],
+              mirror: ['mirror_stale'],
+              gas_board: ['gas_unreachable', 'gas_error', 'gas_stale'],
+              gas_diag: ['gas_unreachable', 'gas_error'],
+              gas_trigger: ['trigger_missing'],
+              gas_incident: ['incident_open'],
+              gas_history: ['history_thin'],
+            };
+            const CATEGORIES = [...new Set(Object.values(OWNS).flat())];
+            const titled = existing ? existing.title.match(TITLE) : null;
+            const named = titled ? titled[1].split(', ').filter(Boolean) : [];
+            // null means the title does not say which categories this incident
+            // covers — renamed by hand, or reworded into prose that still fits
+            // the shape. Then what it covers is unknown, which holds it open
+            // rather than closing something blind.
+            const openFor = named.length && named.every((c) => CATEGORIES.includes(c)) ? named : null;
+
             if (result.ok) {
+              // What this run is actually entitled to declare recovered. A
+              // degraded check measured nothing — no body from `gas_board`, no
+              // answer from `?action=diag`, which leaves the three checks
+              // behind it `skipped` — and an over-quota backend moves between
+              // answering wrongly and not answering at all. So a category
+              // counts as verified only when every check that could report it
+              // came back `ok`; derived from this run rather than assumed,
+              // because either GAS check can be the one that failed.
+              const unverified = CATEGORIES.filter((category) =>
+                result.checks.some((c) => (OWNS[c.name] || []).includes(category) && c.status !== 'ok'),
+              );
+              // An alert closes only when this run verified everything it
+              // names. A title that names nothing recognisable is read as
+              // covering everything, so it closes only on a run that measured
+              // the lot. Degradation is not the only way to measure nothing:
+              // a deploy that published no mirror leaves `mirror` at `skipped`,
+              // which is no evidence that a `mirror_stale` alert recovered.
+              const holdOpen = openFor === null
+                ? unverified.length > 0
+                : openFor.some((category) => unverified.includes(category));
+              // The heading names what is degraded, not just that something is:
+              // both softenings read "still degraded" otherwise, so an alert
+              // flipping from a silent backend to a late mirror would dedupe
+              // against the previous note and leave the thread describing the
+              // opposite fault.
+              const what = degraded.map((c) => c.name).sort().join(', ');
+              const heading = holdOpen
+                ? (degraded.length ? `still degraded — ${what}` : 'not verified')
+                : 'recovered';
               if (existing) {
-                await github.rest.issues.createComment({
-                  owner, repo, issue_number: existing.number,
-                  body: `**recovered** — ${stamp}\n\n${result.summary_md}\n\n[Probe run](${runUrl})`,
-                });
-                await github.rest.issues.update({
-                  owner, repo, issue_number: existing.number,
-                  state: 'closed', state_reason: 'completed',
-                });
-                core.info(`closed #${existing.number}`);
+                // Say it once. A held-open alert can stay held for as long as
+                // the condition lasts — a project that publishes no mirror
+                // holds a `mirror_stale` one indefinitely — and a fresh
+                // summary table every 6 hours would bury the history that
+                // makes the issue worth reading. The last note already says
+                // this, so only a change in it is worth a comment.
+                const { data: recent } = holdOpen
+                  ? await github.rest.issues.listComments({
+                      owner, repo, issue_number: existing.number,
+                      per_page: 1, sort: 'created', direction: 'desc',
+                    })
+                  : { data: [] };
+                const alreadySaid = recent[0] && recent[0].body.startsWith(`**${heading}**`);
+                if (!alreadySaid) {
+                  await github.rest.issues.createComment({
+                    owner, repo, issue_number: existing.number,
+                    body: `**${heading}** — ${stamp}\n\n${result.summary_md}\n\n[Probe run](${runUrl})`,
+                  });
+                }
+                if (holdOpen) {
+                  const covers = openFor ? openFor.join(', ') : 'title renamed';
+                  core.info(`left #${existing.number} open: ${covers} not verified by this run${alreadySaid ? ' (already noted)' : ''}`);
+                } else {
+                  await github.rest.issues.update({
+                    owner, repo, issue_number: existing.number,
+                    state: 'closed', state_reason: 'completed',
+                  });
+                  core.info(`closed #${existing.number}`);
+                }
               }
-              core.info('all checks passed');
+              core.info(
+                degraded.length
+                  ? `no visitor-facing failure; ${degraded.length} check(s) degraded`
+                  : 'all checks passed',
+              );
               return;
             }
 
-            const categories = [...new Set(
+            const failing = [...new Set(
               result.checks.filter((c) => c.status === 'failed').map((c) => c.category),
-            )].join(', ');
+            )];
+            const categories = failing.join(', ');
             const body = `**${categories}** — ${stamp}\n\n${result.summary_md}\n\n[Probe run](${runUrl})`;
 
             if (existing) {
               await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+              // Fold any new category into the title, keeping the date this
+              // incident started. Without this the title states only what the
+              // first run saw, and the recovery branch above would read it as
+              // the whole incident.
+              // Only a title this workflow still owns is rewritten: when
+              // `openFor` is null a human worded it, and overwriting that with
+              // machine categories would destroy what they wrote. Such an
+              // alert is already held open as unknown by the branch above.
+              const covered = [...new Set([...(openFor || []), ...failing])];
+              if (openFor && covered.length > openFor.length) {
+                await github.rest.issues.update({
+                  owner, repo, issue_number: existing.number,
+                  title: `[prod-alert] ${covered.join(', ')} since ${titled[2]}`,
+                });
+                core.info(`retitled #${existing.number}: ${covered.join(', ')}`);
+              }
               core.info(`commented on #${existing.number}`);
             } else {
               try {

@@ -4,9 +4,11 @@
  *
  * The mirror is a *file*: once written it keeps serving whatever was in it,
  * with its own `stale: false` frozen inside, until the next scheduled run
- * replaces it. A bad fetch is therefore not a bad request that self-heals in
- * four hours — it is up to four hours of wrong or empty prices in front of
- * every visitor, and it would also overwrite the last good mirror on the way.
+ * replaces it — which §2 measures at a median 4.5 h and a worst of 11.2 h,
+ * whatever interval the cron asks for. A bad fetch is therefore not a bad
+ * request that self-heals on the next tick: it is hours of wrong or empty
+ * prices in front of every visitor, and it would overwrite the last good
+ * mirror on the way.
  * So the payload is held to the same contract and the same freshness bound the
  * app and the production probe use, and a rejected board leaves the previously
  * published mirror in place.
@@ -25,9 +27,12 @@ import { readFileSync } from 'node:fs';
 import { BOARD_HEALTHY_ITEMS, boardMismatch } from '../src/types/board.schema.ts';
 
 // Two 4-hourly refresh cycles plus the crawl, the same bound `prod-probe.mjs`
-// alerts on. The mirror is fetched 20 minutes after a scheduled refresh, so a
-// board anywhere near this age means the backend missed a run — freezing that
-// into a file would hide a broken pipeline behind a plausible-looking board.
+// alerts on. This one is about what gets *written*, not what gets alerted on:
+// the deploy runs on a clock of its own and lands when GitHub runs it (§2
+// measures a median 4.5 h against a cron asking for 2 h), so a board this old
+// is one the backend never rebuilt, and freezing it into a file would hide a
+// broken pipeline behind a plausible-looking board. Rejecting it costs
+// nothing — the step falls back to the mirror already published.
 const MAX_AGE_MS = 8 * 60 * 60 * 1000;
 // A `generated_at` ahead of this clock is corrupt, not fresh; the allowance
 // covers ordinary clock skew between the runner and Google.

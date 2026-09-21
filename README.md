@@ -82,7 +82,7 @@ MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ CacheServic
                                                                       │
                                                             GET /exec │
                                                                       ▼
-Frontend (GitHub Pages) ◀── validate ◀── GitHub Actions (deploy-pages, cron :20 / 4 h)
+Frontend (GitHub Pages) ◀── validate ◀── GitHub Actions (deploy-pages, cron :20 hourly)
   data/board.json, published inside the bundle's own artifact
         │
         ▼
@@ -384,16 +384,32 @@ Three reasons, none of which the client-side fallback could reach:
   that has already loaded the board once. The mirror is the last good board for
   *every* visitor, including a first-time one arriving while GAS is down.
 
-The mirror is republished every two hours (plus on every code deploy), so it
-trails the backend by at most ~2 h and a build. Two hours rather than the
-backend's own four: the refresh trigger is installed by hand, so its phase is
-arbitrary, and a 4-hourly fetch that lands minutes *before* it lands there
-forever — mirroring a board already 4 h old. That is not a hypothetical; the
-probe (§8) opened `[prod-alert] mirror_stale` on a mirror 8.4 h old while GAS
-held one 0.4 h old, which is what set this cadence. Halving it keeps the mirror
-inside the client's 6 h authority window below whatever the trigger's phase
-is. For a board of wholesale *closing* prices, published once a day after
-market close, the remaining lag is invisible.
+The mirror is republished on an hourly cron (plus on every code deploy). It
+trails the backend by the board's age when the deploy ran — 0–4 h, since the
+refresh trigger is installed by hand and its phase is arbitrary — plus
+everything since that deploy. **That second term is not what the cron says it
+is.** Over the 222 h to 2026-09-16 the previous `20 */2 * * *` asked for ~111
+runs and GitHub created 46: a median gap of 4.5 h against the 2 h it was
+written for, a worst of 11.2 h, none cancelled or skipped. So a typical mirror
+sat near the client's 6 h authority window, past which every visitor falls
+through to GAS, and the tail sat past the probe's 8 h bound —
+`[prod-alert] mirror_stale` on a mirror 8.8 h old beside a board crawled 0.8 h
+earlier (#66), the same fault as #42 one cadence earlier.
+
+The hourly cron is an **experiment, not a settled cadence**. Two explanations
+fit the data and they disagree about it: if ticks are dropped independently,
+halving the interval halves the realised gap; if this repo has an effective
+floor near 4 h, halving it changes nothing. The evidence leans to the floor —
+only 5 of 45 gaps are under 3 h, where independent drops would put ~40 % of
+them at 2 h, and the 6-hourly probe on this same repo realises 6.6 h, nearly
+every tick, because its ask already clears the floor. Hourly bounds the cost of
+finding out. The `schedule:` comment in `.github/workflows/deploy-pages.yml`
+carries the re-measurement — gaps between runs that *succeeded*, slurped with
+`jq -s` rather than gh's per-page `--jq`, both of which change the answer — and
+if the median has not moved below ~4 h after a week, the fix is the mechanism
+rather than more deploys ([#68](https://github.com/sean1093/VeggieRadar/issues/68)).
+For a board of wholesale *closing* prices, published once a day after market
+close, the remaining lag is invisible.
 
 **A mirror is a file, and a file cannot know it went stale.** The `stale: false`
 and `age_ms` inside it froze the moment it was written, so the client recomputes
@@ -419,7 +435,7 @@ passes `frontend/scripts/validate-board.mjs` (the §3 contract, ≥ 60 items,
 crawled < 8 h ago, every item priced), and a failed fetch or a rejected board
 re-publishes the *previous* mirror rather than failing the deploy — a code
 change must not be blocked by a backend outage, and an unvalidated file would
-serve wrong prices for four hours (§8).
+serve wrong prices until the next deploy republishes the mirror (§8).
 
 ### Alerting: a broken pipeline has to reach a human
 
@@ -884,7 +900,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-496 tests at ~98% statement / ~93% branch coverage. `vitest.config.ts` pins
+546 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1000,26 +1016,46 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   the default branch runs the tests, builds `frontend/` and publishes to Pages. In
   the repo, set **Settings → Pages → Source: GitHub Actions**. Live at
   `https://<user>.github.io/VeggieRadar/` (`vite.config.ts` `base` is `/VeggieRadar/`).
-  It also runs on `schedule: '20 */2 * * *'`, because the static board mirror
+  It also runs on `schedule: '20 * * * *'`, because the static board mirror
   (§2) is only as fresh as the last deploy — and the backend's refresh trigger
   is installed by hand, so a fetch on the *same* 4-hourly period can sit
-  permanently on the wrong side of it. Twelve deploys a day sits far below
-  Pages' soft limit of ten per hour, and `concurrency: pages` still keeps one
-  deploy at a time.
+  permanently on the wrong side of it. Hourly rather than the 2-hourly it asked
+  for before, as a bounded experiment in whether the interval is what GitHub is
+  actually honouring (§2). At most 24 deploys a day still sits below Pages'
+  soft limit of ten per hour, and `concurrency: pages` keeps one deploy at a
+  time — with `cancel-in-progress: false`, so a scheduled tick can never kill a
+  push deploy inside `actions/deploy-pages`. Both jobs carry
+  `timeout-minutes: 15` for the same reason: a hung run holds the group for the
+  whole workflow, so the worst case is half an hour of ticks queuing and being
+  cancelled with nothing republished, against the 12 h two jobs at the default
+  would allow. Every run lints and tests before
+  publishing, scheduled ones included: skipping that would let the next tick
+  publish a master whose own deploy had just failed on a red test.
   The **Fetch board mirror** step runs after the suite and before the build:
-  it `curl`s `?action=board` (the URL read from the committed `frontend/.env`,
-  so no secret), validates it with
+  it fetches `?action=board` with `scripts/fetch-retry.mjs` (the URL read from
+  the committed `frontend/.env`, so no secret), validates it with
   `node --experimental-strip-types scripts/validate-board.mjs`, and copies it
   to `frontend/public/data/board.json` — which `frontend/.gitignore` covers,
-  since the file belongs in the artifact and not in the history. **The step
-  never fails the job**: a failed fetch or a rejected board re-publishes the
-  mirror already on Pages, and if that is missing too the site deploys without
-  one and the client goes straight to GAS. Every run records which of the three
-  happened in its step summary:
+  since the file belongs in the artifact and not in the history. Both the GAS
+  fetch and the fallback fetch of the published mirror go through
+  `scripts/fetch-retry.mjs`, which is the probe's own policy
+  (`scripts/gas-retry.mjs`, Monitoring): three attempts, 2 s then 4 s apart,
+  for a 404, a 5xx or a timeout, and never for a 200 — a bad body is the
+  validator's question, an empty one is refused outright. The Pages fetch runs
+  in `static` mode, where a 404 is the final answer ("nothing published") and
+  only a 5xx or a dead connection is retried. One attempt was how the mirror froze for a whole day
+  on 2026-09-13 (#53): Apps Script answered each scheduled fetch with its
+  cold-start 404 after queueing it for ~15 s, every run "succeeded" by
+  republishing the same 04:22 board, and GAS itself was healthy the entire
+  time. **The step never fails the job**: a failed fetch or a rejected board
+  re-publishes the mirror already on Pages, and if that is missing too the
+  site deploys without one and the client goes straight to GAS. Every run
+  records which of the three happened, with the attempt count, in its step
+  summary and in its log:
   ```
   mirror: fresh | reused (stale) | none
 
-  reason: board ok: 94 items, traded 2026-09-03, crawled 3.3 h ago
+  reason: board ok: 94 items, traded 2026-09-03, crawled 3.3 h ago (ok after 2 attempts)
   ```
 - **Backend → Apps Script** via `.github/workflows/deploy-gas.yml` (optional):
   otherwise deploy manually with `clasp` (§7). The workflow runs lint and the
@@ -1044,7 +1080,9 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
     rotate it if the secret ever leaks.
 
 > A board rebuilt out of band — after `warm`, or after a backfill — reaches the
-> mirror only on the next scheduled deploy, up to four hours later. Running
+> mirror only on the next scheduled deploy — and §2 measures that wait at a
+> median 4.5 h under the previous cadence, rather than the interval the cron
+> asks for. Running
 > `deploy-pages` by `workflow_dispatch` refreshes it immediately; visitors see
 > the new prices either way, since a mirror older than 6 h sends the client to
 > GAS (§2).
@@ -1067,8 +1105,8 @@ could drift:
 | --- | --- | --- |
 | `pages` | 200, `<title>` still contains 今日菜價, and a `<script type="module">` is present — a Pages deploy that lost its bundle still serves a plausible shell | `pages_down` |
 | `mirror` | `data/board.json` is 200, matches the schema and was crawled < 8 h ago — the same bound the publish-side validator applies (§2). **A 404 stays `skipped`**, not a failure: a deploy that could obtain no mirror at all publishes without one on purpose, and the visitors it sends to GAS are covered by `gas_board` below | `mirror_stale` |
-| `gas_board` | the body is JSON (Apps Script answers platform errors with HTML and HTTP 200), matches the schema, `stale === false`, `count ≥ 60`, crawled < 8 h ago | `gas_error` / `gas_stale` |
-| `gas_diag` | `?action=diag` answers JSON | `gas_error` |
+| `gas_board` | the body is JSON (Apps Script answers platform errors with HTML and HTTP 200), matches the schema, `stale === false`, `count ≥ 60`, crawled < 8 h ago | `gas_unreachable` / `gas_error` / `gas_stale` |
+| `gas_diag` | `?action=diag` answers JSON | `gas_unreachable` / `gas_error` |
 | `gas_trigger` | `triggers` includes `refreshBoardCache` | `trigger_missing` |
 | `gas_incident` | `alert.incident_open === false` | `incident_open` |
 | `gas_history` | `history.items ≥ 60` | `history_thin` |
@@ -1084,22 +1122,121 @@ today.** The trading date legitimately stands still over weekends, holidays and
 typhoon closures (§2, "Trading date vs. refresh time"), so a `date`-based check
 would page a human every Sunday and be ignored by the second one.
 
-**The two GAS checks retry; nothing else does** (`scripts/gas-retry.mjs`).
+**Every scheduled request this repo makes retries** — the probe's four checks
+and the deploy's two mirror fetches (§8), all through `scripts/gas-retry.mjs`,
+so there is one policy to tune. What differs is whose 404 it is: on Apps
+Script a 404 is a cold start and is asked again, while on GitHub Pages it is
+the definitive “nothing published here” and is final (`isTransientStatic`).
+The two static checks matter more than they look, because `mirror` passing is
+what softens an unreachable backend — a lone CDN blip there would withdraw the
+softening and open the false alarm this policy exists to prevent.
 Apps Script answers a cold start on `/exec` with a platform 404 HTML page, and
 an account near its quota queues a request until the deadline expires — the app
 itself makes three attempts for exactly this reason (§2). The probe made one,
 so two cold starts in two days opened two `prod-alert` issues that the next run
 closed again, with an e-mail each time. Reachability failures (a timeout, DNS,
-404, 5xx) are therefore retried up to 3 times with a 2 s then 4 s backoff, and
-the alert says `after 3 attempts` so a blip stays distinguishable from an
-outage. A **200 is never retried**, whatever its body: a stale board, a short
+404, 5xx) are therefore retried, and the alert says `after N attempts` so a
+blip stays distinguishable from an outage. The shared default is 3 attempts
+with a 2 s then 4 s backoff; the probe's two GAS checks widen that to **4
+attempts, 5 s linear**, because on 2026-09-15 a cold-start window outlasted the
+default and opened one more self-closing issue. How long that actually takes
+depends on the symptom: a cold-start 404 comes back in about a second, so the
+default spent ~10 s and the widened budget spends ~35 s, while a request queued
+against the 30 s deadline can stretch either to 3 × or 4 × that plus the
+backoff (96 s and 150 s respectively). That deadline is deliberately no
+shorter than the deploy's: the deploy still refreshing the mirror is what
+softens an unreachable backend, so a probe that gave up sooner than the deploy
+does would hold a queued backend green forever. A **200 is never retried**, whatever its body: a stale board, a short
 count, schema drift or a platform HTML page is evidence that `doGet` answered,
 and a second attempt would only hide a real fault for a minute.
 
+**An unreachable backend does not page while the mirror is serving.** The app
+reads `data/board.json` before it ever reaches GAS (§3), so `/exec` answering
+404 for a minute still leaves every visitor with today's prices. Two things do
+degrade meanwhile: the drawer's trend sparkline is empty, and a search for a
+crop the board does not carry answers 「服務忙碌中，請稍後再試」 instead of a
+result. Both are bounded; neither is the board going dark. So
+`gas_unreachable` — a request that never reached `doGet` — is reported as ⚠️
+**`degraded`** rather than failed while the mirror is genuinely carrying
+visitors: a row in the summary and a run annotation, no issue and no red run.
+`frontend/scripts/probe-verdict.mjs` holds that one rule, and four guards keep
+it honest:
+
+- **“Carrying visitors” is the app's bar, not the probe's.** `useBoard` serves
+  the mirror without asking GAS only while it is under `BOARD_MAX_AGE_MS`
+  (6 h) — not the 8 h the `mirror` check allows. A mirror in the 6–8 h band
+  passes its own check while every visitor falls through to a backend that is
+  not answering, and that band is exactly where an outage lands, because the
+  deploy cannot refresh the mirror while GAS is down. Above 6 h, the probe
+  pages.
+- **Only the board endpoint may be softened.** The 8 h backstop exists because
+  `deploy-pages.yml` refreshes the mirror from `?action=board`, so it engages
+  when *that* endpoint is silent. A quiet `?action=diag` beside a healthy board
+  has no backstop at all — the mirror would keep refreshing forever while
+  `gas_trigger`, `gas_incident` and `gas_history` sat at `skipped` and nobody
+  learned the baselines stopped publishing — so it pages. `handleDiag` does
+  real work per call while `readBoard` is a cache read, which is exactly how
+  diag fails alone.
+- **A stale mirror beside a healthy backend is degraded too.** The rule runs
+  both ways, because the app reads a board from two places: an outage is one
+  path down, a fault is both. `useBoard` paints the stale mirror and
+  `fetchBoard` then replaces it with current prices, so what a late deploy
+  costs is the CDN fast path — a round trip and a GAS execution per visit —
+  not the board. That softening needs `gas_board` to be **`ok` and to have
+  answered on its first attempt, inside `BOARD_TIMEOUT_MS`** — the probe is
+  more patient than the app in two directions, and neither may count here. It
+  waits 30 s per attempt where the browser waits 12, so an answer a queued Apps
+  Script took 25 s to give is one every visitor timed out on; and it retries
+  four times over 30 s where `fetchBoard` spends three attempts in about 2.7 s,
+  so a board won on the fourth attempt is fast on arrival and still a board
+  nobody was served. Either way a stale mirror must still page. Both numbers
+  are in the `gas_board` row, so the issue says why. It stops at **16 h**: the worst lateness this project has produced is
+  the 11.2 h deploy gap plus a 4 h crawl, and the margin above that is kept
+  small because every hour of it is an hour the CDN fast path is bypassed with
+  nobody told. That is a bound on the verdict, not on the alert: the probe's
+  own schedule is measured at a 6.6 h median and an 8.8 h worst, so a frozen
+  mirror can go unreported until about 25 h, against 17 h before any softening
+  existed. Past it the mirror is not late — #53's
+  froze while the deploys themselves kept succeeding, which no gap bounds. A mirror whose
+  `generated_at` is missing, unparsable or in the future is corrupt rather
+  than late and is never softened. Each softening requires the other path to
+  be healthy, so they are mutually exclusive and a run where neither serves
+  always pages.
+- **A short board is not a served board.** The mirror must also carry
+  `BOARD_HEALTHY_ITEMS`. A throttled MOA batch is normally caught by
+  `gas_board`'s count guard, which during an outage never gets a body to
+  measure.
+- **Only what was retried counts as unreachable** (404, 5xx, no answer at
+  all). A 403 on a deployment whose access was narrowed, a redirect, or a 200
+  with an empty body came *from* the backend and pages as `gas_error`.
+- **A run closes only what it actually verified.** A category counts as
+  verified when every check that could report it came back `ok`, derived from
+  the run rather than assumed — and a `degraded` check is not `ok`. So a run
+  with a silent backend closes an alert naming only `pages_down` or
+  `mirror_stale`, while one with a late mirror holds `mirror_stale` open and
+  closes `pages_down`. Whatever a run did not measure stays open with a
+  「still degraded」 comment: `gas_board` got no body, the three checks behind
+  `diag` are `skipped`, and an over-quota backend moves between answering
+  wrongly and not answering at all.
+  The same rule catches a quieter case — a deploy that published no mirror
+  leaves `mirror` at `skipped`, which is no evidence that a `mirror_stale`
+  alert recovered, so it is held open as 「not verified」. A title that does
+  not name known categories is read as covering everything, and closes only on
+  a run that measured the lot.
+
+With no mirror published at all the `mirror` check is `skipped`, GAS is the
+only path a visitor has, and its silence pages like any other outage. Contract
+failures (`gas_error`, `gas_stale`) always page — something answered, and
+answered wrongly.
+
 A failing run comments on the open issue labelled **`prod-alert`**, and only
 opens `[prod-alert] <categories> since <date>` when there is none (creating the
-label on first use). A fully passing run comments 「recovered」 on that issue
-and closes it. So at most one alert is ever open: a fresh issue every 6 hours
+label on first use). It also folds any category it found into that title, so
+the title always states what the whole incident covers — later runs only
+comment, and the recovery rule above reads the title to decide what a degraded
+run is allowed to close. A fully passing run comments 「recovered」 on that issue
+and closes it, except for the categories a degraded run cannot vouch for
+(above), which keep it open. So at most one alert is ever open: a fresh issue every 6 hours
 would bury the first one and train its reader to ignore the label — the same
 reason the e-mail alerting has an incident window. The job also goes red
 whenever the probe did, and appends the summary table to the run's step
@@ -1107,12 +1244,20 @@ summary. It needs no secret; every endpoint it touches is public (§2).
 
 ```bash
 cd frontend
-node --experimental-strip-types scripts/prod-probe.mjs   # writes probe-result.json, exit 1 on any failure
+node --experimental-strip-types scripts/prod-probe.mjs   # writes probe-result.json, exit 1 on anything that pages
+npx vitest run scripts/                                 # the verdict rules, and the probe end to end
 ```
-The flag is required on Node 22.6–22.17 and a no-op from 22.18 on.
+The flag is required on Node 22.6–22.17 and a no-op from 22.18 on. A degraded
+run exits **0** — the exit code is the paging decision, not a health score, and
+`probe-result.json` carries the per-check detail either way.
+
 `workflow_dispatch` takes `pages_url` / `api_base_url` inputs, so the alert
-path can be exercised against a deliberately bad URL instead of waiting for a
-real outage.
+path can be rehearsed against a deliberately bad URL instead of waiting for a
+real outage. Use `pages_url`: a bad `api_base_url` alongside the real, fresh
+mirror is precisely the case the degraded rule absorbs, so it now ends green
+with two ⚠️ rows and no issue — which rehearses the *softening*, not the
+alert. To exercise the alert through GAS, point `pages_url` somewhere with no
+`data/board.json`, so the mirror check is `skipped` and nothing is softened.
 
 Not UptimeRobot or a similar service: Actions is already free here, and what
 has to be verified is the schema and the freshness rather than an HTTP 200 —

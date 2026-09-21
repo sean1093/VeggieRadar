@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { attemptSuffix, isTransient, withRetry } from './gas-retry.mjs';
+import { attemptSuffix, isTransient, isTransientStatic, outcome, withRetry } from './gas-retry.mjs';
 
 /** `get()` in prod-probe.mjs never throws: a dead host comes back as data. */
 const res = (status, body = '{}') => ({ status, body });
@@ -33,8 +33,28 @@ describe('isTransient', () => {
   });
 });
 
+describe('isTransientStatic — a static host, where 404 is the answer', () => {
+  it('never retries a 404: on Pages it means nothing is published there', () => {
+    expect(isTransientStatic(res(404, 'Not Found'))).toBe(false);
+    expect(isTransientStatic(res(200))).toBe(false);
+  });
+
+  it('still retries what never reached the host, and the host falling over', () => {
+    expect(isTransientStatic(dead('TypeError: fetch failed'))).toBe(true);
+    expect(isTransientStatic(res(502))).toBe(true);
+    expect(isTransientStatic(undefined)).toBe(false);
+  });
+});
+
 describe('withRetry', () => {
   const sleep = () => Promise.resolve();
+
+  it('takes the transient predicate from the caller — one attempt for a Pages 404', async () => {
+    const get = vi.fn(async () => res(404, 'Not Found'));
+    const out = await withRetry(get, 'url', { sleep, transient: isTransientStatic });
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(out.attempts).toBe(1);
+  });
 
   it('returns a healthy answer on the first attempt without waiting', async () => {
     const get = vi.fn(async () => res(200, '{"type":"board"}'));
@@ -98,5 +118,40 @@ describe('attemptSuffix', () => {
 
   it('says how hard the probe tried, so the alert distinguishes a blip from an outage', () => {
     expect(attemptSuffix({ attempts: 3 })).toBe(' after 3 attempts');
+  });
+});
+
+describe('outcome — what the deploy mirror step reads', () => {
+  it('only a 200 is a success, and the body is not its business', () => {
+    // A platform HTML page served with 200 is passed through to the validator
+    // to be judged, never retried and never mistaken for a fetch failure.
+    expect(outcome({ status: 200, body: '<!DOCTYPE html>', attempts: 1 })).toEqual({ ok: true, reason: 'ok' });
+    expect(outcome({ status: 200, body: '{"type":"board"}', attempts: 3 })).toEqual({
+      ok: true,
+      reason: 'ok after 3 attempts',
+    });
+  });
+
+  it('names the final HTTP status with the attempt count — the 2026-09-13 signature', () => {
+    expect(outcome({ status: 404, body: '<!DOCTYPE html>', attempts: 3 })).toEqual({
+      ok: false,
+      reason: 'HTTP 404 after 3 attempts',
+    });
+    expect(outcome({ status: 503, body: '', attempts: 3 })).toEqual({ ok: false, reason: 'HTTP 503 after 3 attempts' });
+  });
+
+  it('names a request that never got an answer', () => {
+    expect(
+      outcome({ status: 0, body: '', error: 'TimeoutError: The operation was aborted due to timeout', attempts: 3 }),
+    ).toEqual({ ok: false, reason: 'request failed after 3 attempts: TimeoutError: The operation was aborted due to timeout' });
+  });
+
+  it('does not claim retries that never happened', () => {
+    expect(outcome({ status: 403, body: '', attempts: 1 })).toEqual({ ok: false, reason: 'HTTP 403' });
+    expect(outcome(undefined)).toEqual({ ok: false, reason: 'no response' });
+  });
+
+  it('refuses a 200 with nothing in it, so no shell-side size check has to contradict it', () => {
+    expect(outcome({ status: 200, body: '', attempts: 1 })).toEqual({ ok: false, reason: 'HTTP 200 with an empty body' });
   });
 });
