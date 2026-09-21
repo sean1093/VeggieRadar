@@ -52,6 +52,11 @@ async function withoutThePause<T>(work: () => Promise<T>): Promise<T> {
   vi.useFakeTimers();
   try {
     const running = work();
+    // Claimed before the clock moves: a rejection that lands while the timers
+    // are being advanced is unhandled at that moment, which vitest counts as
+    // an error and exits non-zero on — with every test still reported as
+    // passing. It is awaited for real below.
+    running.catch(() => {});
     // Two turns: the pause is scheduled after the first attempt resolves.
     await vi.advanceTimersByTimeAsync(RETRY_PAUSE_MS * 2);
     return await running;
@@ -120,6 +125,23 @@ describe('cachedText', () => {
     await expect(withoutThePause(() =>
       cachedText(namespace, 'https://example.test/d', () => true),
     )).rejects.toThrow(/fetch failed/);
+
+    expect(cached(namespace)).toEqual([]);
+  });
+
+  it('reports the attempt it actually made, when the two differ', async () => {
+    // A rejected body followed by an unreachable retry is a fetch failure: the
+    // last attempt is what the message describes, or the split between the two
+    // messages says nothing an operator can act on.
+    serve('', null);
+    await expect(withoutThePause(() =>
+      cachedText(namespace, 'https://example.test/f', (t) => t.includes('RS')),
+    )).rejects.toThrow(/fetch failed/);
+
+    serve(null, '');
+    await expect(withoutThePause(() =>
+      cachedText(namespace, 'https://example.test/g', (t) => t.includes('RS')),
+    )).rejects.toThrow(/unusable response/);
 
     expect(cached(namespace)).toEqual([]);
   });

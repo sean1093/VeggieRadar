@@ -68,11 +68,12 @@ export async function cachedText(
   if (!usable) {
     stats.retries += 1;
     await sleep(RETRY_PAUSE_MS);
-    const second = await once(url);
-    if (second !== null && accept(second)) {
-      body = second;
-      usable = true;
-    }
+    // The retry's outcome replaces the first attempt's outright, so the error
+    // below describes the attempt it is reporting on: a rejected first body
+    // followed by an unreachable retry is a fetch failure, not an unusable
+    // response, and the two are acted on differently.
+    body = await once(url);
+    usable = body !== null && accept(body);
   }
   // The guard used to test only `body === null`, so a body the caller had
   // rejected — a throttled empty response — was written to `.cache/` and
