@@ -35,7 +35,7 @@ function missSuggestion(query: string, status: SearchStatus): string {
 function App() {
   const { status, freshness, reload } = useBoard();
   const board = boardItems(status);
-  const { query, status: searchStatus, outcome, search: runQuery, preview, cancelPreview, clear } = useSearch(board);
+  const { query, status: searchStatus, outcome, search: runQuery, preview, clear } = useSearch(board);
   const watchlist = useWatchlist();
   // Read straight off the URL rather than from `view`, which does not exist
   // yet and which this feeds. A query in the URL that the search has not
@@ -80,16 +80,7 @@ function App() {
     [runQuery, urlItem, urlQuery, board],
   );
   const searching = searchStatus.kind === 'searching';
-  // Tapping a card answers the board as it stands. A word still in the
-  // debounce would settle 300 ms later, narrow the board under the drawer that
-  // tap just opened, and — for a card off the board — close it.
-  const openCard = useCallback(
-    (item: ProduceItem) => {
-      cancelPreview();
-      view.select(item);
-    },
-    [cancelPreview, view],
-  );
+
   const toggleWatch = (item: ProduceItem) => watchlist.toggle(item.official_name);
 
   // The URL's query runs itself — on a shared `?q=` and on back/forward alike —
@@ -174,9 +165,9 @@ function App() {
           widens the board back to 全部, writes the query to the URL and asks
           the backend. */}
       <Header
-        onSearch={(q) => { adopting.current = false; touched.current = true; view.applyQuery(q); runLinkedQuery(q); }}
+        onSearch={(q) => { adopting.current = false; touched.current = true; view.applyQuery(q, { release: true }); runLinkedQuery(q); }}
         onQueryChange={(q) => { adopting.current = false; touched.current = true; preview(q); }}
-        onClear={() => { adopting.current = false; touched.current = true; view.applyQuery(''); clear(); }}
+        onClear={() => { adopting.current = false; touched.current = true; view.applyQuery('', { release: true }); clear(); }}
         initialQuery={urlWord}
         searching={searching}
       />
@@ -195,6 +186,19 @@ function App() {
               searching={searching}
             />
             {view.notice && <p role="status" className="-mt-4 pb-5 text-xs text-clay">{view.notice}</p>}
+
+            {/* A backend too busy to answer, behind a board that matched the
+                query anyway. The rows stay — they are prices the visitor can
+                read — and this is what says the card a link asked for is not
+                among them, with the one button that can still fetch it. */}
+            {outcome.kind === 'transient' && searchStatus.kind === 'local' && (
+              <p role="status" className="-mt-4 pb-5 text-xs text-clay">
+                服務忙碌中，部分結果可能未顯示。
+                <button onClick={() => runLinkedQuery(query)} className="pl-2 underline hover:text-ink">
+                  重試
+                </button>
+              </p>
+            )}
 
             {view.filterOptions.length > 1 && (
               <div className="pb-5">
@@ -219,13 +223,13 @@ function App() {
                 so a query submitted during the first paint can be answered
                 before the board itself arrives. */}
             {status.kind === 'loading' && view.visibleItems.length === 0 && (
-              <ProduceList items={[]} loading onCardClick={openCard} />
+              <ProduceList items={[]} loading onCardClick={view.select} />
             )}
 
             {view.visibleItems.length > 0 && (
               <ProduceList
                 items={view.visibleItems}
-                onCardClick={openCard}
+                onCardClick={view.select}
                 isWatched={watchlist.isWatched}
                 onToggleWatch={toggleWatch}
               />

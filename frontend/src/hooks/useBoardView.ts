@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { track } from '../lib/analytics';
 import { closeDrawerUrl, pushUrlState, replaceUrlState, useUrlState, type SortMode } from '../lib/urlState';
 import { byValueFirst } from '../lib/utils/value-sort';
@@ -29,7 +29,7 @@ export interface BoardView {
   select: (item: ProduceItem) => void;
   close: () => void;
   /** A new query: put it in the URL and widen the board back to 全部. */
-  applyQuery: (query: string) => void;
+  applyQuery: (query: string, options?: { release?: boolean }) => void;
   /** The query the URL asks for; the search hook is what runs it. */
   linkedQuery: string;
   /** A link named an item today's board does not carry. */
@@ -115,14 +115,31 @@ export function useBoardView(
     track('filter_changed', { filter: value });
   }, []);
 
-  const select = useCallback((item: ProduceItem) => pushUrlState({ item: item.name }), []);
+  // Which card the visitor opened by tapping it. `selectedItem` cannot answer
+  // that from inside `applyQuery`: the preview resets the search phase first,
+  // so by the time the settled word arrives the card is already unresolvable.
+  const tapped = useRef<string | null>(null);
+  const select = useCallback((item: ProduceItem) => {
+    tapped.current = item.name;
+    pushUrlState({ item: item.name });
+  }, []);
   const close = useCallback(() => closeDrawerUrl(), []);
 
-  const selectedItem = useMemo(() => {
+  const found = useMemo(() => {
     if (!url.item) return null;
     const named = (it: ProduceItem) => it.name === url.item;
     return baseItems.find(named) ?? board.find(named) ?? null;
   }, [url.item, baseItems, board]);
+
+  // A card the visitor has open stays open until they close it. Off the board
+  // it lives only inside the search phase, so anything that resets that phase
+  // — a keystroke settling, a query being voided — used to take the drawer
+  // with it and then declare the crop missing. Held here so the drawer
+  // outlives the answer that produced it.
+  const [openCard, setOpenCard] = useState<ProduceItem | null>(null);
+  if (found && openCard?.name !== found.name) setOpenCard(found);
+  else if (!url.item && openCard !== null) setOpenCard(null);
+  const selectedItem = found ?? (url.item !== null && openCard?.name === url.item ? openCard : null);
 
   // On the board or not: what decides whether a share link needs the query.
   // Read off `board` rather than off a flag, because that is the same list the
@@ -135,7 +152,7 @@ export function useBoardView(
   // Widening the board back to 全部 for a new query is a reset, not a choice,
   // so it is deliberately not reported as filter_changed.
   const applyQuery = useCallback(
-    (query: string) => {
+    (query: string, { release = false }: { release?: boolean } = {}) => {
       setMissedItem(null);
       // An item nothing can show goes with it. That is the stranded link:
       // `#/i/枇杷?q=秋葵` after a busy backend, with no drawer, no notice and
@@ -154,8 +171,18 @@ export function useBoardView(
       // A query that has not actually moved strands nothing: typing a stray
       // character over a linked drawer and deleting it again settles back on
       // the same word, and this runs on that settled word.
+      // `release` marks the visitor's own move — ✕ or a submitted word. Those
+      // put the board back and the drawer's card is not part of it. The typing
+      // preview publishes incidentally, 300 ms after the fact, and must not
+      // close a card tapped in between.
+      //
+      // A query that has not moved strands nothing either way: typing a stray
+      // character over a linked drawer and deleting it settles back on the
+      // same word, and submitting that word is another try at the link.
       const unchanged = query.trim() === url.query;
-      const survives = url.item !== null && (unchanged || board.some((it) => it.name === url.item));
+      const survives =
+        url.item !== null
+        && (unchanged || (!release && (tapped.current === url.item || board.some((it) => it.name === url.item))));
       replaceUrlState({ query: query.trim(), filter: 'all', ...(survives ? {} : { item: null }) });
     },
     [url.item, url.query, board],

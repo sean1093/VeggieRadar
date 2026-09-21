@@ -331,7 +331,9 @@ describe('App — a shared live-search result', () => {
 
     await waitFor(() => expect(screen.getByTestId('produce-list')).toHaveTextContent('番茄'));
     expect(parseUrlState(window.location.hash).query).toBe('番茄');
-    expect(box).toHaveValue('番茄');
+    // The box lands a commit after the list — App detects the navigation, then
+    // the header adopts it — so this needs its own wait.
+    await waitFor(() => expect(box).toHaveValue('番茄'));
   });
 
   it('keeps the box out of reach while a linked drawer is open', async () => {
@@ -442,6 +444,20 @@ describe('App — a shared live-search result', () => {
 
     expect(screen.getByTestId('detail-drawer')).toBeInTheDocument();
     expect(parseUrlState(window.location.hash).item).toBe('\u6787\u6777');
+  });
+
+  it('keeps the board when a busy backend cannot answer the link', async () => {
+    // The rows match the query and are prices the visitor can read. Removing
+    // them to explain a card they cannot is the wrong trade; the explanation
+    // and its retry go above them instead.
+    searchProduce.mockResolvedValue({ error: '\u670d\u52d9\u5fd9\u788c\u4e2d\uff0c\u8acb\u7a0d\u5f8c\u518d\u8a66', query: '\u82b1\u6930', transient: true });
+    at('#/i/\u82b1\u6930?q=\u82b1\u6930');
+    render(<App />);
+    await waitFor(() => expect(searchProduce).toHaveBeenCalled());
+
+    expect(screen.getByTestId('produce-list')).toHaveTextContent('\u767d\u82b1\u6930\u83dc');
+    expect(await screen.findByText(/\u670d\u52d9\u5fd9\u788c\u4e2d/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '\u91cd\u8a66' })).toBeInTheDocument();
   });
 
   it('carries the query in the share link for a crop found by search', async () => {

@@ -247,12 +247,13 @@ export function useSearch(board: ProduceItem[]): Search {
     // those rows for the single delivered card, or hiding them behind
     // 查無此品項, throws away prices the visitor can read.
     //
-    // The exception is a backend too busy to look, where there is nothing
-    // to join and the visitor needs the message and its retry instead.
     const unmet = required !== null && !local.some((it) => it.name === required);
     const delivered = unmet && phase.kind === 'remote' ? phase.items.filter((it) => it.name === required) : [];
+    // Rows the board has are never taken away, whatever the backend said or
+    // failed to say. A busy backend behind a matching board is reported above
+    // the list instead (`App`), because hiding prices the visitor can read, to
+    // explain a card they cannot, is the wrong trade.
     if (local.length > 0) {
-      if (unmet && phase.kind === 'transient') return phase;
       return { kind: 'local', items: delivered.length ? [...delivered, ...local] : local };
     }
     return phase.kind === 'local' ? { kind: 'local', items: local } : phase;
