@@ -168,6 +168,10 @@ function handleDiag(full, props) {
     // our own rule text and our own item names — never platform or MOA text.
     last_validation: parseValidation(props[LAST_VALIDATION_PROP]),
     history: historySummary(),
+    // Whether the mirror is being republished by the crawl or left to the
+    // fallback cron: an expired PAT would 401 on every refresh and nothing
+    // else here would say so. Outcome and time only, never the token.
+    mirror_dispatch: parseDispatch(props[GH_DISPATCH_PROP], props[GH_DISPATCH_OK_PROP]),
     // Alert state, so a silent mailbox can be told apart from a silent
     // pipeline. The recipient address is deliberately not exposed — diag is a
     // public endpoint.
@@ -185,6 +189,27 @@ function handleDiag(full, props) {
       // says the mailbox is silent and roughly what to fix.
       last_send_failure: props[ALERT_UNSENT_PROP] || null,
     },
+  };
+}
+
+/**
+ * `GH_DISPATCH_PROP` is stored as `<ISO timestamp> <outcome>`; null until the
+ * first attempt, which is also what a deployment with no token shows forever.
+ */
+function parseDispatch(value, lastOk) {
+  // A missing record beside a present `last_ok` is the partial write the two
+  // keys allow — the floor's clock is written first, deliberately. Reporting
+  // null there would say "never attempted" about a mirror that is deploying.
+  if (!value) return lastOk ? { at: null, outcome: 'unknown', last_ok: lastOk } : null;
+  var space = value.indexOf(' ');
+  return {
+    at: space === -1 ? value : value.substring(0, space),
+    outcome: space === -1 ? 'unknown' : value.substring(space + 1),
+    // When the mirror was last actually asked to publish. The outcome above
+    // cannot answer that on its own: under a crawl every few minutes it reads
+    // `throttled` almost always, which says the newest board is not the
+    // published one but not how old the published one is.
+    last_ok: lastOk || null
   };
 }
 
