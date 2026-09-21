@@ -85,8 +85,8 @@ describe('replaceUrlState', () => {
     // pushed from a deep link that arrived on its own. Passing null on a
     // replace wiped it, and ✕ then rewrote the entry instead of going back,
     // leaving the drawer's entry in the history for the back key to find.
-    window.history.pushState({ drawer: true }, '', '/VeggieRadar/#/i/\u9ad8\u9e97\u83dc');
-    replaceUrlState({ query: '\u8525' });
+    window.history.pushState({ drawer: true }, '', '/VeggieRadar/#/i/高麗菜');
+    replaceUrlState({ query: '蔥' });
     expect(window.history.state).toEqual({ drawer: true });
   });
 });

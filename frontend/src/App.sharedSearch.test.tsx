@@ -15,11 +15,24 @@ import type { ApiResponse, ProduceItem } from './types/produce';
  * against the bundled board with no API base — `searchProduce` is stubbed here.
  */
 const searchProduce = vi.hoisted(() => vi.fn<(query: string) => Promise<ApiResponse>>());
+/**
+ * Holds the board back while a test needs it cold. The bundled board resolves
+ * on a microtask, so "the visitor was already typing when it landed" was
+ * otherwise a race against the mock rather than a state a test could ask for.
+ */
+const gate = vi.hoisted(() => ({ held: null as Promise<void> | null }));
 
-vi.mock('./services/api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('./services/api')>()),
-  searchProduce,
-}));
+vi.mock('./services/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./services/api')>();
+  return {
+    ...actual,
+    searchProduce,
+    fetchBoard: async () => {
+      if (gate.held) await gate.held;
+      return actual.fetchBoard();
+    },
+  };
+});
 
 const { default: App } = await import('./App');
 const { parseUrlState } = await import('./lib/urlState');
@@ -57,10 +70,27 @@ const notFound = (): ApiResponse => ({
 /** Land the window on a hash the way a pasted link would. */
 const at = (hash: string) => window.history.replaceState(null, '', `/VeggieRadar/${hash}`);
 
+/** Keep the board from landing until the returned function is called. */
+function holdBoard(): () => void {
+  let land = () => {};
+  gate.held = new Promise<void>((settle) => {
+    land = () => {
+      gate.held = null;
+      settle();
+    };
+  });
+  return () => land();
+}
+
 beforeEach(() => {
   at('');
   localStorage.clear();
+  gate.held = null;
   searchProduce.mockReset();
+  // A default, so a call this test did not plan for cannot resolve to
+  // `undefined` and blow up inside `isApiError` as an unhandled rejection that
+  // gets attributed to whichever test happened to be running.
+  searchProduce.mockResolvedValue(notFound());
 });
 
 describe('App — a shared live-search result', () => {
@@ -293,24 +323,70 @@ describe('App — a shared live-search result', () => {
     // URL's query then leaves the box saying one thing and the caption and URL
     // another, for the rest of the session.
     searchProduce.mockResolvedValue(found());
+    // Both halves are held rather than raced: the board lands when this test
+    // says so, and the 300 ms debounce is advanced rather than waited out.
+    const landBoard = holdBoard();
     at('#/?q=蔥');
-    // The typing debounce is 300 ms and the board lands on its own schedule;
-    // racing both with wall-clock waits is how this test flaked under load.
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<App />);
+    const box = await screen.findByPlaceholderText(/搜尋蔬果/);
+
+    vi.useFakeTimers();
     try {
-      render(<App />);
-      const box = await screen.findByPlaceholderText(/搜尋蔬果/);
       fireEvent.change(box, { target: { value: '番茄' } });
       await act(async () => {
         await vi.advanceTimersByTimeAsync(600);
       });
-
-      expect(parseUrlState(window.location.hash).query).toBe('番茄');
-      expect(box).toHaveValue('番茄');
-      expect(screen.getByTestId('produce-list')).toHaveTextContent('番茄');
     } finally {
       vi.useRealTimers();
     }
+    await act(async () => {
+      landBoard();
+    });
+
+    await waitFor(() => expect(parseUrlState(window.location.hash).query).toBe('番茄'));
+    expect(box).toHaveValue('番茄');
+    expect(screen.getByTestId('produce-list')).toHaveTextContent('番茄');
+  });
+
+  it("still fetches the linked card when the box has settled on the link's own query", async () => {
+    // The other side of the same guard. The box arrives holding `?q=`, so a
+    // visitor who edits it and comes back to that word before the board lands
+    // has touched the box and is asking for exactly what the link asks for.
+    // Suppressing the adoption there dropped the card, and since a debounced
+    // preview never costs a request, nothing else would fetch it: the drawer
+    // closed on 「今日無交易資料」 without one call to the backend.
+    searchProduce.mockResolvedValue(found());
+    const landBoard = holdBoard();
+    at('#/i/枇杷?q=枇杷');
+    render(<App />);
+    const box = await screen.findByPlaceholderText(/搜尋蔬果/);
+    expect(box).toHaveValue('枇杷');
+
+    vi.useFakeTimers();
+    try {
+      // Two settled edits, ending back on the link's word — not a net-zero
+      // edit (that one never reaches the hook) but two real queries.
+      await act(async () => {
+        fireEvent.change(box, { target: { value: '枇' } });
+        await vi.advanceTimersByTimeAsync(400);
+      });
+      await act(async () => {
+        fireEvent.change(box, { target: { value: '枇杷' } });
+        await vi.advanceTimersByTimeAsync(400);
+      });
+      expect(box).toHaveValue('枇杷');
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(searchProduce).not.toHaveBeenCalled(); // typing never spends a request
+
+    await act(async () => {
+      landBoard();
+    });
+
+    expect(await screen.findByTestId('detail-drawer')).toBeInTheDocument();
+    expect(searchProduce).toHaveBeenCalledWith('枇杷');
+    expect(parseUrlState(window.location.hash).item).toBe('枇杷');
   });
 
   it('still follows the URL after the visitor has used the box', async () => {
@@ -344,11 +420,11 @@ describe('App — a shared live-search result', () => {
     // not a path a visitor has. If the drawer ever stops being modal, this is
     // the test that should fail first.
     searchProduce.mockResolvedValue(found());
-    at('#/i/\u6787\u6777?q=\u6787\u6777');
+    at('#/i/枇杷?q=枇杷');
     render(<App />);
     await screen.findByTestId('detail-drawer');
 
-    const box = screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/);
+    const box = screen.getByPlaceholderText(/搜尋蔬果/);
     expect(box.closest('[aria-hidden="true"], [data-aria-hidden="true"]')).not.toBeNull();
     expect(document.body.style.pointerEvents).toBe('none');
   });
@@ -357,40 +433,40 @@ describe('App — a shared live-search result', () => {
     // 搜尋 rather than 重試 after a busy backend used to take the board's
     // short-circuit, make no request, strip the item and print the very
     // sentence this work exists to remove.
-    searchProduce.mockResolvedValueOnce({ error: '\u670d\u52d9\u5fd9\u788c\u4e2d\uff0c\u8acb\u7a0d\u5f8c\u518d\u8a66', query: '\u82b1\u6930', transient: true });
-    at('#/i/\u82b1\u6930?q=\u82b1\u6930');
+    searchProduce.mockResolvedValueOnce({ error: '服務忙碌中，請稍後再試', query: '花椰', transient: true });
+    at('#/i/花椰?q=花椰');
     render(<App />);
-    await screen.findByText(/\u670d\u52d9\u5fd9\u788c\u4e2d/);
+    await screen.findByText(/服務忙碌中/);
 
     searchProduce.mockResolvedValue({
       type: 'search',
-      query: '\u82b1\u6930',
+      query: '花椰',
       date: '2026-08-26',
       count: 1,
-      items: [{ ...loquat, code: 'X98', name: '\u82b1\u6930', official_name: '\u82b1\u6930', category: '\u8f9b\u9999\u985e' }],
+      items: [{ ...loquat, code: 'X98', name: '花椰', official_name: '花椰', category: '辛香類' }],
     });
-    const box = screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/);
+    const box = screen.getByPlaceholderText(/搜尋蔬果/);
     fireEvent.submit(box.closest('form') as HTMLFormElement);
 
     const drawer = await screen.findByTestId('detail-drawer');
-    expect(within(drawer).getByText('\u82b1\u6930')).toBeInTheDocument();
-    expect(screen.queryByText(/\u4eca\u65e5\u7121\u4ea4\u6613\u8cc7\u6599/)).not.toBeInTheDocument();
+    expect(within(drawer).getByText('花椰')).toBeInTheDocument();
+    expect(screen.queryByText(/今日無交易資料/)).not.toBeInTheDocument();
   });
 
   it('spends no request when 搜尋 asks a new question', async () => {
     // A word the visitor typed is their question, not the link's: it takes the
     // board's short-circuit as any typed search does.
-    searchProduce.mockResolvedValueOnce({ error: '\u670d\u52d9\u5fd9\u788c\u4e2d\uff0c\u8acb\u7a0d\u5f8c\u518d\u8a66', query: '\u82b1\u6930', transient: true });
-    at('#/i/\u82b1\u6930?q=\u82b1\u6930');
+    searchProduce.mockResolvedValueOnce({ error: '服務忙碌中，請稍後再試', query: '花椰', transient: true });
+    at('#/i/花椰?q=花椰');
     render(<App />);
-    await screen.findByText(/\u670d\u52d9\u5fd9\u788c\u4e2d/);
+    await screen.findByText(/服務忙碌中/);
     searchProduce.mockClear();
 
-    const box = screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/);
-    fireEvent.change(box, { target: { value: '\u9ad8\u9e97\u83dc' } });
+    const box = screen.getByPlaceholderText(/搜尋蔬果/);
+    fireEvent.change(box, { target: { value: '高麗菜' } });
     fireEvent.submit(box.closest('form') as HTMLFormElement);
 
-    await waitFor(() => expect(screen.getByTestId('produce-list')).toHaveTextContent('\u9ad8\u9e97\u83dc'));
+    await waitFor(() => expect(screen.getByTestId('produce-list')).toHaveTextContent('高麗菜'));
     expect(searchProduce).not.toHaveBeenCalled();
   });
 
@@ -400,15 +476,34 @@ describe('App — a shared live-search result', () => {
     // missing, the item stripped and the real answer discarded.
     let answer: (r: ApiResponse) => void = () => {};
     searchProduce.mockReturnValue(new Promise<ApiResponse>((settle) => { answer = settle; }));
-    at('#/i/\u6787\u6777?q=\u6787\u6777');
+    at('#/i/枇杷?q=枇杷');
     render(<App />);
     await waitFor(() => expect(searchProduce).toHaveBeenCalled());
+    // The link's word has to be *in* the box before this test edits it: the
+    // adoption puts it there one commit after it asks the backend, and an edit
+    // that slips into that gap is overwritten by the adoption rather than by
+    // anything this test is about.
+    await waitFor(() => expect(screen.getByPlaceholderText(/搜尋蔬果/)).toHaveValue('枇杷'));
 
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    // Plain fake timers, deliberately: the two edits have to land inside one
+    // 300 ms debounce window for this to be a net-zero edit at all, and with
+    // `shouldAdvanceTime` that window was real time — under a loaded full
+    // suite the first edit settled on its own and the answer was discarded.
+    vi.useFakeTimers();
     try {
-      const box = screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/);
-      fireEvent.change(box, { target: { value: '\u6787\u6777x' } });
-      fireEvent.change(box, { target: { value: '\u6787\u6777' } });
+      const box = screen.getByPlaceholderText(/搜尋蔬果/);
+      // One edit per `act`, and the value checked after each. A controlled
+      // input whose pending render has not flushed is restored to the
+      // committed value, and React then sees no change in the second edit at
+      // all — the same test, failing for a reason it never names.
+      await act(async () => {
+        fireEvent.change(box, { target: { value: '枇杷x' } });
+      });
+      expect(box).toHaveValue('枇杷x');
+      await act(async () => {
+        fireEvent.change(box, { target: { value: '枇杷' } });
+      });
+      expect(box).toHaveValue('枇杷');
       await act(async () => {
         await vi.advanceTimersByTimeAsync(600);
       });
@@ -420,20 +515,25 @@ describe('App — a shared live-search result', () => {
       answer(found());
     });
     expect(await screen.findByTestId('detail-drawer')).toBeInTheDocument();
-    expect(parseUrlState(window.location.hash).item).toBe('\u6787\u6777');
+    expect(parseUrlState(window.location.hash).item).toBe('枇杷');
   });
 
   it('does not let a pending keystroke close a card just tapped', async () => {
     // `applyQuery` drops a card the board does not carry, and it runs from the
     // 300 ms preview. A word typed just before the tap would settle after it.
     searchProduce.mockResolvedValue(found());
-    at('#/?q=\u6787\u6777');
+    at('#/?q=枇杷');
     render(<App />);
-    const row = await screen.findByText('\u6787\u6777');
+    const row = await screen.findByText('枇杷');
 
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.useFakeTimers();
     try {
-      fireEvent.change(screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/), { target: { value: '\u9ad8' } });
+      // The edit is flushed before the tap: an unflushed controlled input is
+      // restored to its committed value, and the keystroke this test is about
+      // would never have happened.
+      await act(async () => {
+        fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '高' } });
+      });
       fireEvent.click(row);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(600);
@@ -443,21 +543,21 @@ describe('App — a shared live-search result', () => {
     }
 
     expect(screen.getByTestId('detail-drawer')).toBeInTheDocument();
-    expect(parseUrlState(window.location.hash).item).toBe('\u6787\u6777');
+    expect(parseUrlState(window.location.hash).item).toBe('枇杷');
   });
 
   it('keeps the board when a busy backend cannot answer the link', async () => {
     // The rows match the query and are prices the visitor can read. Removing
     // them to explain a card they cannot is the wrong trade; the explanation
     // and its retry go above them instead.
-    searchProduce.mockResolvedValue({ error: '\u670d\u52d9\u5fd9\u788c\u4e2d\uff0c\u8acb\u7a0d\u5f8c\u518d\u8a66', query: '\u82b1\u6930', transient: true });
-    at('#/i/\u82b1\u6930?q=\u82b1\u6930');
+    searchProduce.mockResolvedValue({ error: '服務忙碌中，請稍後再試', query: '花椰', transient: true });
+    at('#/i/花椰?q=花椰');
     render(<App />);
     await waitFor(() => expect(searchProduce).toHaveBeenCalled());
 
-    expect(screen.getByTestId('produce-list')).toHaveTextContent('\u767d\u82b1\u6930\u83dc');
-    expect(await screen.findByText(/\u670d\u52d9\u5fd9\u788c\u4e2d/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '\u91cd\u8a66' })).toBeInTheDocument();
+    expect(screen.getByTestId('produce-list')).toHaveTextContent('白花椰菜');
+    expect(await screen.findByText(/服務忙碌中/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重試' })).toBeInTheDocument();
   });
 
   it('shares the query that found the card, not whatever is in the box', async () => {
@@ -467,13 +567,18 @@ describe('App — a shared live-search result', () => {
     searchProduce.mockResolvedValue(found());
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
-    at('#/?q=\u6787\u6777');
+    at('#/?q=枇杷');
     render(<App />);
-    const row = await screen.findByText('\u6787\u6777');
+    const row = await screen.findByText('枇杷');
 
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.useFakeTimers();
     try {
-      fireEvent.change(screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/), { target: { value: '\u9ad8' } });
+      // The edit is flushed before the tap: an unflushed controlled input is
+      // restored to its committed value, and the keystroke this test is about
+      // would never have happened.
+      await act(async () => {
+        fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '高' } });
+      });
       fireEvent.click(row);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(600);
@@ -483,9 +588,9 @@ describe('App — a shared live-search result', () => {
     }
 
     const drawer = screen.getByTestId('detail-drawer');
-    within(drawer).getByRole('button', { name: /\u5206\u4eab/ }).click();
+    within(drawer).getByRole('button', { name: /分享/ }).click();
     await waitFor(() => expect(writeText).toHaveBeenCalled());
-    expect(parseUrlState(new URL(writeText.mock.calls[0][0]).hash).query).toBe('\u6787\u6777');
+    expect(parseUrlState(new URL(writeText.mock.calls[0][0]).hash).query).toBe('枇杷');
   });
 
   it('restores a query the box had abandoned', async () => {
@@ -493,26 +598,26 @@ describe('App — a shared live-search result', () => {
     // returning to a query the box had already left changed nothing and the
     // box kept the abandoned word under a caption that said otherwise.
     searchProduce.mockResolvedValue(found());
-    at('#/?q=\u8525');
+    at('#/?q=蔥');
     render(<App />);
-    const box = await screen.findByPlaceholderText(/\u641c\u5c0b\u852c\u679c/);
-    await waitFor(() => expect(box).toHaveValue('\u8525'));
+    const box = await screen.findByPlaceholderText(/搜尋蔬果/);
+    await waitFor(() => expect(box).toHaveValue('蔥'));
 
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.useFakeTimers();
     try {
-      fireEvent.change(box, { target: { value: '\u756a\u8304' } });
+      fireEvent.change(box, { target: { value: '番茄' } });
       await act(async () => {
         await vi.advanceTimersByTimeAsync(600);
       });
     } finally {
       vi.useRealTimers();
     }
-    await waitFor(() => expect(parseUrlState(window.location.hash).query).toBe('\u756a\u8304'));
+    await waitFor(() => expect(parseUrlState(window.location.hash).query).toBe('番茄'));
 
-    at('#/?q=\u8525');
+    at('#/?q=蔥');
     window.dispatchEvent(new HashChangeEvent('hashchange'));
 
-    await waitFor(() => expect(box).toHaveValue('\u8525'));
+    await waitFor(() => expect(box).toHaveValue('蔥'));
   });
 
   it('never leaves a link whose query cannot find its own card', async () => {
@@ -520,13 +625,18 @@ describe('App — a shared live-search result', () => {
     // the card's item: `#/i/枇杷?q=高`, which on reload spends a request for
     // 高, strips the item and prints the sentence this work removes.
     searchProduce.mockResolvedValue(found());
-    at('#/?q=\u6787\u6777');
+    at('#/?q=枇杷');
     render(<App />);
-    const row = await screen.findByText('\u6787\u6777');
+    const row = await screen.findByText('枇杷');
 
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.useFakeTimers();
     try {
-      fireEvent.change(screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/), { target: { value: '\u9ad8' } });
+      // The edit is flushed before the tap: an unflushed controlled input is
+      // restored to its committed value, and the keystroke this test is about
+      // would never have happened.
+      await act(async () => {
+        fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '高' } });
+      });
       fireEvent.click(row);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(600);
@@ -536,10 +646,10 @@ describe('App — a shared live-search result', () => {
     }
 
     const settled = parseUrlState(window.location.hash);
-    expect(settled.item).toBe('\u6787\u6777');
-    expect(settled.query).toBe('\u6787\u6777');
+    expect(settled.item).toBe('枇杷');
+    expect(settled.query).toBe('枇杷');
     // …and the box says what the board is showing, not the word it dropped.
-    expect(screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/)).toHaveValue('\u6787\u6777');
+    expect(screen.getByPlaceholderText(/搜尋蔬果/)).toHaveValue('枇杷');
   });
 
   it('carries the query in the share link for a crop found by search', async () => {

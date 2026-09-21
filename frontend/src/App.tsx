@@ -50,15 +50,17 @@ function App() {
   // mask would read as an answer nobody gave.
   //
   //   - the hook has not taken the URL's query yet, or
+  //   - it holds the word but has not asked it — a word typed while the board
+  //     was still loading arrives through the debounced preview, which never
+  //     costs a request, and the adoption below is what asks, or
   //   - it is in flight, or
   //   - the backend was busy, which is not an answer about this crop.
   //
-  // An idle phase on the URL's own query is not pending: that is a typed word
-  // narrowing the board locally, and the backend will never be asked.
-  const searchPending =
-    urlItem !== null
-    && urlQuery !== ''
-    && (query !== urlQuery || outcome.kind === 'searching' || outcome.kind === 'transient');
+  // So: pending until the hook has actually answered *this* word. Calling an
+  // idle phase an answer dismissed the drawer one commit before the request
+  // that justifies it was even issued — `useBoardView`'s effects run first.
+  const answered = outcome.kind === 'local' || outcome.kind === 'remote' || outcome.kind === 'not_found';
+  const searchPending = urlItem !== null && urlQuery !== '' && !(answered && query === urlQuery);
   const view = useBoardView(itemsFor(searchStatus, board), watchlist, board, searchPending);
   // Every run of a query the URL owns carries the card the URL is asking for:
   // the first adoption, and equally the retry after a busy backend. Dropping
@@ -140,16 +142,29 @@ function App() {
     // Marked adopted above but not run: the mirror below then publishes what
     // the visitor typed, so the URL and the caption follow the box instead of
     // the two disagreeing for the rest of the session.
-    if (firstAdoption && touched.current) return;
+    //
+    // Only when their word is a different question. Someone who types the
+    // link's own query while the board is still cold is asking for the very
+    // thing the link asks for, and skipping there dropped the card without so
+    // much as a request.
+    if (firstAdoption && touched.current && query !== view.linkedQuery) return;
     showInBox(view.linkedQuery);
     // The URL's item is passed as the name the answer has to contain: a link
     // to a crop off the board must not be settled by a local substring match
     // on some other crop that happens to be on it (`useSearch`).
-    if (view.linkedQuery !== query) {
+    //
+    // A request is owed when the hook holds a different question, and equally
+    // when it holds the same word but never asked it: a word typed while the
+    // board was still loading reaches the hook through the debounced preview,
+    // which by design never costs a request. Without the second half, someone
+    // who types the link's own query before the board lands gets 今日無交易資料
+    // for the very card the link names — and not one call to the backend.
+    const unanswered = urlItem !== null && !board.some((it) => it.name === urlItem);
+    if (view.linkedQuery !== query || unanswered) {
       adopting.current = true;
       runLinkedQuery(view.linkedQuery);
     }
-  }, [board.length, view.linkedQuery, query, runLinkedQuery, showInBox]);
+  }, [board, urlItem, view.linkedQuery, query, runLinkedQuery, showInBox]);
 
   // …and the settled word goes back the other way. `query` only moves once the
   // typing debounce has settled, so this publishes one word rather than one
