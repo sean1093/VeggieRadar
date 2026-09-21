@@ -93,6 +93,34 @@ beforeEach(() => {
   searchProduce.mockResolvedValue(notFound());
 });
 
+/**
+ * The search box, once the adoption has put the URL's word in it.
+ *
+ * The adoption fills the box a commit after it reads the URL, so typing
+ * straight after the first paint races it: the keystroke lands, the adoption
+ * re-imposes the link's word over it, and the test fails on whatever that
+ * keystroke was for instead of on the race.
+ */
+async function settledBox(word: string): Promise<HTMLElement> {
+  const box = await screen.findByPlaceholderText(/搜尋蔬果/);
+  await waitFor(() => expect(box).toHaveValue(word));
+  return box;
+}
+
+/**
+ * Type a word into the search box and let React commit it.
+ *
+ * A controlled input whose pending render has not flushed is restored to its
+ * committed value, so an edit followed straight away by a submit or a tap can
+ * be dropped entirely — and the test then fails on whatever that keystroke was
+ * for, naming anything but the lost keystroke.
+ */
+async function typeWord(box: HTMLElement, word: string): Promise<void> {
+  await act(async () => {
+    fireEvent.change(box, { target: { value: word } });
+  });
+}
+
 describe('App — a shared live-search result', () => {
   it('opens the drawer for a crop the board does not carry', async () => {
     searchProduce.mockResolvedValue(found());
@@ -153,8 +181,9 @@ describe('App — a shared live-search result', () => {
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('今日無交易資料'));
 
     searchProduce.mockResolvedValue(found());
-    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '枇杷' } });
-    fireEvent.submit(screen.getByPlaceholderText(/搜尋蔬果/).closest('form') as HTMLFormElement);
+    const box = await settledBox('枇杷');
+    await typeWord(box, '枇杷');
+    fireEvent.submit(box.closest('form') as HTMLFormElement);
 
     await waitFor(() => expect(screen.getByTestId('produce-list')).toHaveTextContent('枇杷'));
     expect(screen.queryByText(/今日無交易資料/)).not.toBeInTheDocument();
@@ -256,8 +285,9 @@ describe('App — a shared live-search result', () => {
     render(<App />);
     await screen.findByRole('button', { name: /重試|重新/ });
 
-    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '高麗菜' } });
-    fireEvent.submit(screen.getByPlaceholderText(/搜尋蔬果/).closest('form') as HTMLFormElement);
+    const box = await settledBox('枇杷');
+    await typeWord(box, '高麗菜');
+    fireEvent.submit(box.closest('form') as HTMLFormElement);
 
     await waitFor(() => expect(parseUrlState(window.location.hash).item).toBeNull());
     expect(screen.queryByText(/今日無交易資料/)).not.toBeInTheDocument();
@@ -299,8 +329,9 @@ describe('App — a shared live-search result', () => {
     render(<App />);
     await screen.findByTestId('detail-drawer');
 
-    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '高麗菜' } });
-    fireEvent.submit(screen.getByPlaceholderText(/搜尋蔬果/).closest('form') as HTMLFormElement);
+    const box = await settledBox('枇杷');
+    await typeWord(box, '高麗菜');
+    fireEvent.submit(box.closest('form') as HTMLFormElement);
 
     await waitFor(() => expect(parseUrlState(window.location.hash).item).toBeNull());
     expect(screen.queryByText(/今日無交易資料/)).not.toBeInTheDocument();
@@ -348,6 +379,44 @@ describe('App — a shared live-search result', () => {
     expect(screen.getByTestId('produce-list')).toHaveTextContent('番茄');
   });
 
+  it('does not erase a character still inside the debounce when the board lands', async () => {
+    // The other end of the same guard: mid-word the *settled* query is still
+    // the previous one, so comparing it let a board landing inside the 300 ms
+    // window count as "they typed the link's own query" and adopt over
+    // characters already on screen.
+    searchProduce.mockResolvedValue(notFound());
+    const landBoard = holdBoard();
+    at('#/i/枇杷?q=枇杷');
+    render(<App />);
+    const box = await settledBox('枇杷');
+
+    vi.useFakeTimers();
+    try {
+      // Two settled edits ending on the link's word, then one more character
+      // left unsettled — the board lands with the box reading 枇杷汁 and the
+      // hook still holding 枇杷.
+      await act(async () => {
+        fireEvent.change(box, { target: { value: '枇' } });
+        await vi.advanceTimersByTimeAsync(400);
+      });
+      await act(async () => {
+        fireEvent.change(box, { target: { value: '枇杷' } });
+        await vi.advanceTimersByTimeAsync(400);
+      });
+      await act(async () => {
+        fireEvent.change(box, { target: { value: '枇杷汁' } });
+      });
+      expect(box).toHaveValue('枇杷汁');
+
+      await act(async () => {
+        landBoard();
+      });
+      expect(box).toHaveValue('枇杷汁');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("still fetches the linked card when the box has settled on the link's own query", async () => {
     // The other side of the same guard. The box arrives holding `?q=`, so a
     // visitor who edits it and comes back to that word before the board lands
@@ -359,8 +428,7 @@ describe('App — a shared live-search result', () => {
     const landBoard = holdBoard();
     at('#/i/枇杷?q=枇杷');
     render(<App />);
-    const box = await screen.findByPlaceholderText(/搜尋蔬果/);
-    expect(box).toHaveValue('枇杷');
+    const box = await settledBox('枇杷');
 
     vi.useFakeTimers();
     try {
@@ -397,8 +465,8 @@ describe('App — a shared live-search result', () => {
     render(<App />);
     await screen.findByText('高麗菜');
 
-    const box = screen.getByPlaceholderText(/搜尋蔬果/);
-    fireEvent.change(box, { target: { value: '蔥' } });
+    const box = await settledBox('');
+    await typeWord(box, '蔥');
     fireEvent.submit(box.closest('form') as HTMLFormElement);
     await waitFor(() => expect(parseUrlState(window.location.hash).query).toBe('蔥'));
 
@@ -462,8 +530,8 @@ describe('App — a shared live-search result', () => {
     await screen.findByText(/服務忙碌中/);
     searchProduce.mockClear();
 
-    const box = screen.getByPlaceholderText(/搜尋蔬果/);
-    fireEvent.change(box, { target: { value: '高麗菜' } });
+    const box = await settledBox('花椰');
+    await typeWord(box, '高麗菜');
     fireEvent.submit(box.closest('form') as HTMLFormElement);
 
     await waitFor(() => expect(screen.getByTestId('produce-list')).toHaveTextContent('高麗菜'));
@@ -479,11 +547,7 @@ describe('App — a shared live-search result', () => {
     at('#/i/枇杷?q=枇杷');
     render(<App />);
     await waitFor(() => expect(searchProduce).toHaveBeenCalled());
-    // The link's word has to be *in* the box before this test edits it: the
-    // adoption puts it there one commit after it asks the backend, and an edit
-    // that slips into that gap is overwritten by the adoption rather than by
-    // anything this test is about.
-    await waitFor(() => expect(screen.getByPlaceholderText(/搜尋蔬果/)).toHaveValue('枇杷'));
+    const box = await settledBox('枇杷');
 
     // Plain fake timers, deliberately: the two edits have to land inside one
     // 300 ms debounce window for this to be a net-zero edit at all, and with
@@ -491,7 +555,6 @@ describe('App — a shared live-search result', () => {
     // suite the first edit settled on its own and the answer was discarded.
     vi.useFakeTimers();
     try {
-      const box = screen.getByPlaceholderText(/搜尋蔬果/);
       // One edit per `act`, and the value checked after each. A controlled
       // input whose pending render has not flushed is restored to the
       // committed value, and React then sees no change in the second edit at
@@ -525,15 +588,11 @@ describe('App — a shared live-search result', () => {
     at('#/?q=枇杷');
     render(<App />);
     const row = await screen.findByText('枇杷');
+    const box = await settledBox('枇杷');
 
     vi.useFakeTimers();
     try {
-      // The edit is flushed before the tap: an unflushed controlled input is
-      // restored to its committed value, and the keystroke this test is about
-      // would never have happened.
-      await act(async () => {
-        fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '高' } });
-      });
+      await typeWord(box, '高');
       fireEvent.click(row);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(600);
@@ -570,15 +629,11 @@ describe('App — a shared live-search result', () => {
     at('#/?q=枇杷');
     render(<App />);
     const row = await screen.findByText('枇杷');
+    const box = await settledBox('枇杷');
 
     vi.useFakeTimers();
     try {
-      // The edit is flushed before the tap: an unflushed controlled input is
-      // restored to its committed value, and the keystroke this test is about
-      // would never have happened.
-      await act(async () => {
-        fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '高' } });
-      });
+      await typeWord(box, '高');
       fireEvent.click(row);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(600);
@@ -628,15 +683,11 @@ describe('App — a shared live-search result', () => {
     at('#/?q=枇杷');
     render(<App />);
     const row = await screen.findByText('枇杷');
+    const box = await settledBox('枇杷');
 
     vi.useFakeTimers();
     try {
-      // The edit is flushed before the tap: an unflushed controlled input is
-      // restored to its committed value, and the keystroke this test is about
-      // would never have happened.
-      await act(async () => {
-        fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '高' } });
-      });
+      await typeWord(box, '高');
       fireEvent.click(row);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(600);

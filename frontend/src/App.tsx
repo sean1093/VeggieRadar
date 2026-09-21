@@ -101,12 +101,17 @@ function App() {
   // it as a word the visitor settled on, and publishes it over the very link
   // being adopted. Anything the visitor does cancels the adoption.
   const adopting = useRef(false);
-  // Set the moment the visitor touches the box. It only ever suppresses the
-  // *first* adoption: a cold board can land after they have started typing,
-  // and the URL's query must not overwrite a word in progress. Every later
-  // change of the URL — the back key, a hash typed in, another link — is a
-  // navigation they asked for and is adopted normally.
-  const touched = useRef(false);
+  // The word the box last reported, or null until the visitor touches it. It
+  // only ever suppresses the *first* adoption: a cold board can land after
+  // they have started typing, and the URL's query must not overwrite a word
+  // in progress. Every later change of the URL — the back key, a hash typed
+  // in, another link — is a navigation they asked for and is adopted normally.
+  //
+  // The word rather than a flag, and this word rather than `query`: `query`
+  // is what the 300 ms debounce has settled, so mid-word it still holds the
+  // *previous* one. Comparing that let a board landing inside the debounce
+  // window adopt over characters already on screen and erase them.
+  const typed = useRef<string | null>(null);
   // The word the *URL* is asking the box to show. Updated only where an
   // external navigation is detected below — a link, the back key, a hash typed
   // in — never from the box's own word coming back through the mirror. Keying
@@ -147,7 +152,7 @@ function App() {
     // link's own query while the board is still cold is asking for the very
     // thing the link asks for, and skipping there dropped the card without so
     // much as a request.
-    if (firstAdoption && touched.current && query !== view.linkedQuery) return;
+    if (firstAdoption && typed.current !== null && typed.current.trim() !== view.linkedQuery) return;
     showInBox(view.linkedQuery);
     // The URL's item is passed as the name the answer has to contain: a link
     // to a crop off the board must not be settled by a local substring match
@@ -201,9 +206,9 @@ function App() {
           widens the board back to 全部, writes the query to the URL and asks
           the backend. */}
       <Header
-        onSearch={(q) => { adopting.current = false; touched.current = true; view.applyQuery(q); runLinkedQuery(q); }}
-        onQueryChange={(q) => { adopting.current = false; touched.current = true; preview(q); }}
-        onClear={() => { adopting.current = false; touched.current = true; view.applyQuery(''); clear(); }}
+        onSearch={(q) => { adopting.current = false; typed.current = q; view.applyQuery(q); runLinkedQuery(q); }}
+        onQueryChange={(q) => { adopting.current = false; typed.current = q; preview(q); }}
+        onClear={() => { adopting.current = false; typed.current = ''; view.applyQuery(''); clear(); }}
         initialQuery={box.word}
         seed={box.seed}
         searching={searching}

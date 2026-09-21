@@ -14,6 +14,20 @@ beforeEach(() => {
 });
 
 // No VITE_API_BASE_URL in tests → api falls back to the bundled MOCK_BOARD.
+/**
+ * Type a word into the search box and let React commit it.
+ *
+ * A controlled input whose pending render has not flushed is restored to its
+ * committed value, so an edit followed straight away by a submit or a tap can
+ * be dropped entirely — and the test then fails on whatever that keystroke was
+ * for, naming anything but the lost keystroke.
+ */
+async function typeWord(box: HTMLElement, word: string): Promise<void> {
+  await act(async () => {
+    fireEvent.change(box, { target: { value: word } });
+  });
+}
+
 describe('App (board-first)', () => {
   it('loads the daily board on mount with a data date', async () => {
     render(<App />);
@@ -45,7 +59,7 @@ describe('App (board-first)', () => {
   it('searches within the board locally', async () => {
     render(<App />);
     await screen.findByText('高麗菜');
-    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '番茄' } });
+    await typeWord(screen.getByPlaceholderText(/搜尋蔬果/), '番茄');
     fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
     await waitFor(() => expect(screen.getByText(/搜尋「/)).toBeInTheDocument());
     expect(within(screen.getByTestId('produce-list')).getByText('番茄')).toBeInTheDocument();
@@ -64,7 +78,7 @@ describe('App (board-first)', () => {
   it('keeps the board on screen during a remote search, then states the miss honestly', async () => {
     render(<App />);
     await screen.findByText('高麗菜');
-    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '龍鬚菜' } });
+    await typeWord(screen.getByPlaceholderText(/搜尋蔬果/), '龍鬚菜');
     fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
 
     // A query in flight is no reason to blank prices a shopper already has,
@@ -82,7 +96,7 @@ describe('App (board-first)', () => {
   it('clears the search back to the full board', async () => {
     render(<App />);
     await screen.findByText('高麗菜');
-    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '番茄' } });
+    await typeWord(screen.getByPlaceholderText(/搜尋蔬果/), '番茄');
     fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
     await waitFor(() => expect(screen.queryByText('高麗菜')).not.toBeInTheDocument());
 
@@ -291,7 +305,7 @@ describe('App — deep links', () => {
       await screen.findByText('高麗菜');
 
       const box = screen.getByPlaceholderText(/搜尋蔬果/);
-      fireEvent.change(box, { target: { value: '番茄' } });
+      await typeWord(box, '番茄');
       fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
       await waitFor(() => expect(parseUrlState(window.location.hash).query).toBe('番茄'));
 
@@ -316,7 +330,7 @@ describe('App — deep links', () => {
       await screen.findByText('高麗菜');
 
       const box = screen.getByPlaceholderText(/搜尋蔬果/);
-      fireEvent.change(box, { target: { value: '番茄' } });
+      await typeWord(box, '番茄');
       fireEvent.click(screen.getByRole('button', { name: '搜尋' }));
       await waitFor(() => expect(screen.getByText('搜尋「番茄」')).toBeInTheDocument());
 
