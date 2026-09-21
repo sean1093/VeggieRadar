@@ -115,18 +115,6 @@ export function useBoardView(
     track('filter_changed', { filter: value });
   }, []);
 
-  // Widening the board back to 全部 for a new query is a reset, not a choice,
-  // so it is deliberately not reported as filter_changed.
-  const applyQuery = useCallback((query: string) => {
-    setMissedItem(null);
-    // The item goes too. A new query is a new board, and the drawer is not
-    // part of it — reachable only with the drawer closed, since it is a modal.
-    // Leaving it behind stranded an unresolved link: `#/i/枇杷?q=秋葵` with
-    // no drawer, no notice and nothing that would ever resolve it, handed out
-    // again by the next reload or address-bar share.
-    replaceUrlState({ query: query.trim(), filter: 'all', item: null });
-  }, []);
-
   const select = useCallback((item: ProduceItem) => pushUrlState({ item: item.name }), []);
   const close = useCallback(() => closeDrawerUrl(), []);
 
@@ -142,6 +130,24 @@ export function useBoardView(
   const selectedFromSearch = useMemo(
     () => selectedItem !== null && !board.some((it) => it.name === selectedItem.name),
     [selectedItem, board],
+  );
+
+  // Widening the board back to 全部 for a new query is a reset, not a choice,
+  // so it is deliberately not reported as filter_changed.
+  const applyQuery = useCallback(
+    (query: string) => {
+      setMissedItem(null);
+      // An item nothing can show goes with it. That is the stranded link:
+      // `#/i/枇杷?q=秋葵` after a busy backend, with no drawer, no notice and
+      // nothing that would ever resolve it, handed out again by the next
+      // reload or address-bar share.
+      //
+      // An item that *is* on screen stays. This runs from the typing preview
+      // too, and the preview settles 300 ms late — long enough for a card
+      // tapped in between to have opened a drawer this would then close.
+      replaceUrlState({ query: query.trim(), filter: 'all', ...(selectedItem ? {} : { item: null }) });
+    },
+    [selectedItem],
   );
 
   // A link to a crop that is out of season today must not look like a broken

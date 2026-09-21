@@ -191,8 +191,11 @@ describe('App — a shared live-search result', () => {
     searchProduce.mockResolvedValue({ error: '服務忙碌中，請稍後再試', query: '花椰', transient: true });
     at('#/i/花椰?q=花椰');
     render(<App />);
-    await waitFor(() => expect(searchProduce).toHaveBeenCalled());
-
+    // What the visitor must get: the busy message and something to press.
+    expect(await screen.findByText(/服務忙碌中/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /重試|重新/ })).toBeInTheDocument();
+    // Not a claim the crop has no data — the backend never said that — and the
+    // link survives, so the retry has something to retry.
     expect(screen.queryByText(/今日無交易資料/)).not.toBeInTheDocument();
     expect(parseUrlState(window.location.hash).item).toBe('花椰');
   });
@@ -225,6 +228,19 @@ describe('App — a shared live-search result', () => {
 
     await waitFor(() => expect(parseUrlState(window.location.hash).item).toBeNull());
     expect(screen.queryByText(/今日無交易資料/)).not.toBeInTheDocument();
+  });
+
+  it('does not close a drawer the visitor opened while typing', async () => {
+    // `applyQuery` drops a stranded item, but it also runs from the typing
+    // preview, which settles 300 ms late — long enough for a card tapped in
+    // between to have opened a drawer this would otherwise close.
+    at('#/i/高麗菜');
+    render(<App />);
+    await screen.findByTestId('detail-drawer');
+
+    await new Promise((settle) => setTimeout(settle, 500));
+    expect(screen.getByTestId('detail-drawer')).toBeInTheDocument();
+    expect(parseUrlState(window.location.hash).item).toBe('高麗菜');
   });
 
   it('carries the query in the share link for a crop found by search', async () => {

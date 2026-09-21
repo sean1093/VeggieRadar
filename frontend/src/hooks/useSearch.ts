@@ -220,16 +220,21 @@ export function useSearch(board: ProduceItem[]): Search {
   // discard the very card that was asked for, and leave the shared link
   // permanently unopenable — after spending the backend request that found it.
   const status = useMemo<SearchStatus>(() => {
-    // The board's precedence is suspended for one moment only: the backend
-    // has produced the card a link asked for and the board does not carry
-    // it. While the backend is still looking the board keeps its narrowed
-    // rows — yielding there would swap two matching rows for all 94 and
-    // then snap back. Every other answer leaves the board in place, because
-    // hiding rows the visitor can read prices off is worse than not opening
-    // a drawer.
+    // The board's precedence is suspended only where a link's own card is at
+    // stake: the backend has produced it and the board does not carry it, or
+    // the backend was too busy to look. The second is what puts 服務忙碌中
+    // and its retry on screen; without it a link like `?q=花椰`, whose query
+    // the board near-matches, is a dead end — rows that are not the card
+    // asked for, no explanation and nothing to press.
+    //
+    // While the backend is merely still looking the board keeps its narrowed
+    // rows: yielding there would swap two matching rows for all 94 and then
+    // snap back. 查無此品項 leaves them alone too — hiding rows the visitor
+    // can read prices off, to say there is nothing, would be a lie.
     const unmet = required !== null && !local.some((it) => it.name === required);
     const delivered = phase.kind === 'remote' && phase.items.some((it) => it.name === required);
-    const boardAnswers = local.length > 0 && !(unmet && delivered);
+    const busy = phase.kind === 'transient';
+    const boardAnswers = local.length > 0 && !(unmet && (delivered || busy));
     return boardAnswers || phase.kind === 'local' ? { kind: 'local', items: local } : phase;
   }, [phase, local, required]);
 
