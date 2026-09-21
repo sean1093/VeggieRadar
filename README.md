@@ -340,7 +340,13 @@ blank. What they lose is everything derived from comparing days — they are
 excluded from the price history (a flagged observation must not bend the 28-day
 median), and the frontend hides their change badge, their 「比近月便宜」 badge
 and the drawer's baseline sentence, replacing the drawer's change block with
-「今日成交異常，暫不顯示漲跌」.
+「今日成交異常，暫不顯示漲跌」. That includes the 「划算優先」 ordering, which
+sank them to the bottom only after #70: a flagged item could take first place
+on the very number its own card refuses to show, above items with real
+discounts. One rule (`lib/utils/baseline.ts`) now answers "can this comparison
+be trusted?" — as a value, since every reader needs the number too — for the
+ordering, the badge, the drawer's sentence and whether the sort is offered at
+all.
 
 ### GAS quotas are the real scaling limit
 

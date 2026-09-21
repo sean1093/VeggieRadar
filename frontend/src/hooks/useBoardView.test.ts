@@ -31,6 +31,8 @@ const CABBAGE = item('高麗菜', '葉菜類', -22.3, '甘藍');
 const RADISH = item('白蘿蔔', '根莖類', -25.1, '蘿蔔');
 const BOKCHOY = item('青江菜', '葉菜類', undefined, '青江白菜');
 const BANANA = item('香蕉', '水果', 11.7);
+/** Flagged by the backend's plausibility guard: it has a number, and it does not count. */
+const ODD: ProduceItem = { ...item('花椰菜', '果菜類', -30), suspect: true };
 const BOARD = [CABBAGE, RADISH, BOKCHOY, BANANA];
 
 const NOBODY: WatchlistFilter = { count: 0, isWatched: () => false };
@@ -149,6 +151,21 @@ describe('useBoardView', () => {
 
     const { result: bare } = renderHook(() => useBoardView([BOKCHOY], NOBODY, BOARD));
     expect(bare.current.hasBaselines).toBe(false);
+  });
+
+  it('does not offer 划算優先 for a board of nothing but suspect rows', () => {
+    // The option would be there, and turning it on would reorder nothing:
+    // every one of those comparisons is exactly what the sort ignores.
+    const { result } = renderHook(() => useBoardView([ODD], NOBODY, [ODD]));
+    expect(result.current.hasBaselines).toBe(false);
+  });
+
+  it('leaves a suspect row at the bottom of 划算優先', () => {
+    const { result } = renderHook(() => useBoardView([ODD, ...BOARD], NOBODY, BOARD));
+    act(() => result.current.toggleSort());
+    expect(result.current.sortMode).toBe('value');
+    // ODD's -30% is the deepest discount on the board and does not rank.
+    expect(names(result.current.visibleItems)).toEqual(['白蘿蔔', '高麗菜', '香蕉', '花椰菜', '青江菜']);
   });
 
   it('holds the row the drawer is showing', async () => {

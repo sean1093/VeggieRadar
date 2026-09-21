@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { byValueFirst } from './value-sort';
 import type { ProduceItem } from '../../types/produce';
 
-const item = (name: string, vs?: number): ProduceItem => ({
+const item = (name: string, vs?: number, suspect = false): ProduceItem => ({
   code: name,
   name,
   official_name: name,
@@ -14,6 +14,7 @@ const item = (name: string, vs?: number): ProduceItem => ({
   unit: '公斤',
   markets_count: 5,
   ...(vs !== undefined ? { vs_baseline_percent: vs } : {}),
+  ...(suspect ? { suspect: true } : {}),
 });
 
 describe('byValueFirst', () => {
@@ -37,5 +38,19 @@ describe('byValueFirst', () => {
 
   it('returns 0 for equal keys so the stable sort preserves curated order', () => {
     expect(byValueFirst(item('a', -10), item('b', -10))).toBe(0);
+  });
+
+  it('sinks a suspect item below every item whose comparison stands', () => {
+    // Its card reads 今日成交異常 and shows no 比近月便宜 badge, because the
+    // backend called today's trade untrustworthy. Ranking first on the very
+    // number the card withholds left the visitor nothing to read it by (#70).
+    const sorted = [item('odd', -30, true), item('cheap', -2), item('dear', 8)].sort(byValueFirst);
+    expect(sorted.map((i) => i.name)).toEqual(['cheap', 'dear', 'odd']);
+  });
+
+  it('keeps two suspect items in their curated order', () => {
+    expect(byValueFirst(item('a', -30, true), item('b', -1, true))).toBe(0);
+    const sorted = [item('a', -30, true), item('b', -1, true), item('c', -5)].sort(byValueFirst);
+    expect(sorted.map((i) => i.name)).toEqual(['c', 'a', 'b']);
   });
 });
