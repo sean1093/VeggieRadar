@@ -79,6 +79,18 @@ describe('serializeUrlState', () => {
   });
 });
 
+describe('replaceUrlState', () => {
+  it('leaves the entry’s own state alone', () => {
+    // The `{ drawer: true }` marker is how `closeDrawerUrl` tells an entry we
+    // pushed from a deep link that arrived on its own. Passing null on a
+    // replace wiped it, and ✕ then rewrote the entry instead of going back,
+    // leaving the drawer's entry in the history for the back key to find.
+    window.history.pushState({ drawer: true }, '', '/VeggieRadar/#/i/高麗菜');
+    replaceUrlState({ query: '蔥' });
+    expect(window.history.state).toEqual({ drawer: true });
+  });
+});
+
 describe('itemUrl', () => {
   it('links to the item alone, not to how the sharer was reading the board', () => {
     at('#/?f=葉菜類&sort=value');

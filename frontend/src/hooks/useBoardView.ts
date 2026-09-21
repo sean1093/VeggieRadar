@@ -34,6 +34,13 @@ export interface BoardView {
   linkedQuery: string;
   /** A link named an item today's board does not carry. */
   notice: string | null;
+  /**
+   * The query a share link for the open card has to carry, or '' for a card
+   * the recipient's own board will have. Pinned to the query that *found* the
+   * card rather than read live: a word typed after tapping it would otherwise
+   * be handed to the recipient, whose search for it never returns this crop.
+   */
+  shareQuery: string;
 }
 
 const SORT_KEY = 'veggieradar_sort_v1';
@@ -53,6 +60,14 @@ export function useBoardView(
   baseItems: ProduceItem[],
   watchlist: WatchlistFilter,
   board: ProduceItem[],
+  /**
+   * The URL asks for a query and the search for it has not answered yet. Only
+   * the caller can know: this hook sees the query the URL carries, not the
+   * hook that runs it. It matters for one link shape — `#/i/<name>?q=<name>`,
+   * what a shared live-search result looks like — where judging the item
+   * missing before the answer arrives dismisses the drawer the link was for.
+   */
+  searchPending = false,
 ): BoardView {
   const url = useUrlState();
   // Board order. 'category' is the curated definition order; 'value' puts the
@@ -102,21 +117,71 @@ export function useBoardView(
     track('filter_changed', { filter: value });
   }, []);
 
-  // Widening the board back to 全部 for a new query is a reset, not a choice,
-  // so it is deliberately not reported as filter_changed.
-  const applyQuery = useCallback((query: string) => {
-    setMissedItem(null);
-    replaceUrlState({ query: query.trim(), filter: 'all' });
-  }, []);
-
   const select = useCallback((item: ProduceItem) => pushUrlState({ item: item.name }), []);
   const close = useCallback(() => closeDrawerUrl(), []);
 
-  const selectedItem = useMemo(() => {
+  const found = useMemo(() => {
     if (!url.item) return null;
     const named = (it: ProduceItem) => it.name === url.item;
     return baseItems.find(named) ?? board.find(named) ?? null;
   }, [url.item, baseItems, board]);
+
+  // A card the visitor has open stays open until they close it, together with
+  // the query that found it. Off the board it lives only inside the search
+  // phase, so anything that resets that phase — a keystroke settling, a query
+  // being voided — used to take the drawer with it and then declare the crop
+  // missing. Held here so the drawer outlives the answer that produced it, and
+  // so a share link quotes the question that produced it rather than whatever
+  // is in the box by the time the visitor taps 分享.
+  const [openCard, setOpenCard] = useState<{ item: ProduceItem; query: string } | null>(null);
+  if (found && openCard?.item.name !== found.name) setOpenCard({ item: found, query: url.query });
+  else if (!url.item && openCard !== null) setOpenCard(null);
+  const held = url.item !== null && openCard?.item.name === url.item ? openCard : null;
+  const selectedItem = found ?? held?.item ?? null;
+
+  // On the board or not: what decides whether a share link needs the query.
+  // Read off `board` rather than off a flag, because that is the same list the
+  // recipient will look in.
+  const shareQuery = useMemo(() => {
+    if (selectedItem === null || board.some((it) => it.name === selectedItem.name)) return '';
+    return held?.query ?? url.query;
+  }, [selectedItem, board, held, url.query]);
+
+  // Widening the board back to 全部 for a new query is a reset, not a choice,
+  // so it is deliberately not reported as filter_changed.
+  const applyQuery = useCallback(
+    (query: string) => {
+      setMissedItem(null);
+      // An item nothing can show goes with it. That is the stranded link:
+      // `#/i/枇杷?q=秋葵` after a busy backend, with no drawer, no notice and
+      // nothing that would ever resolve it, handed out again by the next
+      // reload or address-bar share.
+      //
+      // An item the *board* carries stays. It survives any query, because
+      // `selectedItem` falls back to the board, and this runs from the typing
+      // preview too — which settles 300 ms late, long enough for a card tapped
+      // in between to have opened a drawer this would then close.
+      //
+      // Being open right now is not the test: a live-search card is on screen
+      // and still stranded by the next query, which is how ✕ over one ended
+      // up printing 「that crop has no trading data」 about the price it had
+      // just been showing.
+      // A query that has not actually moved strands nothing: typing a stray
+      // character over a linked drawer and deleting it again settles back on
+      // the same word, and this runs on that settled word.
+      // A query that has not moved strands nothing: submitting the link's own
+      // word is another try at it. A query that *has* moved leaves any card
+      // the board cannot produce unreachable, so it goes rather than becoming
+      // `#/i/枇杷?q=高` — a link whose query can never find its own card.
+      //
+      // Nothing here has to special-case a card the visitor just tapped: that
+      // cancels the pending word before it can reach this (`App`).
+      const unchanged = query.trim() === url.query;
+      const survives = url.item !== null && (unchanged || board.some((it) => it.name === url.item));
+      replaceUrlState({ query: query.trim(), filter: 'all', ...(survives ? {} : { item: null }) });
+    },
+    [url.item, url.query, board],
+  );
 
   // A link to a crop that is out of season today must not look like a broken
   // app: name it in one line and put the URL back on the board. Nothing is
@@ -127,11 +192,27 @@ export function useBoardView(
   // it. Adjusted here rather than in the effect below: React converges on it
   // in the same commit, while a setState inside the effect would render the
   // board once without it first.
-  const missing = url.item !== null && selectedItem === null && baseItems.length + board.length > 0;
+  //
+  // `searchPending` is the other half of that: a shared live-search result
+  // arrives as `#/i/<name>?q=<name>`, and the named crop is in nobody's board
+  // by definition. Deciding before the query has answered dismisses the drawer
+  // the link exists for and tells the recipient there is no trading data for a
+  // price the sender was looking at seconds earlier.
+  const missing =
+    url.item !== null && selectedItem === null && !searchPending && baseItems.length + board.length > 0;
+  //
+  // The notice is also answered by the crop simply arriving. A search that
+  // failed transiently and then succeeded on retry puts the price on the board
+  // without opening any drawer and without touching the query, and a sentence
+  // saying there is no trading data, directly above that price, is worse than
+  // no sentence at all.
+  const missedNowOnScreen =
+    missedItem !== null
+    && (baseItems.some((it) => it.name === missedItem) || board.some((it) => it.name === missedItem));
   if (missing && missedItem !== url.item) setMissedItem(url.item);
-  // Any drawer that does open answers the notice: the shopper has moved on,
-  // whether he tapped a row or followed another link.
-  else if (selectedItem !== null && missedItem !== null) setMissedItem(null);
+  // Any drawer that does open answers the notice too: the shopper has moved
+  // on, whether he tapped a row or followed another link.
+  else if (missedItem !== null && (selectedItem !== null || missedNowOnScreen)) setMissedItem(null);
   useEffect(() => {
     if (missing) replaceUrlState({ item: null });
   }, [missing]);
@@ -165,6 +246,7 @@ export function useBoardView(
     select,
     close,
     applyQuery,
+    shareQuery,
     linkedQuery: url.query,
     notice: missedItem === null ? null : `「${missedItem}」今日無交易資料`,
   };
