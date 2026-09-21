@@ -1253,8 +1253,8 @@ describe('failure alerting', () => {
       expect(logs.filter((l) => l.includes('no alert recipient'))).toHaveLength(1);
     });
 
-    it('opens it on the serving path too', () => {
-      const { api, props, mails } = loadBackend();
+    it('opens it on the serving path too, and then holds its tongue', () => {
+      const { api, props, mails, logs } = loadBackend();
       props.delete(api.ALERT_EMAIL_PROP);
       api.storeBoard({
         type: 'board', date: '2026-08-26', roc_date: '115.08.26', count: 1,
@@ -1264,11 +1264,13 @@ describe('failure alerting', () => {
 
       expect(api.readBoard().items).toHaveLength(1); // prices still served
       expect(props.get('veggie_alert_active')).toBe('1');
+      expect(props.get('veggie_alert_unsent_reason')).toBe('no_recipient');
       expect(mails).toHaveLength(0);
 
-      // And a second visitor does not re-take the decision.
-      api.readBoard();
-      expect(props.get('veggie_alert_unsent_reason')).toBe('no_recipient');
+      // A burst of visitors attempts the send once, because the cooldown now
+      // arms — which is what could not happen while the send threw.
+      for (let i = 0; i < 5; i++) api.readBoard();
+      expect(logs.filter((l) => l.includes('no alert recipient'))).toHaveLength(1);
     });
 
     it('closes it again on recovery, since no retry can ever deliver', () => {
@@ -1283,6 +1285,22 @@ describe('failure alerting', () => {
       // page the probe forever for a backend that recovered.
       expect(props.has('veggie_alert_active')).toBe(false);
       expect(api.handleDiag().alert.incident_open).toBe(false);
+    });
+
+    it('takes the silence category away with the incident', () => {
+      const { api, props } = loadBackend(plausibleRows());
+      props.delete(api.ALERT_EMAIL_PROP);
+      props.set('veggie_alert_active', '1');
+      props.set('veggie_alert_sent_at', new Date().toISOString());
+      props.set('veggie_alert_unsent_reason', 'no_recipient');
+
+      api.refreshBoardCache();
+
+      // The category explains one incident's mail. Left behind, it would
+      // describe a silent mailbox in `diag` long after the operator had
+      // configured one.
+      expect(props.has('veggie_alert_unsent_reason')).toBe(false);
+      expect(api.handleDiag().alert.last_send_failure).toBeNull();
     });
 
     it('leaves the send path untouched when a recipient is configured', () => {
@@ -1301,7 +1319,7 @@ describe('failure alerting', () => {
     api.refreshBoardCache();
     const diag = api.handleDiag();
     expect(diag.alert).toEqual({
-      failure_streak: 1, incident_open: false, last_sent: null, recipient_configured: true, last_send_failure: null,
+      failure_streak: 1, incident_open: false, last_attempt: null, recipient_configured: true, last_send_failure: null,
     });
     expect(JSON.stringify(diag)).not.toContain('owner@example.com');
   });

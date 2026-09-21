@@ -463,7 +463,7 @@ observation.
 Alerting swallows every error by design: it sits on both the refresh and the
 serving path, and no mail-quota, properties or lock failure may take the board
 down with it. `diag` reports `alert.failure_streak` / `alert.incident_open` /
-`alert.last_sent` / `alert.recipient_configured` / `alert.last_send_failure` —
+`alert.last_attempt` / `alert.recipient_configured` / `alert.last_send_failure` —
 never the address, since `diag` is public. The recipient is not in the source
 either: `alertRecipient()` reads the `ALERT_EMAIL` script property, and that
 property is **required** — there is deliberately no fallback to the deploying
@@ -472,7 +472,10 @@ manifest does not grant, and adding a scope forces re-consent before the Web
 App runs again. Unset, every mail fails as `no_recipient` and `diag` shows
 `recipient_configured: false`.
 
-Opening an incident does **not** depend on being able to send one.
+Opening an incident does **not** depend on being able to send one, which is
+also why the timestamp is `last_attempt` rather than `last_sent`: it is when
+the incident window armed, and `last_send_failure` is what says whether
+anything left the building.
 `sendAlertMail` returns a failure *category* rather than throwing, and both
 callers open the incident either way, so `incident_open` says what the backend
 knows about itself and `last_send_failure` says why the mailbox is silent. It
@@ -639,7 +642,7 @@ GET {WEB_APP_URL}/exec?action=diag[&token=…]
      "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null,
      "last_validation": { "at": "2026-09-02T16:05:08.087Z", "ok": true, "reasons": [], "suspects": [] },
      "history": { "items": 97, "min_days": 1, "max_days": 24 },
-     "alert": { "failure_streak": 0, "incident_open": false, "last_sent": null, "recipient_configured": true,
+     "alert": { "failure_streak": 0, "incident_open": false, "last_attempt": null, "recipient_configured": true,
                 "last_send_failure": null } }
 
 GET {WEB_APP_URL}/exec?action=alerttest&token=…

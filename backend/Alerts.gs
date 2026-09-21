@@ -59,20 +59,29 @@ function recordRefreshOutcome(ok, detail) {
 
     if (ok) {
       props.setProperty(ALERT_STREAK_PROP, '0');
-      if (props.getProperty(ALERT_ACTIVE_PROP) !== '1') return 'ok';
+      if (props.getProperty(ALERT_ACTIVE_PROP) !== '1') {
+        // No incident, so nothing for a silence category to be about. A
+        // reason left over from a closed one would otherwise sit in `diag`
+        // for good, describing a mailbox that is no longer silent.
+        recordSendOutcome(props, null);
+        return 'ok';
+      }
       // Send BEFORE clearing. Clearing first would close the incident even
       // when the mail failed, so the next healthy refresh would skip the
       // all-clear and leave the reader believing the app is still broken.
       var unsent = sendAlertMail('[VeggieRadar] 已恢復正常', detail + '\n診斷：' + diagUrl() + '\n');
-      recordSendOutcome(props, unsent);
       // A send that failed keeps the incident open so the next healthy refresh
       // tries the all-clear again — except when there is no recipient at all.
       // That is a configuration choice rather than a transient failure, and
       // retrying it forever would leave `incident_open` true on a backend that
       // recovered, which is the same lie as #65 with the sign flipped.
-      if (unsent && unsent !== 'no_recipient') return 'recovery_unsent';
-      props.deleteProperty(ALERT_ACTIVE_PROP);
-      props.deleteProperty(ALERT_SENT_PROP);
+      if (unsent && unsent !== 'no_recipient') {
+        recordSendOutcome(props, unsent); // still open, and this says why
+        return 'recovery_unsent';
+      }
+      // Only deletes, so unlike the failure path below it cannot want space
+      // in a properties store a rejected board has just filled.
+      closeIncident(props);
       return unsent ? 'recovered_silently' : 'recovered';
     }
 
@@ -92,8 +101,14 @@ function recordRefreshOutcome(ok, detail) {
     // Whatever the send returned. The incident is what the backend knows about
     // itself, and the cooldown is what stops every later failure re-taking the
     // lock to attempt a mail that cannot be sent.
-    recordSendOutcome(props, unsent);
+    //
+    // The incident goes FIRST. `recordSendOutcome` creates a key that may not
+    // exist yet, and a rejected board has just written its chunks into the
+    // same properties store (`Board.gs`); a full store would throw on the new
+    // key, `withAlertLock` would swallow it, and the incident would once more
+    // not be opened — this bug, one line further along.
     openIncident(props);
+    recordSendOutcome(props, unsent);
     return unsent ? 'alerted_silently' : 'alerted';
   });
 }
@@ -108,10 +123,11 @@ function sendAlert(subject, body) {
     var props = PropertiesService.getScriptProperties();
     if (withinCooldown(props)) return false;
     var unsent = sendAlertMail(subject, body);
-    recordSendOutcome(props, unsent);
-    // Same rule as the refresh path: the incident opens on what the backend
-    // knows, not on what it managed to send.
+    // Same rule and same order as the refresh path: the incident opens on what
+    // the backend knows, not on what it managed to send, and it is written
+    // before the category that explains it.
     openIncident(props);
+    recordSendOutcome(props, unsent);
     return !unsent;
   }) === true;
 }
@@ -185,6 +201,17 @@ function withinCooldown(props) {
 function openIncident(props) {
   props.setProperty(ALERT_SENT_PROP, new Date().toISOString());
   props.setProperty(ALERT_ACTIVE_PROP, '1');
+}
+
+/**
+ * Closes it again, the silence category included: that category describes the
+ * incident's own mail, so leaving it behind would have `diag` explaining a
+ * mailbox that is no longer silent.
+ */
+function closeIncident(props) {
+  props.deleteProperty(ALERT_ACTIVE_PROP);
+  props.deleteProperty(ALERT_SENT_PROP);
+  props.deleteProperty(ALERT_UNSENT_PROP);
 }
 
 /** Best-effort diag link for alert bodies; never throws. */

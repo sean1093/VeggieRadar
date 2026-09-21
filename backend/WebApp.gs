@@ -174,7 +174,10 @@ function handleDiag(full, props) {
     alert: {
       failure_streak: parseInt(props[ALERT_STREAK_PROP] || '0', 10) || 0,
       incident_open: props[ALERT_ACTIVE_PROP] === '1',
-      last_sent: props[ALERT_SENT_PROP] || null,
+      // When the incident window armed — an ATTEMPT, not a delivery: the
+      // incident opens whether or not the mail could go out, so calling this
+      // `last_sent` would claim one next to `recipient_configured: false`.
+      last_attempt: props[ALERT_SENT_PROP] || null,
       // Whether a mail could go anywhere at all — the address itself stays out.
       recipient_configured: !!props[ALERT_EMAIL_PROP],
       // Why the last alert mail did not go out, as a category. An incident now
