@@ -249,14 +249,22 @@ function refreshBoardCache() {
  * @returns {string} what it did, for tests and logs.
  */
 function requestMirrorDeploy() {
+  var props;
   var token;
   try {
-    token = PropertiesService.getScriptProperties().getProperty(GH_DISPATCH_TOKEN_PROP);
+    props = PropertiesService.getScriptProperties();
+    token = props.getProperty(GH_DISPATCH_TOKEN_PROP);
   } catch (err) {
     Logger.log('requestMirrorDeploy: properties unavailable: ' + err);
     return 'unavailable';
   }
   if (!token) return 'unconfigured'; // deliberate: deploy-pages.yml still has its schedule
+  // `?action=warm` is public, and the lock it takes is released when the crawl
+  // ends rather than held for its TTL, so a visitor can drive crawls every few
+  // minutes. A crawl costs the backend; a deploy costs a minute of CI against
+  // Pages' ten-an-hour soft limit. The floor is far below the 4 h refresh
+  // cycle, so it never delays the deploy a scheduled crawl asks for.
+  if (withinWindow(dispatchedAt(props), GH_DISPATCH_MIN_INTERVAL_MS)) return 'throttled';
   try {
     var response = UrlFetchApp.fetch(GH_DISPATCH_URL, {
       method: 'post',
@@ -272,14 +280,42 @@ function requestMirrorDeploy() {
       muteHttpExceptions: true
     });
     var code = response.getResponseCode();
-    if (code === 204) return 'dispatched'; // what GitHub returns for an accepted dispatch
+    if (code === 204) return recordDispatch(props, 'dispatched'); // 204 is an accepted dispatch
     // Status only. The body is GitHub's, and an error body is the last place
     // to be pasting into a log beside a token that just failed.
     Logger.log('requestMirrorDeploy: GitHub answered ' + code);
-    return 'rejected';
+    return recordDispatch(props, 'rejected ' + code);
   } catch (err) {
     Logger.log('requestMirrorDeploy failed: ' + err);
-    return 'failed';
+    return recordDispatch(props, 'failed');
+  }
+}
+
+/**
+ * Records an attempt — the outcome and when — and returns that outcome.
+ *
+ * A log line is not enough: an expired PAT would 401 on every crawl, mirror
+ * freshness would quietly revert to the fallback cron, and nothing an operator
+ * looks at would say so. `diag` reads this back as `mirror_dispatch`. Never
+ * throws: the property store is not worth a crawl.
+ */
+function recordDispatch(props, outcome) {
+  try {
+    props.setProperty(GH_DISPATCH_PROP, new Date().toISOString() + ' ' + outcome);
+  } catch (err) {
+    Logger.log('recordDispatch failed: ' + err);
+  }
+  return outcome;
+}
+
+/** When the last dispatch was attempted, or '' when there has been none. */
+function dispatchedAt(props) {
+  try {
+    var value = props.getProperty(GH_DISPATCH_PROP) || '';
+    var space = value.indexOf(' ');
+    return space === -1 ? value : value.substring(0, space);
+  } catch (err) {
+    return '';
   }
 }
 

@@ -168,6 +168,10 @@ function handleDiag(full, props) {
     // our own rule text and our own item names — never platform or MOA text.
     last_validation: parseValidation(props[LAST_VALIDATION_PROP]),
     history: historySummary(),
+    // Whether the mirror is being republished by the crawl or left to the
+    // fallback cron: an expired PAT would 401 on every refresh and nothing
+    // else here would say so. Outcome and time only, never the token.
+    mirror_dispatch: parseDispatch(props[GH_DISPATCH_PROP]),
     // Alert state, so a silent mailbox can be told apart from a silent
     // pipeline. The recipient address is deliberately not exposed — diag is a
     // public endpoint.
@@ -186,6 +190,18 @@ function handleDiag(full, props) {
       last_send_failure: props[ALERT_UNSENT_PROP] || null,
     },
   };
+}
+
+/**
+ * `GH_DISPATCH_PROP` is stored as `<ISO timestamp> <outcome>`; null until the
+ * first attempt, which is also what a deployment with no token shows forever.
+ */
+function parseDispatch(value) {
+  if (!value) return null;
+  var space = value.indexOf(' ');
+  return space === -1
+    ? { at: value, outcome: 'unknown' }
+    : { at: value.substring(0, space), outcome: value.substring(space + 1) };
 }
 
 /**

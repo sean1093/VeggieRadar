@@ -152,6 +152,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'REFRESH_INTERVAL_HOURS', 'installDailyTrigger', 'refreshBoardCache',
     'doGet', 'isAdmin', 'alertRecipient', 'redactFailure', 'ADMIN_TOKEN_PROP', 'ALERT_EMAIL_PROP',
     'requestMirrorDeploy', 'GH_DISPATCH_TOKEN_PROP', 'GH_DISPATCH_EVENT', 'GH_DISPATCH_URL',
+    'GH_DISPATCH_MIN_INTERVAL_MS',
     'validateBoard', 'markSuspects', 'readChunkedProp',
     'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
     'normalizeQuery', 'searchTerms', 'catalogRoots', 'withinOneEdit', 'CROP_CATALOG', 'SEARCH_ALIASES',
@@ -1491,9 +1492,38 @@ describe('mirror deploy dispatch', () => {
     const { api, rejectDispatch, logs } = withToken();
     rejectDispatch(401);
 
-    expect(api.requestMirrorDeploy()).toBe('rejected');
+    expect(api.requestMirrorDeploy()).toBe('rejected 401');
     expect(logs.some((l) => l === 'requestMirrorDeploy: GitHub answered 401')).toBe(true);
     expect(logs.some((l) => l.includes('ghp_stub'))).toBe(false);
+    // …and it is visible where an operator looks, not only in a log nobody
+    // opens: an expired PAT 401s on every crawl and the mirror quietly falls
+    // back to the cron.
+    expect(api.handleDiag().mirror_dispatch).toMatchObject({ outcome: 'rejected 401' });
+    expect(JSON.stringify(api.handleDiag())).not.toContain('ghp_stub');
+  });
+
+  it('keeps a floor under the deploys a public ?action=warm can drive', () => {
+    // `warm` needs no token and releases its lock when the crawl ends, so a
+    // visitor can drive crawls every few minutes. A crawl is the backend's own
+    // cost; a Pages deploy is a minute of CI against a soft limit of ten an
+    // hour. The floor sits far below the 4 h refresh cycle it follows.
+    const { api, dispatches, props } = withToken();
+    api.refreshBoardCache();
+    api.refreshBoardCache();
+    expect(dispatches).toHaveLength(1);
+    expect(api.requestMirrorDeploy()).toBe('throttled');
+
+    // Age the record past the floor and the next crawl publishes again.
+    props.set('veggie_mirror_dispatch',
+      new Date(Date.now() - api.GH_DISPATCH_MIN_INTERVAL_MS - 60_000).toISOString() + ' dispatched');
+    api.refreshBoardCache();
+    expect(dispatches).toHaveLength(2);
+  });
+
+  it('shows nothing at all in diag until something has been attempted', () => {
+    const { api } = loadBackend(goodRows);
+    api.refreshBoardCache(); // no token: nothing attempted, nothing recorded
+    expect(api.handleDiag().mirror_dispatch).toBeNull();
   });
 
   it('asks for no deploy when the board was rejected', () => {

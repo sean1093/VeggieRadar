@@ -82,8 +82,9 @@ MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ CacheServic
                                                                       │
                                                             GET /exec │
                                                                       ▼
-Frontend (GitHub Pages) ◀── validate ◀── GitHub Actions (deploy-pages, cron :20 hourly)
-  data/board.json, published inside the bundle's own artifact
+Frontend (GitHub Pages) ◀── validate ◀── GitHub Actions (deploy-pages: when a
+  data/board.json, published inside the bundle's own artifact  crawl lands, on
+                                                     push, 2-hourly fallback)
         │
         ▼
 Browser: localStorage (paints first) ──▶ data/board.json ──▶ GAS /exec
@@ -429,6 +430,14 @@ scoped to this repository with `contents: write` (§8). **Unset, the backend
 skips the POST entirely** and the 2-hourly schedule is all there is — the state
 this section described before the dispatch existed. A failure to dispatch is
 logged and swallowed, never thrown: it must not cost a crawl that succeeded.
+Every attempt is recorded as `diag.mirror_dispatch` (`{ at, outcome }`), so an
+expired PAT reads as `rejected 401` where an operator looks rather than only in
+a log — otherwise mirror freshness would revert to the cron with nothing saying
+so. The dispatch also keeps a 30-minute floor: `?action=warm` is public and
+releases its lock when the crawl ends, so a visitor can drive crawls every few
+minutes, and a crawl costs the backend while a deploy costs a minute of CI
+against Pages' ten-an-hour soft limit. The floor is far below the 4 h refresh
+cycle it follows.
 For a board of wholesale *closing* prices, published once a day after market
 close, the remaining lag is invisible.
 
@@ -663,6 +672,7 @@ GET {WEB_APP_URL}/exec?action=diag[&token=…]
      "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null,
      "last_validation": { "at": "2026-09-02T16:05:08.087Z", "ok": true, "reasons": [], "suspects": [] },
      "history": { "items": 97, "min_days": 1, "max_days": 24 },
+     "mirror_dispatch": { "at": "2026-09-21T16:04:11.201Z", "outcome": "dispatched" },
      "alert": { "failure_streak": 0, "incident_open": false, "last_attempt": null, "recipient_configured": true,
                 "last_send_failure": null } }
 
@@ -1031,8 +1041,9 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
      the deploying account.
    - `GH_DISPATCH_TOKEN` — optional, and the difference between a mirror that
      follows the crawl and one that follows a cron. A **fine-grained PAT
-     scoped to this repository with `contents: write`** (what
-     `POST /dispatches` requires and nothing more). With it set, every
+     scoped to this repository with `contents: write`** — which is what
+     `POST /dispatches` requires, and it is push access to this repository, so
+     the Apps Script project holds it. With it set, every
      successful refresh asks GitHub to republish the mirror; unset, the
      backend skips the POST and `deploy-pages.yml`'s 2-hourly schedule is the
      fallback (§2). Rotating it is one property: a stale token logs
@@ -1064,12 +1075,15 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   the default branch runs the tests, builds `frontend/` and publishes to Pages. In
   the repo, set **Settings → Pages → Source: GitHub Actions**. Live at
   `https://<user>.github.io/VeggieRadar/` (`vite.config.ts` `base` is `/VeggieRadar/`).
-  It also runs on `schedule: '20 * * * *'`, because the static board mirror
-  (§2) is only as fresh as the last deploy — and the backend's refresh trigger
-  is installed by hand, so a fetch on the *same* 4-hourly period can sit
-  permanently on the wrong side of it. Hourly rather than the 2-hourly it asked
-  for before, as a bounded experiment in whether the interval is what GitHub is
-  actually honouring (§2). At most 24 deploys a day still sits below Pages'
+  It also runs on `repository_dispatch: [board-crawled]` — the backend asks for
+  the deploy when a crawl lands (§2), which is what keeps the static board
+  mirror fresh — and on `schedule: '20 */2 * * *'` as the fallback for a
+  deployment with no `GH_DISPATCH_TOKEN` set. The schedule used to be the
+  mechanism; a week of hourly ticks showed GitHub throttling them to a 4.64 h
+  median whatever the cron asks, so the asks went back to 2-hourly (§2). At
+  most 12 scheduled deploys a day plus one per crawl — the backend refreshes
+  4-hourly, and the dispatch keeps a 30-minute floor of its own, since
+  `?action=warm` is public — sits well below Pages'
   soft limit of ten per hour, and `concurrency: pages` keeps one deploy at a
   time — with `cancel-in-progress: false`, so a scheduled tick can never kill a
   push deploy inside `actions/deploy-pages`. Both jobs carry
