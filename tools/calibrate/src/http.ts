@@ -17,7 +17,16 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const CACHE_DIR = resolve(HERE, '../.cache');
+/**
+ * Where responses are cached — the gitignored `.cache/` beside the tool, or
+ * wherever `CALIBRATE_CACHE_DIR` points. The override exists so a test can
+ * work in a temporary directory: what may be written here is the whole
+ * subject of `cachedText` below, and it must be provable without touching a
+ * developer's real cache.
+ */
+export const CACHE_DIR = process.env.CALIBRATE_CACHE_DIR
+  ? resolve(process.env.CALIBRATE_CACHE_DIR)
+  : resolve(HERE, '../.cache');
 
 /** Mirrors the backend's own throttle: small batches, brief pause, one retry. */
 export const CONCURRENCY = 4;
@@ -52,15 +61,29 @@ export async function cachedText(
   }
 
   let body = await once(url);
-  if (body === null || !accept(body)) {
+  // `accept` governs what may be RETURNED as much as what may be cached, and
+  // its verdict is carried rather than re-derived: the caller's predicate
+  // parses the body, and it should run once per attempt.
+  let usable = body !== null && accept(body);
+  if (!usable) {
     stats.retries += 1;
     await sleep(RETRY_PAUSE_MS);
-    const second = await once(url);
-    if (second !== null && accept(second)) body = second;
+    // The retry's outcome replaces the first attempt's outright, so the error
+    // below describes the attempt it is reporting on: a rejected first body
+    // followed by an unreachable retry is a fetch failure, not an unusable
+    // response, and the two are acted on differently.
+    body = await once(url);
+    usable = body !== null && accept(body);
   }
-  if (body === null) {
+  // The guard used to test only `body === null`, so a body the caller had
+  // rejected — a throttled empty response — was written to `.cache/` and
+  // handed back. From then on every run, `recalibrate.yml` included, read that
+  // hole straight out of the cache, and the only cure was deleting `.cache/`
+  // by hand (#69). The two failures are told apart because they are acted on
+  // differently: one is the network, the other is the feed.
+  if (!usable || body === null) {
     stats.failures += 1;
-    throw new Error(`fetch failed: ${url}`);
+    throw new Error(body === null ? `fetch failed: ${url}` : `unusable response: ${url}`);
   }
 
   mkdirSync(dirname(file), { recursive: true });
