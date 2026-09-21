@@ -42,13 +42,24 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   const cache = new Map<string, string>();
   const triggers: { handler: string; kind: string }[] = [];
   const fetches: string[] = [];
+  /** POSTs to GitHub's `/dispatches`, with their options — see `requestMirrorDeploy`. */
+  const dispatches: { url: string; options: Record<string, unknown> }[] = [];
+  let dispatchStatus = 204;
+  let dispatchThrows = false;
   const locks = { waits: 0, tries: 0, releases: 0, contended: false };
   const mails: { to: string; subject: string; body: string }[] = [];
   let mailThrows = false;
   let brokenPropKey: string | null = null;
 
-  const respond = (url: string) => {
+  const respond = (url: string, options?: Record<string, unknown>) => {
     fetches.push(url);
+    if (url.indexOf('api.github.com') !== -1) {
+      // UrlFetchApp throws on DNS and TLS failures whatever `muteHttpExceptions`
+      // says, so a broken dispatch has to be reachable both ways.
+      if (dispatchThrows) throw new Error('DNS error: api.github.com');
+      dispatches.push({ url, options: options ?? {} });
+      return { getResponseCode: () => dispatchStatus, getContentText: () => '' };
+    }
     const hit = Object.keys(responses).find((key) => url.includes(encodeURIComponent(key)));
     const rows = hit ? responses[hit] : [];
     return {
@@ -59,7 +70,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
 
   const services = {
     UrlFetchApp: {
-      fetch: (url: string) => respond(url),
+      fetch: (url: string, options?: Record<string, unknown>) => respond(url, options),
       fetchAll: (reqs: { url: string }[]) => reqs.map((r) => respond(r.url)),
     },
     CacheService: {
@@ -140,6 +151,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'ALERT_FAILURE_STREAK', 'ALERT_SILENCE_MS', 'ALERT_COOLDOWN_MS',
     'REFRESH_INTERVAL_HOURS', 'installDailyTrigger', 'refreshBoardCache',
     'doGet', 'isAdmin', 'alertRecipient', 'redactFailure', 'ADMIN_TOKEN_PROP', 'ALERT_EMAIL_PROP',
+    'requestMirrorDeploy', 'GH_DISPATCH_TOKEN_PROP', 'GH_DISPATCH_EVENT', 'GH_DISPATCH_URL',
     'validateBoard', 'markSuspects', 'readChunkedProp',
     'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
     'normalizeQuery', 'searchTerms', 'catalogRoots', 'withinOneEdit', 'CROP_CATALOG', 'SEARCH_ALIASES',
@@ -158,7 +170,9 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   props.set('ALERT_EMAIL', 'owner@example.com');
   return {
     api,
-    logs, props, cache, triggers, fetches, locks, mails,
+    logs, props, cache, triggers, fetches, locks, mails, dispatches,
+    breakDispatch: () => { dispatchThrows = true; },
+    rejectDispatch: (code: number) => { dispatchStatus = code; },
     breakMail: () => { mailThrows = true; },
     fixMail: () => { mailThrows = false; },
     breakProp: (key: string) => { brokenPropKey = key; },
@@ -1418,6 +1432,86 @@ describe('failure alerting', () => {
  * above the refresh cadence plus a crawl. When both were 4 h, a healthy board
  * reported itself stale in the minutes before every scheduled run.
  */
+/**
+ * The mirror deploy dispatch (#68).
+ *
+ * The published mirror is only as fresh as the last Pages deploy, and asking a
+ * cron for one is not the same as getting one: a 2-hourly schedule realised a
+ * 4.5 h median gap and hourly realised 4.64 h. So the backend asks for the
+ * deploy itself when a crawl lands. What these pin is that it cannot cost a
+ * crawl — no token, a rejection, an exception: the board still ships.
+ */
+describe('mirror deploy dispatch', () => {
+  const goodRows = plausibleRows();
+  const withToken = () => {
+    const back = loadBackend(goodRows);
+    back.props.set(back.api.GH_DISPATCH_TOKEN_PROP, 'ghp_stub');
+    return back;
+  };
+
+  it('posts exactly one dispatch when a refresh publishes a board', () => {
+    const { api, dispatches } = withToken();
+    const board = api.refreshBoardCache();
+
+    expect(board.count).toBeGreaterThan(0);
+    expect(dispatches).toHaveLength(1);
+    const [{ url, options }] = dispatches;
+    expect(url).toBe(api.GH_DISPATCH_URL);
+    expect(options.method).toBe('post');
+    expect(JSON.parse(options.payload as string)).toEqual({ event_type: api.GH_DISPATCH_EVENT });
+    const headers = options.headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer ghp_stub');
+    expect(headers.Accept).toBe('application/vnd.github+json');
+  });
+
+  it('does nothing at all with no token configured', () => {
+    // The deployed state until the operator sets the property: the schedule in
+    // `deploy-pages.yml` is the fallback, and this must not fail meanwhile.
+    const { api, dispatches, logs } = loadBackend(goodRows);
+    expect(api.refreshBoardCache().count).toBeGreaterThan(0);
+
+    expect(dispatches).toHaveLength(0);
+    expect(api.requestMirrorDeploy()).toBe('unconfigured');
+    expect(logs.some((l) => l.includes('requestMirrorDeploy'))).toBe(false); // nor is it noise
+  });
+
+  it('never lets a dispatch failure cost a crawl', () => {
+    const { api, breakDispatch, logs } = withToken();
+    breakDispatch();
+
+    const board = api.refreshBoardCache();
+    expect(board.count).toBeGreaterThan(0);
+    expect(logs.some((l) => l.includes('requestMirrorDeploy failed'))).toBe(true);
+  });
+
+  it('reports a rejection by status, and keeps the body out of the log', () => {
+    // An expired PAT answers 401. That is the operator's problem, not a reason
+    // to lose a crawl, and GitHub's error body is the last thing to paste into
+    // a log beside the token that just failed.
+    const { api, rejectDispatch, logs } = withToken();
+    rejectDispatch(401);
+
+    expect(api.requestMirrorDeploy()).toBe('rejected');
+    expect(logs.some((l) => l === 'requestMirrorDeploy: GitHub answered 401')).toBe(true);
+    expect(logs.some((l) => l.includes('ghp_stub'))).toBe(false);
+  });
+
+  it('asks for no deploy when the board was rejected', () => {
+    // A deploy publishes whatever `?action=board` answers at the time, and a
+    // rejected board leaves the previous one on air: there is nothing new to
+    // mirror, and a dispatch would only spend a deploy saying so.
+    const { api, dispatches } = withToken();
+    const bare = loadBackend(); // no MOA rows → empty build → rejected
+    bare.props.set(bare.api.GH_DISPATCH_TOKEN_PROP, 'ghp_stub');
+
+    bare.api.refreshBoardCache();
+    expect(bare.dispatches).toHaveLength(0);
+    // …and the same harness does dispatch when the board is good.
+    api.refreshBoardCache();
+    expect(dispatches).toHaveLength(1);
+  });
+});
+
 describe('refresh cadence vs staleness threshold', () => {
   it('leaves at least an hour of headroom above the cadence', () => {
     const { api } = loadBackend();

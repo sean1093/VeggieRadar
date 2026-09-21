@@ -390,30 +390,45 @@ Three reasons, none of which the client-side fallback could reach:
   that has already loaded the board once. The mirror is the last good board for
   *every* visitor, including a first-time one arriving while GAS is down.
 
-The mirror is republished on an hourly cron (plus on every code deploy). It
-trails the backend by the board's age when the deploy ran — 0–4 h, since the
-refresh trigger is installed by hand and its phase is arbitrary — plus
-everything since that deploy. **That second term is not what the cron says it
-is.** Over the 222 h to 2026-09-16 the previous `20 */2 * * *` asked for ~111
-runs and GitHub created 46: a median gap of 4.5 h against the 2 h it was
-written for, a worst of 11.2 h, none cancelled or skipped. So a typical mirror
-sat near the client's 6 h authority window, past which every visitor falls
-through to GAS, and the tail sat past the probe's 8 h bound —
-`[prod-alert] mirror_stale` on a mirror 8.8 h old beside a board crawled 0.8 h
-earlier (#66), the same fault as #42 one cadence earlier.
+The mirror is republished **when a crawl lands**, plus on every code deploy and
+on a 2-hourly cron as the fallback. The dispatch is the mechanism: after a
+successful `refreshBoardCache()` the backend POSTs `{"event_type":
+"board-crawled"}` to this repository's `/dispatches`, which
+`deploy-pages.yml` listens for. API-triggered runs are not subject to the
+schedule throttling described below, so the mirror is published minutes after
+the board it mirrors exists, and its age is then bounded by the backend's own
+4 h refresh cycle — inside the client's 6 h authority window and the probe's
+8 h bound.
 
-The hourly cron is an **experiment, not a settled cadence**. Two explanations
-fit the data and they disagree about it: if ticks are dropped independently,
-halving the interval halves the realised gap; if this repo has an effective
-floor near 4 h, halving it changes nothing. The evidence leans to the floor —
-only 5 of 45 gaps are under 3 h, where independent drops would put ~40 % of
-them at 2 h, and the 6-hourly probe on this same repo realises 6.6 h, nearly
-every tick, because its ask already clears the floor. Hourly bounds the cost of
-finding out. The `schedule:` comment in `.github/workflows/deploy-pages.yml`
-carries the re-measurement — gaps between runs that *succeeded*, slurped with
-`jq -s` rather than gh's per-page `--jq`, both of which change the answer — and
-if the median has not moved below ~4 h after a week, the fix is the mechanism
-rather than more deploys ([#68](https://github.com/sean1093/VeggieRadar/issues/68)).
+That took two measurements to arrive at. The mirror trails the backend by the
+board's age when the deploy ran — 0–4 h, since the refresh trigger is installed
+by hand and its phase is arbitrary — plus everything since that deploy, and
+**that second term is not what the cron says it is.** Over the 222 h to
+2026-09-16 a `20 */2 * * *` schedule asked for ~111 runs and GitHub created 46:
+a median gap of 4.5 h against the 2 h it was written for, a worst of 11.2 h,
+none cancelled or skipped. So a typical mirror sat near the client's 6 h
+authority window, past which every visitor falls through to GAS, and the tail
+sat past the probe's 8 h bound — `[prod-alert] mirror_stale` on a mirror 8.8 h
+old beside a board crawled 0.8 h earlier (#66), the same fault as #42 one
+cadence earlier.
+
+[#67](https://github.com/sean1093/VeggieRadar/pull/67) then asked hourly for a
+week, to tell a ~59 % drop rate from an effective floor near 4 h. Over the
+137 h to 2026-09-21 that produced 33 successful runs: a median gap of 4.64 h, a
+worst of 7.34 h, a best of 2.07 h. The median did not move — twelve times the
+asks for a quarter of the runs is a throttle, not a lottery — so the cron went
+back to 2-hourly and the mirror's freshness moved onto the dispatch
+([#68](https://github.com/sean1093/VeggieRadar/issues/68)). The tail did
+improve, which is worth having but is not the number mirror age turns on. The
+`schedule:` comment in `.github/workflows/deploy-pages.yml` carries the
+re-measurement recipe — gaps between runs that *succeeded*, slurped with
+`jq -s` rather than gh's per-page `--jq`, both of which change the answer.
+
+The dispatch needs a `GH_DISPATCH_TOKEN` script property: a fine-grained PAT
+scoped to this repository with `contents: write` (§8). **Unset, the backend
+skips the POST entirely** and the 2-hourly schedule is all there is — the state
+this section described before the dispatch existed. A failure to dispatch is
+logged and swallowed, never thrown: it must not cost a crawl that succeeded.
 For a board of wholesale *closing* prices, published once a day after market
 close, the remaining lag is invisible.
 
@@ -1014,6 +1029,14 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
      `?action=alerttest` answers `no_recipient`). The incident still opens, so
      the external probe still sees it. See §2 for why there is no fallback to
      the deploying account.
+   - `GH_DISPATCH_TOKEN` — optional, and the difference between a mirror that
+     follows the crawl and one that follows a cron. A **fine-grained PAT
+     scoped to this repository with `contents: write`** (what
+     `POST /dispatches` requires and nothing more). With it set, every
+     successful refresh asks GitHub to republish the mirror; unset, the
+     backend skips the POST and `deploy-pages.yml`'s 2-hourly schedule is the
+     fallback (§2). Rotating it is one property: a stale token logs
+     `requestMirrorDeploy: GitHub answered 401` and costs nothing else.
 3. Run `installDailyTrigger()` once in the editor — it installs the refresh
    trigger on `REFRESH_INTERVAL_HOURS` and warms the board so the first visitor
    never hits a cold crawl. Confirm with `?action=diag`: `triggers` must list

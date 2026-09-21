@@ -139,6 +139,20 @@ var ALERT_ACTIVE_PROP = 'veggie_alert_active';
 // included), so this is what says the mailbox is silent on purpose.
 var ALERT_UNSENT_PROP = 'veggie_alert_unsent_reason';
 
+// Mirror deploys (#68). The published mirror is only as fresh as the last
+// Pages deploy, and asking a cron for one is not the same as getting one: over
+// 222 h a `20 */2 * * *` schedule produced a median gap of 4.5 h, and hourly
+// over the next 137 h produced 4.64 h — the ticks are throttled, not dropped.
+// `repository_dispatch` is API-triggered and not throttled that way, so the
+// backend asks for the deploy itself once a crawl lands.
+//
+// The token is a fine-grained PAT scoped to this repository with
+// `contents: write`, kept in Script Properties like every other secret. Unset,
+// the whole thing is skipped and the schedule remains the fallback.
+var GH_DISPATCH_TOKEN_PROP = 'GH_DISPATCH_TOKEN';
+var GH_DISPATCH_EVENT = 'board-crawled';
+var GH_DISPATCH_URL = 'https://api.github.com/repos/sean1093/VeggieRadar/dispatches';
+
 // Plausibility guard (`Validate.gs`). The refresh used to reject exactly one
 // thing — an EMPTY board — so a throttled crawl or a MOA unit change would
 // overwrite 94 good prices with 40 wrong ones, and `updateHistory` would bake

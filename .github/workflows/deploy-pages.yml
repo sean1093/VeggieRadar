@@ -9,68 +9,57 @@ on:
       - 'frontend/**'
       - '.github/workflows/deploy-pages.yml'
   # The board mirror (README §2) is only as fresh as the last deploy, so the
-  # deploy also runs on a clock of its own.
+  # deploy runs when a crawl lands — and on a clock as the fallback.
+  #
+  # This is the mechanism that carries mirror freshness (#68): after a
+  # successful `refreshBoardCache()` the backend POSTs `board-crawled` to
+  # `/dispatches`, and the mirror is published minutes after the board it
+  # mirrors exists. API-triggered runs are not subject to the schedule
+  # throttling measured below. It is a no-op until the `GH_DISPATCH_TOKEN`
+  # script property is set, which is why the schedule stays.
+  repository_dispatch:
+    types: [board-crawled]
   schedule:
-    # An EXPERIMENT, not a settled cadence — re-measure before trusting it.
+    # Measured twice, and the experiment is over.
     #
     # What this cron asks for and what GitHub runs are different numbers. Over
-    # the 222 h to 2026-09-16 the `20 */2 * * *` this replaces asked for ~111
-    # runs and GitHub created 46: a median gap of 4.5 h against the 2 h it was
-    # written for, and a worst of 11.2 h. None were cancelled or skipped —
-    # the ticks were simply never created. Delivery, when it happens, is
-    # punctual: a median 29 min past the slot and never more than 58.
+    # the 222 h to 2026-09-16, `20 */2 * * *` asked for ~111 runs and GitHub
+    # created 46: a median gap of 4.5 h and a worst of 11.2 h, with none
+    # cancelled or skipped — the ticks were simply never created. #67 then
+    # asked hourly for a week to tell a ~59 % drop rate from an effective
+    # floor near 4 h. Over the 137 h to 2026-09-21 that produced 33 successful
+    # runs: a median gap of 4.64 h, a worst of 7.34 h, a best of 2.07 h.
     #
-    # That gap is the whole budget. The mirror's age is the board's age when
-    # the deploy ran (0–4 h, the backend's hand-installed trigger phase) plus
-    # everything since, so a 4.5 h median put a typical mirror near the
-    # client's 6 h authority window — past which every visitor falls through
-    # to GAS — and the tail past the probe's 8 h bound. It did: #66, a mirror
-    # 8.8 h old beside a board crawled 0.8 h earlier. #42 was the same fault
-    # one cadence earlier.
+    # The median did not move. Twelve times the ticks for a quarter of the
+    # runs is a throttle, not a lottery, so the cron is back where it was: the
+    # extra asks bought deploys and nothing else. The tail did improve
+    # (11.2 h → 7.3 h), which is worth having but is not what the mirror's age
+    # turns on.
     #
-    # Two explanations fit, and they disagree about this change. If ticks are
-    # dropped at ~59 %, halving the interval halves the realised gap. If
-    # instead this repo has an effective floor near 4 h, halving it changes
-    # nothing — and the data leans that way: only 5 of 45 gaps are under 3 h,
-    # where independent drops would put ~40 % of them at 2 h, and the
-    # 6-hourly `prod-probe.yml` on this same repo realises 6.6 h, i.e. nearly
-    # every tick, because its ask already clears the floor.
+    # So the schedule is now the FALLBACK, not the mechanism. The dispatch
+    # above collapses both terms of mirror age — the board's age when the
+    # deploy ran, and everything since — leaving it bounded by the backend's
+    # own 4 h refresh cycle, inside the client's 6 h authority window and the
+    # probe's 8 h bound. With no token set, this 2-hourly schedule is exactly
+    # what it was before the experiment.
     #
-    # So this asks hourly and nothing more. If the floor is real, GitHub drops
-    # the extra ticks and little changes; if it is not, the gap halves. Either
-    # way the answer is a week of runs away, and hourly bounds the cost while
-    # we wait: at most 24 Pages deploys a day against a soft limit of 10 per
-    # hour, and at most 24 `?action=board` reads. Those matter in one state —
-    # a board already past BOARD_MAX_AGE_MS makes `readBoard` queue a rebuild
-    # behind a 15-minute lock that any of these cadences clears, so a broken
-    # refresh trigger costs one crawl per deploy either way.
-    #
-    # Whatever the floor is, it is per workflow and not per repo, so this
-    # experiment cannot starve the monitor that judges it: over the same
-    # 222 h these two workflows produced 82 scheduled runs between them, one
-    # every 2.7 h, which no repo-wide floor near 4 h would allow.
-    #
-    # Re-measure on runs that PUBLISHED, not on runs that were created — with
-    # `cancel-in-progress: false` a tick can be cancelled while pending, which
-    # would shrink the median while republishing nothing:
+    # To re-measure, count runs that PUBLISHED, not runs that were created —
+    # with `cancel-in-progress: false` a tick can be cancelled while pending,
+    # which would shrink the median while republishing nothing:
     #   gh api --paginate \
     #     '/repos/{owner}/{repo}/actions/workflows/deploy-pages.yml/runs?event=schedule&status=success&per_page=100' \
     #     | jq -s '[.[].workflow_runs[].created_at] | sort'
     # Pipe to `jq -s`, do not reach for `--jq`: gh applies that per page, so a
-    # week of hourly runs comes back as two separately sorted arrays with a
-    # bogus gap at the seam — in the one number the keep-or-revert decision
-    # turns on. `--slurp` would fix that but gh refuses it alongside `--jq`.
-    # The baseline to beat is a 4.5 h median over a week; the 46 runs it came
-    # from were all successful, so the two numbers compare. If it has not moved
-    # below ~4 h, the floor is real: stop buying deploys and fix the mechanism
-    # instead (issue #68 — have the backend dispatch a deploy when a crawl
-    # lands, which removes both terms rather than shrinking one).
+    # week of runs comes back as two separately sorted arrays with a bogus gap
+    # at the seam. `--slurp` would fix that but gh refuses it alongside
+    # `--jq`. Filter `event=schedule` to keep dispatch-triggered runs out of a
+    # number that is about the scheduler.
     #
     # Each run still installs, lints and runs the full suite before
     # publishing. Skipping that on scheduled runs would save free minutes and
     # open a hole: a master whose own deploy failed on a red test would be
-    # published by the next tick an hour later.
-    - cron: '20 * * * *'
+    # published by the next tick.
+    - cron: '20 */2 * * *'
   workflow_dispatch:
 
 # Allow the workflow to publish to GitHub Pages.

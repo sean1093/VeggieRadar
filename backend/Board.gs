@@ -206,6 +206,10 @@ function refreshBoardCache() {
     storeBoard(board);
     updateHistory(board);
     props.setProperty(LAST_OK_PROP, board.generated_at + ' ' + board.roc_date + ' ' + board.count + ' items');
+    // Ask for the mirror deploy now the board exists to mirror — after the
+    // store, never before it, and never in the rejected branch below: a deploy
+    // publishes whatever `?action=board` answers at the time.
+    requestMirrorDeploy();
     recordRefreshOutcome(true,
       '看板已重新建立。\n\n' +
       '交易日：' + board.roc_date + '\n' +
@@ -227,6 +231,56 @@ function refreshBoardCache() {
   }
   Logger.log('Board refreshed: ' + (board.count || 0) + ' items for ' + (board.roc_date || 'n/a'));
   return board;
+}
+
+/**
+ * Tells GitHub a new board exists, so the mirror is republished by the crawl
+ * rather than by a clock unrelated to it (#68).
+ *
+ * Mirror age is the board's age when the deploy ran plus everything since, and
+ * the second term is not the number the cron says: a schedule asking every
+ * 2 h realised a 4.5 h median, hourly realised 4.64 h. `repository_dispatch`
+ * is API-triggered and not subject to that throttling, so this collapses both
+ * terms — the mirror is published minutes after the board it mirrors exists.
+ *
+ * Nothing here may touch the crawl. With no token configured it does nothing
+ * at all and the schedule stays the fallback, and every failure is logged and
+ * swallowed — the same contract the alerting honours.
+ * @returns {string} what it did, for tests and logs.
+ */
+function requestMirrorDeploy() {
+  var token;
+  try {
+    token = PropertiesService.getScriptProperties().getProperty(GH_DISPATCH_TOKEN_PROP);
+  } catch (err) {
+    Logger.log('requestMirrorDeploy: properties unavailable: ' + err);
+    return 'unavailable';
+  }
+  if (!token) return 'unconfigured'; // deliberate: deploy-pages.yml still has its schedule
+  try {
+    var response = UrlFetchApp.fetch(GH_DISPATCH_URL, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {
+        Authorization: 'Bearer ' + token,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28'
+      },
+      payload: JSON.stringify({ event_type: GH_DISPATCH_EVENT }),
+      // Handled here rather than thrown: a 401 from an expired PAT is an
+      // operator's problem, not a reason to lose a crawl that succeeded.
+      muteHttpExceptions: true
+    });
+    var code = response.getResponseCode();
+    if (code === 204) return 'dispatched'; // what GitHub returns for an accepted dispatch
+    // Status only. The body is GitHub's, and an error body is the last place
+    // to be pasting into a log beside a token that just failed.
+    Logger.log('requestMirrorDeploy: GitHub answered ' + code);
+    return 'rejected';
+  } catch (err) {
+    Logger.log('requestMirrorDeploy failed: ' + err);
+    return 'failed';
+  }
 }
 
 /** Parses a stored board JSON string, or null when it is absent or corrupt. */
