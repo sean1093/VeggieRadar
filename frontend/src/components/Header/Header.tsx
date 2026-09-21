@@ -3,9 +3,13 @@ import React, { useEffect, useRef, useState } from 'react';
 interface HeaderProps {
   onSearch: (query: string) => void;
   /**
-   * The query the URL is asking for. Seeds the box and is adopted again
-   * whenever it changes to something the box is not already showing — a
-   * shared `?q=` link, a reload, the back key.
+   * The query the box should be showing, and a counter that says when to take
+   * it. Seeds the box, and is adopted again whenever `seed` increases — a
+   * shared `?q=` link, a reload, the back key, a card tapped mid-word.
+   *
+   * A counter rather than the value changing, because the same word can need
+   * re-imposing twice, and because the box's own word comes back through the
+   * URL: keying on the value made that echo an instruction.
    *
    * Deliberately a seed rather than the value itself: every keystroke already
    * goes out through `onQueryChange`, and having the parent own the text and
@@ -16,6 +20,7 @@ interface HeaderProps {
    * settles, and re-imposing it before then would delete what is being typed.
    */
   initialQuery?: string;
+  seed?: number;
   /**
    * Every keystroke, so the board can narrow locally while a word is still
    * being typed. Optional: the box works exactly as before without it, and
@@ -32,37 +37,36 @@ const Header: React.FC<HeaderProps> = ({
   onQueryChange,
   onClear,
   initialQuery = '',
+  seed = 0,
   searching = false,
 }) => {
   const [value, setValue] = useState(initialQuery);
-  const adopted = useRef(initialQuery);
+  const adopted = useRef(seed);
 
   useEffect(() => {
-    if (adopted.current === initialQuery) return;
-    adopted.current = initialQuery;
-    // The URL stores the query trimmed, so what comes back is an echo of the
-    // box rather than a new instruction whenever the two differ only by
-    // whitespace. Replacing the value there would delete the space a visitor
-    // just typed between two words and jump the caret to the end.
+    if (adopted.current === seed) return;
+    adopted.current = seed;
+    // The URL stores the query trimmed, so an instruction that differs from
+    // the box only by whitespace is the box's own word coming back. Replacing
+    // the value there would delete the space a visitor just typed between two
+    // words and jump the caret to the end.
     setValue((current) => (current.trim() === initialQuery ? current : initialQuery));
-  }, [initialQuery]);
+    // `initialQuery` is read here but deliberately not a dependency: only a
+    // new `seed` is an instruction, and the word always arrives with one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    // Adopting what we are about to publish keeps the effect above from
-    // reading the URL's echo of this word as a new link to restore.
-    adopted.current = e.target.value;
     setValue(e.target.value);
     onQueryChange?.(e.target.value);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    adopted.current = value.trim();
     onSearch(value.trim());
   };
 
   const handleClear = () => {
-    adopted.current = '';
     setValue('');
     onClear?.();
   };

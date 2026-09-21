@@ -50,6 +50,12 @@ export interface Search {
   search: (query: string, requireName?: string) => void;
   /** Typing: a debounced local filter, which never costs a request. */
   preview: (query: string) => void;
+  /**
+   * Drop a debounced preview that has not fired. Tapping a card answers the
+   * board as it stands; a word settling afterwards would publish itself beside
+   * that card and leave a link whose query cannot find it.
+   */
+  cancelPreview: () => void;
   clear: () => void;
 }
 
@@ -211,6 +217,8 @@ export function useSearch(board: ProduceItem[]): Search {
     }, PREVIEW_DEBOUNCE_MS);
   }, []);
 
+  const cancelPreview = useCallback(() => clearTimeout(previewTimer.current), []);
+
   const clear = useCallback(() => {
     clearTimeout(previewTimer.current);
     ticket.current++;
@@ -251,5 +259,5 @@ export function useSearch(board: ProduceItem[]): Search {
     return phase.kind === 'local' ? { kind: 'local', items: local } : phase;
   }, [phase, local, required]);
 
-  return { query, status, outcome: phase, search, preview, clear };
+  return { query, status, outcome: phase, search, preview, cancelPreview, clear };
 }

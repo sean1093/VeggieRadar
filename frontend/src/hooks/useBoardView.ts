@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { track } from '../lib/analytics';
 import { closeDrawerUrl, pushUrlState, replaceUrlState, useUrlState, type SortMode } from '../lib/urlState';
 import { byValueFirst } from '../lib/utils/value-sort';
@@ -29,7 +29,7 @@ export interface BoardView {
   select: (item: ProduceItem) => void;
   close: () => void;
   /** A new query: put it in the URL and widen the board back to 全部. */
-  applyQuery: (query: string, options?: { release?: boolean }) => void;
+  applyQuery: (query: string) => void;
   /** The query the URL asks for; the search hook is what runs it. */
   linkedQuery: string;
   /** A link named an item today's board does not carry. */
@@ -117,14 +117,7 @@ export function useBoardView(
     track('filter_changed', { filter: value });
   }, []);
 
-  // Which card the visitor opened by tapping it. `selectedItem` cannot answer
-  // that from inside `applyQuery`: the preview resets the search phase first,
-  // so by the time the settled word arrives the card is already unresolvable.
-  const tapped = useRef<string | null>(null);
-  const select = useCallback((item: ProduceItem) => {
-    tapped.current = item.name;
-    pushUrlState({ item: item.name });
-  }, []);
+  const select = useCallback((item: ProduceItem) => pushUrlState({ item: item.name }), []);
   const close = useCallback(() => closeDrawerUrl(), []);
 
   const found = useMemo(() => {
@@ -157,7 +150,7 @@ export function useBoardView(
   // Widening the board back to 全部 for a new query is a reset, not a choice,
   // so it is deliberately not reported as filter_changed.
   const applyQuery = useCallback(
-    (query: string, { release = false }: { release?: boolean } = {}) => {
+    (query: string) => {
       setMissedItem(null);
       // An item nothing can show goes with it. That is the stranded link:
       // `#/i/枇杷?q=秋葵` after a busy backend, with no drawer, no notice and
@@ -176,18 +169,15 @@ export function useBoardView(
       // A query that has not actually moved strands nothing: typing a stray
       // character over a linked drawer and deleting it again settles back on
       // the same word, and this runs on that settled word.
-      // `release` marks the visitor's own move — ✕ or a submitted word. Those
-      // put the board back and the drawer's card is not part of it. The typing
-      // preview publishes incidentally, 300 ms after the fact, and must not
-      // close a card tapped in between.
+      // A query that has not moved strands nothing: submitting the link's own
+      // word is another try at it. A query that *has* moved leaves any card
+      // the board cannot produce unreachable, so it goes rather than becoming
+      // `#/i/枇杷?q=高` — a link whose query can never find its own card.
       //
-      // A query that has not moved strands nothing either way: typing a stray
-      // character over a linked drawer and deleting it settles back on the
-      // same word, and submitting that word is another try at the link.
+      // Nothing here has to special-case a card the visitor just tapped: that
+      // cancels the pending word before it can reach this (`App`).
       const unchanged = query.trim() === url.query;
-      const survives =
-        url.item !== null
-        && (unchanged || (!release && (tapped.current === url.item || board.some((it) => it.name === url.item))));
+      const survives = url.item !== null && (unchanged || board.some((it) => it.name === url.item));
       replaceUrlState({ query: query.trim(), filter: 'all', ...(survives ? {} : { item: null }) });
     },
     [url.item, url.query, board],

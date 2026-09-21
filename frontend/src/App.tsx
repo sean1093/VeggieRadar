@@ -35,7 +35,7 @@ function missSuggestion(query: string, status: SearchStatus): string {
 function App() {
   const { status, freshness, reload } = useBoard();
   const board = boardItems(status);
-  const { query, status: searchStatus, outcome, search: runQuery, preview, clear } = useSearch(board);
+  const { query, status: searchStatus, outcome, search: runQuery, preview, cancelPreview, clear } = useSearch(board);
   const watchlist = useWatchlist();
   // Read straight off the URL rather than from `view`, which does not exist
   // yet and which this feeds. A query in the URL that the search has not
@@ -110,7 +110,25 @@ function App() {
   // in — never from the box's own word coming back through the mirror. Keying
   // the box on `view.linkedQuery` instead let a stale echo rewind a character
   // that landed between the debounce firing and React flushing it.
-  const [urlWord, setUrlWord] = useState(url.query);
+  const [box, setBox] = useState({ word: url.query, seed: 0 });
+  // Put a word in the box and mean it. Bumping the counter is what makes the
+  // header take it, so the same word can be re-imposed — which is exactly what
+  // a card tapped mid-word needs.
+  const showInBox = useCallback((word: string) => setBox((b) => ({ word, seed: b.seed + 1 })), []);
+
+  // Tapping a card answers the board as it stands. A word still in the 300 ms
+  // debounce would settle afterwards, publish itself beside the card's item
+  // and leave `#/i/枇杷?q=高` — a link whose query can never find its own
+  // card. So the pending word is dropped and the box is put back to the query
+  // that is actually on screen.
+  const openCard = useCallback(
+    (item: ProduceItem) => {
+      cancelPreview();
+      showInBox(urlQuery);
+      view.select(item);
+    },
+    [cancelPreview, showInBox, urlQuery, view],
+  );
   useEffect(() => {
     if (!board.length) return;
     if (adoptedQuery.current === view.linkedQuery) return;
@@ -123,7 +141,7 @@ function App() {
     // the visitor typed, so the URL and the caption follow the box instead of
     // the two disagreeing for the rest of the session.
     if (firstAdoption && touched.current) return;
-    setUrlWord(view.linkedQuery);
+    showInBox(view.linkedQuery);
     // The URL's item is passed as the name the answer has to contain: a link
     // to a crop off the board must not be settled by a local substring match
     // on some other crop that happens to be on it (`useSearch`).
@@ -131,7 +149,7 @@ function App() {
       adopting.current = true;
       runLinkedQuery(view.linkedQuery);
     }
-  }, [board.length, view.linkedQuery, query, runLinkedQuery]);
+  }, [board.length, view.linkedQuery, query, runLinkedQuery, showInBox]);
 
   // …and the settled word goes back the other way. `query` only moves once the
   // typing debounce has settled, so this publishes one word rather than one
@@ -151,12 +169,9 @@ function App() {
     }
     if (adopting.current) return; // mid-adoption: `query` is the value being replaced
     adoptedQuery.current = query;
-    // The box's word is now what the URL says, so it is also what the box
-    // should be restored to on a later navigation back to it. Leaving this
-    // behind let `urlWord` go stale: returning to a query the box had already
-    // abandoned changed nothing, and the box kept the abandoned word while the
-    // caption and the list followed the URL.
-    setUrlWord(query);
+    // Recorded, not imposed: the box already holds this word. It matters for
+    // what a later navigation restores, and for what a tapped card puts back.
+    setBox((b) => ({ ...b, word: query }));
     applyQuery(query);
   }, [query, view.linkedQuery, applyQuery]);
 
@@ -171,10 +186,11 @@ function App() {
           widens the board back to 全部, writes the query to the URL and asks
           the backend. */}
       <Header
-        onSearch={(q) => { adopting.current = false; touched.current = true; view.applyQuery(q, { release: true }); runLinkedQuery(q); }}
+        onSearch={(q) => { adopting.current = false; touched.current = true; view.applyQuery(q); runLinkedQuery(q); }}
         onQueryChange={(q) => { adopting.current = false; touched.current = true; preview(q); }}
-        onClear={() => { adopting.current = false; touched.current = true; view.applyQuery('', { release: true }); clear(); }}
-        initialQuery={urlWord}
+        onClear={() => { adopting.current = false; touched.current = true; view.applyQuery(''); clear(); }}
+        initialQuery={box.word}
+        seed={box.seed}
         searching={searching}
       />
 
@@ -229,13 +245,13 @@ function App() {
                 so a query submitted during the first paint can be answered
                 before the board itself arrives. */}
             {status.kind === 'loading' && view.visibleItems.length === 0 && (
-              <ProduceList items={[]} loading onCardClick={view.select} />
+              <ProduceList items={[]} loading onCardClick={openCard} />
             )}
 
             {view.visibleItems.length > 0 && (
               <ProduceList
                 items={view.visibleItems}
-                onCardClick={view.select}
+                onCardClick={openCard}
                 isWatched={watchlist.isWatched}
                 onToggleWatch={toggleWatch}
               />

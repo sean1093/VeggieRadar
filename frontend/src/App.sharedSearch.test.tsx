@@ -515,6 +515,33 @@ describe('App — a shared live-search result', () => {
     await waitFor(() => expect(box).toHaveValue('\u8525'));
   });
 
+  it('never leaves a link whose query cannot find its own card', async () => {
+    // Tapping a card inside the debounce used to publish the newer word beside
+    // the card's item: `#/i/枇杷?q=高`, which on reload spends a request for
+    // 高, strips the item and prints the sentence this work removes.
+    searchProduce.mockResolvedValue(found());
+    at('#/?q=\u6787\u6777');
+    render(<App />);
+    const row = await screen.findByText('\u6787\u6777');
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      fireEvent.change(screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/), { target: { value: '\u9ad8' } });
+      fireEvent.click(row);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const settled = parseUrlState(window.location.hash);
+    expect(settled.item).toBe('\u6787\u6777');
+    expect(settled.query).toBe('\u6787\u6777');
+    // …and the box says what the board is showing, not the word it dropped.
+    expect(screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/)).toHaveValue('\u6787\u6777');
+  });
+
   it('carries the query in the share link for a crop found by search', async () => {
     searchProduce.mockResolvedValue(found());
     const writeText = vi.fn().mockResolvedValue(undefined);
