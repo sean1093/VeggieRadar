@@ -171,7 +171,7 @@ function handleDiag(full, props) {
     // Whether the mirror is being republished by the crawl or left to the
     // fallback cron: an expired PAT would 401 on every refresh and nothing
     // else here would say so. Outcome and time only, never the token.
-    mirror_dispatch: parseDispatch(props[GH_DISPATCH_PROP]),
+    mirror_dispatch: parseDispatch(props[GH_DISPATCH_PROP], props[GH_DISPATCH_OK_PROP]),
     // Alert state, so a silent mailbox can be told apart from a silent
     // pipeline. The recipient address is deliberately not exposed — diag is a
     // public endpoint.
@@ -196,12 +196,18 @@ function handleDiag(full, props) {
  * `GH_DISPATCH_PROP` is stored as `<ISO timestamp> <outcome>`; null until the
  * first attempt, which is also what a deployment with no token shows forever.
  */
-function parseDispatch(value) {
+function parseDispatch(value, lastOk) {
   if (!value) return null;
   var space = value.indexOf(' ');
-  return space === -1
-    ? { at: value, outcome: 'unknown' }
-    : { at: value.substring(0, space), outcome: value.substring(space + 1) };
+  return {
+    at: space === -1 ? value : value.substring(0, space),
+    outcome: space === -1 ? 'unknown' : value.substring(space + 1),
+    // When the mirror was last actually asked to publish. The outcome above
+    // cannot answer that on its own: under a crawl every few minutes it reads
+    // `throttled` almost always, which says the newest board is not the
+    // published one but not how old the published one is.
+    last_ok: lastOk || null
+  };
 }
 
 /**

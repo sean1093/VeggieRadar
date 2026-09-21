@@ -251,9 +251,16 @@ function refreshBoardCache() {
 function requestMirrorDeploy() {
   var props;
   var token;
+  var lastOk;
+  var lastAttempt;
   try {
     props = PropertiesService.getScriptProperties();
     token = props.getProperty(GH_DISPATCH_TOKEN_PROP);
+    // Read here, with the token, so every properties read in this function is
+    // inside this guard: a transient outage must return from here, not throw
+    // into `refreshBoardCache` and cost the crawl its own bookkeeping.
+    lastOk = props.getProperty(GH_DISPATCH_OK_PROP);
+    lastAttempt = props.getProperty(GH_DISPATCH_PROP);
   } catch (err) {
     Logger.log('requestMirrorDeploy: properties unavailable: ' + err);
     return 'unavailable';
@@ -268,9 +275,15 @@ function requestMirrorDeploy() {
   // previous board until the next crawl. That board is at most one window
   // older, which is the trade — and it is recorded, because it is the one
   // state in which the newest board is not the one on the mirror.
-  if (withinWindow(props.getProperty(GH_DISPATCH_OK_PROP), GH_DISPATCH_MIN_INTERVAL_MS)) {
+  if (withinWindow(lastOk, GH_DISPATCH_MIN_INTERVAL_MS)) {
     return recordDispatch(props, 'throttled');
   }
+  // A failed attempt is retried by the next crawl, not by the next visitor:
+  // see `GH_DISPATCH_FAIL_BACKOFF_MS`. Deliberately not recorded — the record
+  // still holds the failure this is backing off from, which is the more useful
+  // thing for `diag` to be showing, and re-stamping it here would extend the
+  // backoff for as long as something kept crawling.
+  if (withinWindow(dispatchFailedAt(lastAttempt), GH_DISPATCH_FAIL_BACKOFF_MS)) return 'backoff';
   try {
     var response = UrlFetchApp.fetch(GH_DISPATCH_URL, {
       method: 'post',
@@ -308,15 +321,31 @@ function requestMirrorDeploy() {
 function recordDispatch(props, outcome) {
   try {
     var now = new Date().toISOString();
-    props.setProperty(GH_DISPATCH_PROP, now + ' ' + outcome);
-    // Only the accepted one arms the floor. A rejection costs no deploy, so
-    // holding the next crawl's attempt over it would only block the retry
-    // that recovers from a transient GitHub error.
+    // The floor's clock first. Both may be new keys and a rejected board has
+    // just written its chunks into the same store, so whichever write comes
+    // second is the one that is lost — and losing this one would let every
+    // later crawl spend another Pages deploy, while losing the record below
+    // only costs `diag` a line. Only an accepted dispatch arms it: a rejection
+    // cost no deploy, and holding the next crawl over it would block the
+    // retry that recovers from a transient GitHub error.
     if (outcome === 'dispatched') props.setProperty(GH_DISPATCH_OK_PROP, now);
+    props.setProperty(GH_DISPATCH_PROP, now + ' ' + outcome);
   } catch (err) {
     Logger.log('recordDispatch failed: ' + err);
   }
   return outcome;
+}
+
+/**
+ * When the last attempt failed AT GitHub — a rejection or a thrown request —
+ * or '' for anything else, a throttle included. Only those two are worth
+ * backing off from; the rest cost GitHub nothing.
+ */
+function dispatchFailedAt(record) {
+  var space = (record || '').indexOf(' ');
+  if (space === -1) return '';
+  var outcome = record.substring(space + 1);
+  return outcome === 'failed' || outcome.indexOf('rejected') === 0 ? record.substring(0, space) : '';
 }
 
 /** Parses a stored board JSON string, or null when it is absent or corrupt. */

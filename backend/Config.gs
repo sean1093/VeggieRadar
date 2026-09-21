@@ -167,6 +167,11 @@ var GH_DISPATCH_OK_PROP = 'veggie_mirror_dispatch_ok';
 // mirrored until the next one, and its board differs from the mirrored one by
 // less than the window.
 var GH_DISPATCH_MIN_INTERVAL_MS = 30 * 60 * 1000;
+// The other half of that floor. A rejection costs no deploy, so the next crawl
+// must be free to retry it — but an expired PAT beside a public `?action=warm`
+// would otherwise POST a doomed request every few minutes for as long as
+// anyone kept crawling, and get the token secondary-rate-limited for it.
+var GH_DISPATCH_FAIL_BACKOFF_MS = 5 * 60 * 1000;
 
 // Plausibility guard (`Validate.gs`). The refresh used to reject exactly one
 // thing — an EMPTY board — so a throttled crawl or a MOA unit change would

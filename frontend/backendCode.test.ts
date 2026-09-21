@@ -152,7 +152,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'REFRESH_INTERVAL_HOURS', 'installDailyTrigger', 'refreshBoardCache',
     'doGet', 'isAdmin', 'alertRecipient', 'redactFailure', 'ADMIN_TOKEN_PROP', 'ALERT_EMAIL_PROP',
     'requestMirrorDeploy', 'GH_DISPATCH_TOKEN_PROP', 'GH_DISPATCH_EVENT', 'GH_DISPATCH_URL',
-    'GH_DISPATCH_MIN_INTERVAL_MS', 'GH_DISPATCH_PROP', 'GH_DISPATCH_OK_PROP',
+    'GH_DISPATCH_MIN_INTERVAL_MS', 'GH_DISPATCH_FAIL_BACKOFF_MS', 'GH_DISPATCH_PROP', 'GH_DISPATCH_OK_PROP',
     'validateBoard', 'markSuspects', 'readChunkedProp',
     'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
     'normalizeQuery', 'searchTerms', 'catalogRoots', 'withinOneEdit', 'CROP_CATALOG', 'SEARCH_ALIASES',
@@ -1525,16 +1525,55 @@ describe('mirror deploy dispatch', () => {
   });
 
   it('lets the next crawl retry after a rejection, which cost no deploy', () => {
-    // The floor exists to bound Pages deploys. A 401 or a 500 produced none,
-    // so holding the next crawl's attempt over it would only block the retry
-    // that recovers from a transient failure.
-    const { api, rejectDispatch, dispatches } = withToken();
+    // The 30-minute floor exists to bound Pages deploys. A 401 or a 500
+    // produced none, so holding the next crawl over it would only block the
+    // retry that recovers from a transient failure — a much shorter backoff
+    // does that job instead.
+    const { api, rejectDispatch, dispatches, props } = withToken();
     rejectDispatch(500);
+    api.refreshBoardCache();
+    expect(dispatches).toHaveLength(1);
+
+    props.set('veggie_mirror_dispatch',
+      new Date(Date.now() - api.GH_DISPATCH_FAIL_BACKOFF_MS - 1000).toISOString() + ' rejected 500');
+    api.refreshBoardCache();
+
+    expect(dispatches).toHaveLength(2); // retried well inside the 30-minute floor
+    expect(api.handleDiag().mirror_dispatch).toMatchObject({ outcome: 'rejected 500' });
+  });
+
+  it('does not hammer GitHub with a doomed request between crawls', () => {
+    // An expired PAT beside a public `?action=warm` would otherwise POST every
+    // few minutes for as long as anyone kept crawling, and get the token
+    // secondary-rate-limited for it.
+    const { api, rejectDispatch, dispatches } = withToken();
+    rejectDispatch(401);
+    api.refreshBoardCache();
     api.refreshBoardCache();
     api.refreshBoardCache();
 
-    expect(dispatches).toHaveLength(2);
-    expect(api.handleDiag().mirror_dispatch).toMatchObject({ outcome: 'rejected 500' });
+    expect(dispatches).toHaveLength(1);
+    expect(api.requestMirrorDeploy()).toBe('backoff');
+    // The backoff is not what diag shows: the rejection it is backing off from
+    // is the useful thing, and re-stamping it here would extend the window for
+    // as long as something kept crawling.
+    expect(api.handleDiag().mirror_dispatch).toMatchObject({ outcome: 'rejected 401' });
+  });
+
+  it('says when the mirror was last actually asked to publish', () => {
+    // Under a crawl every few minutes the outcome reads `throttled` almost
+    // always. That says the newest board is not the published one; it cannot
+    // say how old the published one is.
+    const { api } = withToken();
+    api.refreshBoardCache();
+    const dispatched = api.handleDiag().mirror_dispatch;
+    expect(dispatched.outcome).toBe('dispatched');
+    expect(dispatched.last_ok).toBe(dispatched.at);
+
+    api.refreshBoardCache(); // inside the floor
+    const throttled = api.handleDiag().mirror_dispatch;
+    expect(throttled.outcome).toBe('throttled');
+    expect(throttled.last_ok).toBe(dispatched.at);
   });
 
   it('shows nothing at all in diag until something has been attempted', () => {

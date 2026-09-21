@@ -430,9 +430,10 @@ scoped to this repository with `contents: write` (§8). **Unset, the backend
 skips the POST entirely** and the 2-hourly schedule is all there is — the state
 this section described before the dispatch existed. A failure to dispatch is
 logged and swallowed, never thrown: it must not cost a crawl that succeeded.
-Every attempt is recorded as `diag.mirror_dispatch` (`{ at, outcome }`), so an
-expired PAT reads as `rejected 401` where an operator looks rather than only in
-a log — otherwise mirror freshness would revert to the cron with nothing saying
+Every attempt is recorded as `diag.mirror_dispatch`
+(`{ at, outcome, last_ok }` — `last_ok` being when the mirror was last actually
+asked to publish, which the outcome alone cannot say), so an expired PAT reads
+as `rejected 401` where an operator looks rather than only in a log — otherwise mirror freshness would revert to the cron with nothing saying
 so. The dispatch also keeps a 30-minute floor: `?action=warm` is public and
 releases its lock when the crawl ends, so a visitor can drive crawls every few
 minutes, and a crawl costs the backend while a deploy costs a minute of CI
@@ -440,7 +441,8 @@ against Pages' ten-an-hour soft limit. A crawl inside that window is dropped
 rather than deferred — the mirror keeps the previous board until the next
 crawl, and that board is at most one window older. Only an accepted dispatch
 arms the floor, since only that one cost a deploy; a rejection is retried by
-the next crawl.
+the next crawl, behind a 5-minute backoff of its own so an expired PAT cannot
+POST a doomed request every few minutes for as long as anyone keeps crawling.
 For a board of wholesale *closing* prices, published once a day after market
 close, the remaining lag is invisible.
 
@@ -675,7 +677,8 @@ GET {WEB_APP_URL}/exec?action=diag[&token=…]
      "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null,
      "last_validation": { "at": "2026-09-02T16:05:08.087Z", "ok": true, "reasons": [], "suspects": [] },
      "history": { "items": 97, "min_days": 1, "max_days": 24 },
-     "mirror_dispatch": { "at": "2026-09-21T16:04:11.201Z", "outcome": "dispatched" },
+     "mirror_dispatch": { "at": "2026-09-21T16:04:11.201Z", "outcome": "dispatched",
+                          "last_ok": "2026-09-21T16:04:11.201Z" },
      "alert": { "failure_streak": 0, "incident_open": false, "last_attempt": null, "recipient_configured": true,
                 "last_send_failure": null } }
 
