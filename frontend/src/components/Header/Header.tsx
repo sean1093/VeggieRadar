@@ -39,7 +39,11 @@ const Header: React.FC<HeaderProps> = ({
   useEffect(() => {
     if (adopted.current === initialQuery) return;
     adopted.current = initialQuery;
-    setValue(initialQuery);
+    // The URL stores the query trimmed, so what comes back is an echo of the
+    // box rather than a new instruction whenever the two differ only by
+    // whitespace. Replacing the value there would delete the space a visitor
+    // just typed between two words and jump the caret to the end.
+    setValue((current) => (current.trim() === initialQuery ? current : initialQuery));
   }, [initialQuery]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {

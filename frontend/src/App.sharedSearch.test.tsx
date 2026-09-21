@@ -104,10 +104,10 @@ describe('App — a shared live-search result', () => {
     // A transient failure is not an answer. Treating it as one strips the item
     // from the URL and says the crop has no trading data — the same lie, on
     // the one branch where the backend never claimed anything.
-    searchProduce.mockResolvedValue({ error: '服務忙磌中，請稍後再試', query: '枇杷', transient: true });
+    searchProduce.mockResolvedValue({ error: '服務忙碌中，請稍後再試', query: '枇杷', transient: true });
     at('#/i/枇杷?q=枇杷');
     render(<App />);
-    await screen.findByText(/服務忙磌中/);
+    await screen.findByText(/服務忙碌中/);
 
     expect(screen.queryByText(/今日無交易資料/)).not.toBeInTheDocument();
     expect(parseUrlState(window.location.hash).item).toBe('枇杷');
@@ -151,6 +151,36 @@ describe('App — a shared live-search result', () => {
     // The board's own near-match is still what the list behind the drawer
     // shows; the link's card is what the drawer shows.
     expect(screen.getByTestId('produce-list')).toHaveTextContent('花椰');
+  });
+
+  it('hands the board back when the backend has nothing to add', async () => {
+    // The required name suspends the board's precedence while the backend is
+    // looking. If the answer is 查無此品項 it must hand it straight back:
+    // 白花椰菜 plainly matches `?q=花椰`, and hiding it behind an empty
+    // 查無此品項 screen would be worse than not opening a drawer.
+    searchProduce.mockResolvedValue({ type: 'search', query: '花椰', date: '2026-08-26', count: 0, items: [] });
+    at('#/i/花椰?q=花椰');
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByTestId('produce-list')).toHaveTextContent('白花椰菜'));
+    expect(screen.queryByText(/查無此品項/)).not.toBeInTheDocument();
+  });
+
+  it('keeps asking for the linked card when the busy backend is retried', async () => {
+    // The retry used to drop the required name. With a crop the board cannot
+    // near-match there is nothing to fall back to, so the failure showed as
+    // the drawer never opening however many times the visitor retried.
+    searchProduce.mockResolvedValueOnce({ error: '服務忙碌中，請稍後再試', query: '枇杷', transient: true });
+    at('#/i/枇杷?q=枇杷');
+    render(<App />);
+    const retry = await screen.findByRole('button', { name: /重試|重新/ });
+
+    searchProduce.mockResolvedValue(found());
+    fireEvent.click(retry);
+
+    const drawer = await screen.findByTestId('detail-drawer');
+    expect(within(drawer).getByText('枇杷')).toBeInTheDocument();
+    expect(searchProduce).toHaveBeenLastCalledWith('枇杷');
   });
 
   it('carries the query in the share link for a crop found by search', async () => {

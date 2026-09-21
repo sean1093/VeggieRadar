@@ -212,7 +212,16 @@ export function useSearch(board: ProduceItem[]): Search {
   // discard the very card that was asked for, and leave the shared link
   // permanently unopenable — after spending the backend request that found it.
   const status = useMemo<SearchStatus>(() => {
-    const boardAnswers = local.length > 0 && (required === null || local.some((it) => it.name === required));
+    // The board's precedence is only *suspended*, never revoked: a required
+    // name it does not carry steps aside while the backend is still looking,
+    // and again once the backend has actually produced that card. Any other
+    // answer — 查無此品項, 服務忙磌中 — hands it straight back, because
+    // hiding rows the visitor can see prices for is worse than not opening a
+    // drawer, and 查無此品項 over a board that plainly matches is a lie.
+    const unmet = required !== null && !local.some((it) => it.name === required);
+    const looking = phase.kind === 'idle' || phase.kind === 'searching';
+    const delivered = phase.kind === 'remote' && phase.items.some((it) => it.name === required);
+    const boardAnswers = local.length > 0 && !(unmet && (looking || delivered));
     return boardAnswers || phase.kind === 'local' ? { kind: 'local', items: local } : phase;
   }, [phase, local, required]);
 

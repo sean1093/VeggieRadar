@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import Header from './components/Header/Header';
 import BoardCaption from './components/BoardCaption/BoardCaption';
 import ProduceList from './components/ProduceGrid/ProduceList';
@@ -52,6 +52,14 @@ function App() {
     urlQuery !== ''
     && (searchStatus.kind === 'idle' || searchStatus.kind === 'searching' || searchStatus.kind === 'transient');
   const view = useBoardView(itemsFor(searchStatus, board), watchlist, board, searchPending);
+  // Every run of a query the URL owns carries the card the URL is asking for:
+  // the first adoption, and equally the retry after a busy backend. Dropping
+  // it on the retry let the board's substring match settle the query and the
+  // linked card vanish — the failure mode, one button later.
+  const runLinkedQuery = useCallback(
+    (q: string) => runQuery(q, urlItem ?? undefined),
+    [runQuery, urlItem],
+  );
   const searching = searchStatus.kind === 'searching';
   const toggleWatch = (item: ProduceItem) => watchlist.toggle(item.official_name);
 
@@ -76,8 +84,8 @@ function App() {
     // The URL's item is passed as the name the answer has to contain: a link
     // to a crop off the board must not be settled by a local substring match
     // on some other crop that happens to be on it (`useSearch`).
-    if (view.linkedQuery !== query) runQuery(view.linkedQuery, view.selectedItem?.name ?? urlItem ?? undefined);
-  }, [board.length, view.linkedQuery, query, runQuery, view.selectedItem, urlItem]);
+    if (view.linkedQuery !== query) runLinkedQuery(view.linkedQuery);
+  }, [board.length, view.linkedQuery, query, runLinkedQuery]);
 
   // …and the settled word goes back the other way. `query` only moves once the
   // typing debounce has settled, so this publishes one word rather than one
@@ -165,7 +173,7 @@ function App() {
             )}
 
             {searchStatus.kind === 'transient' && (
-              <ErrorMessage error={searchStatus.message} query={query} onRetry={() => runQuery(query)} />
+              <ErrorMessage error={searchStatus.message} query={query} onRetry={() => runLinkedQuery(query)} />
             )}
 
             {status.kind !== 'loading' &&
