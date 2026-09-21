@@ -135,7 +135,12 @@ function write(patch: Partial<UrlState>, mode: 'push' | 'replace'): void {
   // The pushed entry is marked so `closeDrawerUrl` can tell it apart from a
   // deep link that arrived on its own entry.
   if (mode === 'push') history.pushState({ drawer: true }, '', url);
-  else history.replaceState(null, '', url);
+  // `history.state`, not null: a replace changes what the entry *points at*,
+  // never which entry it is. Passing null wiped the `{ drawer: true }` marker
+  // — reachable when a settling word rewrites the URL over an open drawer —
+  // and `closeDrawerUrl` then rewrote the entry in place instead of going
+  // back, so ✕ left the drawer's entry in the history for the back key.
+  else history.replaceState(history.state, '', url);
   for (const onChange of listeners) onChange();
 }
 
