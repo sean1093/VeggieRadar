@@ -34,6 +34,11 @@ export interface BoardView {
   linkedQuery: string;
   /** A link named an item today's board does not carry. */
   notice: string | null;
+  /**
+   * The open item came back from live search rather than off the board, so a
+   * share link for it has to carry the query that found it (`itemUrl`).
+   */
+  selectedFromSearch: boolean;
 }
 
 const SORT_KEY = 'veggieradar_sort_v1';
@@ -53,6 +58,14 @@ export function useBoardView(
   baseItems: ProduceItem[],
   watchlist: WatchlistFilter,
   board: ProduceItem[],
+  /**
+   * The URL asks for a query and the search for it has not answered yet. Only
+   * the caller can know: this hook sees the query the URL carries, not the
+   * hook that runs it. It matters for one link shape — `#/i/<name>?q=<name>`,
+   * what a shared live-search result looks like — where judging the item
+   * missing before the answer arrives dismisses the drawer the link was for.
+   */
+  searchPending = false,
 ): BoardView {
   const url = useUrlState();
   // Board order. 'category' is the curated definition order; 'value' puts the
@@ -118,6 +131,14 @@ export function useBoardView(
     return baseItems.find(named) ?? board.find(named) ?? null;
   }, [url.item, baseItems, board]);
 
+  // On the board or not: what decides whether a share link needs the query.
+  // Read off `board` rather than off a flag, because that is the same list the
+  // recipient will look in.
+  const selectedFromSearch = useMemo(
+    () => selectedItem !== null && !board.some((it) => it.name === selectedItem.name),
+    [selectedItem, board],
+  );
+
   // A link to a crop that is out of season today must not look like a broken
   // app: name it in one line and put the URL back on the board. Nothing is
   // decided while there are no items to look in, so a shared drawer opens the
@@ -127,7 +148,14 @@ export function useBoardView(
   // it. Adjusted here rather than in the effect below: React converges on it
   // in the same commit, while a setState inside the effect would render the
   // board once without it first.
-  const missing = url.item !== null && selectedItem === null && baseItems.length + board.length > 0;
+  //
+  // `searchPending` is the other half of that: a shared live-search result
+  // arrives as `#/i/<name>?q=<name>`, and the named crop is in nobody's board
+  // by definition. Deciding before the query has answered dismisses the drawer
+  // the link exists for and tells the recipient there is no trading data for a
+  // price the sender was looking at seconds earlier.
+  const missing =
+    url.item !== null && selectedItem === null && !searchPending && baseItems.length + board.length > 0;
   if (missing && missedItem !== url.item) setMissedItem(url.item);
   // Any drawer that does open answers the notice: the shopper has moved on,
   // whether he tapped a row or followed another link.
@@ -165,6 +193,7 @@ export function useBoardView(
     select,
     close,
     applyQuery,
+    selectedFromSearch,
     linkedQuery: url.query,
     notice: missedItem === null ? null : `「${missedItem}」今日無交易資料`,
   };

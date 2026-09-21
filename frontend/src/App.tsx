@@ -9,6 +9,7 @@ import ErrorMessage from './components/ErrorMessage/ErrorMessage';
 import { boardItems, useBoard } from './hooks/useBoard';
 import { itemsFor, useSearch, type SearchStatus } from './hooks/useSearch';
 import { useBoardView } from './hooks/useBoardView';
+import { useUrlState } from './lib/urlState';
 import { useWatchlist } from './hooks/useWatchlist';
 import type { ProduceItem } from './types/produce';
 import './App.css';
@@ -36,7 +37,14 @@ function App() {
   const board = boardItems(status);
   const { query, status: searchStatus, search: runQuery, preview, clear } = useSearch(board);
   const watchlist = useWatchlist();
-  const view = useBoardView(itemsFor(searchStatus, board), watchlist, board);
+  // Read straight off the URL rather than from `view`, which does not exist
+  // yet and which this feeds. A query in the URL that the search has not
+  // answered means the board view must not yet call a linked item missing:
+  // `#/i/<name>?q=<name>` is what a shared live-search result looks like, and
+  // the crop it names is on nobody's board by definition.
+  const urlQuery = useUrlState().query;
+  const searchPending = urlQuery !== '' && (searchStatus.kind === 'idle' || searchStatus.kind === 'searching');
+  const view = useBoardView(itemsFor(searchStatus, board), watchlist, board, searchPending);
   const searching = searchStatus.kind === 'searching';
   const toggleWatch = (item: ProduceItem) => watchlist.toggle(item.official_name);
 
@@ -92,6 +100,7 @@ function App() {
         onSearch={(q) => { view.applyQuery(q); runQuery(q); }}
         onQueryChange={preview}
         onClear={() => { view.applyQuery(''); clear(); }}
+        initialQuery={view.linkedQuery}
         searching={searching}
       />
 
@@ -170,6 +179,7 @@ function App() {
           allProduceItems={board}
           watched={watchlist.isWatched(view.selectedItem.official_name)}
           onToggleWatch={toggleWatch}
+          shareQuery={view.selectedFromSearch ? query : ''}
         />
       )}
     </div>

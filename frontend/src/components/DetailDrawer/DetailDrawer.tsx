@@ -32,6 +32,13 @@ interface DetailDrawerProps {
   allProduceItems: ProduceItem[];
   watched?: boolean;
   onToggleWatch?: (item: ProduceItem) => void;
+  /**
+   * The query to carry in the share link, or '' for an item on the board.
+   * Only the caller knows which this is: a card that came back from live
+   * search is on nobody's board, so the query that found it is the only thing
+   * that can reopen it for the recipient (`itemUrl`).
+   */
+  shareQuery?: string;
 }
 
 /**
@@ -57,7 +64,7 @@ function shareText(item: ProduceItem): string {
   return `今日菜價｜${item.name} ${price}${change}`;
 }
 
-const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allProduceItems, watched = false, onToggleWatch }) => {
+const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allProduceItems, watched = false, onToggleWatch, shareQuery = '' }) => {
   // The crop whose trend the drawer shows, or null while closed. The trend is
   // stored together with the key it answers, so a new item or a reopen reads
   // as "loading" until its own answer lands — nothing to reset in the effect,
@@ -101,7 +108,7 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
   // have no sheet, get the link on the clipboard. Only the completed path is
   // reported: a dismissed sheet is neither a share nor an error.
   const share = async () => {
-    const url = itemUrl(item.name);
+    const url = itemUrl(item.name, shareQuery);
     if (navigator.share) {
       try {
         await navigator.share({ title: `今日菜價｜${item.name}`, text: shareText(item), url });

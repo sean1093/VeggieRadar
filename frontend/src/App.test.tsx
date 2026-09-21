@@ -178,6 +178,37 @@ describe('App — deep links', () => {
     const list = screen.getByTestId('produce-list');
     expect(within(list).getByText('蔥')).toBeInTheDocument();
     expect(within(list).queryByText('高麗菜')).not.toBeInTheDocument();
+    // …and the box says what the board is showing. Without this the visitor
+    // gets a filtered board with no visible query and no ✕ to clear it (#63).
+    expect(screen.getByPlaceholderText(/搜尋蔬果/)).toHaveValue('蔥');
+  });
+
+  it('clears a linked search from the box, the board and the URL together', async () => {
+    at('#/?q=蔥');
+    render(<App />);
+    await screen.findByText('搜尋「蔥」');
+
+    fireEvent.click(screen.getByRole('button', { name: '清除搜尋' }));
+
+    await waitFor(() => expect(screen.getByTestId('produce-list')).toHaveTextContent('高麗菜'));
+    expect(screen.getByPlaceholderText(/搜尋蔬果/)).toHaveValue('');
+    expect(parseUrlState(window.location.hash).query).toBe('');
+  });
+
+  it('does not overwrite a word being typed over a linked query', async () => {
+    // The box adopts each distinct URL query once. Keyed on it *changing*,
+    // because mid-word the box and the URL differ by design — the URL only
+    // catches up when the typing debounce settles.
+    at('#/?q=蔥');
+    render(<App />);
+    await screen.findByText('搜尋「蔥」');
+
+    const box = screen.getByPlaceholderText(/搜尋蔬果/);
+    fireEvent.change(box, { target: { value: '番茄' } });
+    await waitFor(() => expect(box).toHaveValue('番茄'));
+    // Give the debounce and the URL round trip room to undo it, if they would.
+    await new Promise((settle) => setTimeout(settle, 500));
+    expect(box).toHaveValue('番茄');
   });
 
   it('narrows the board as you type, and publishes the settled word', async () => {

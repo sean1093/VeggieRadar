@@ -1,7 +1,20 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 interface HeaderProps {
   onSearch: (query: string) => void;
+  /**
+   * The query the URL is asking for. Seeds the box and is adopted again
+   * whenever it changes to something the box is not already showing — a
+   * shared `?q=` link, a reload, the back key.
+   *
+   * Deliberately not a controlled `value`: every keystroke already goes out
+   * through `onQueryChange`, and sending it back down would cost a render per
+   * character for a value the box already has. Adoption is keyed on this prop
+   * *changing*, never on it merely differing, because a difference is the
+   * normal state mid-word — the URL only catches up once the typing debounce
+   * settles, and re-imposing it before then would delete what is being typed.
+   */
+  initialQuery?: string;
   /**
    * Every keystroke, so the board can narrow locally while a word is still
    * being typed. Optional: the box works exactly as before without it, and
@@ -13,20 +26,38 @@ interface HeaderProps {
   searching?: boolean;
 }
 
-const Header: React.FC<HeaderProps> = ({ onSearch, onQueryChange, onClear, searching = false }) => {
-  const [value, setValue] = useState('');
+const Header: React.FC<HeaderProps> = ({
+  onSearch,
+  onQueryChange,
+  onClear,
+  initialQuery = '',
+  searching = false,
+}) => {
+  const [value, setValue] = useState(initialQuery);
+  const adopted = useRef(initialQuery);
+
+  useEffect(() => {
+    if (adopted.current === initialQuery) return;
+    adopted.current = initialQuery;
+    setValue(initialQuery);
+  }, [initialQuery]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    // Adopting what we are about to publish keeps the effect above from
+    // reading the URL's echo of this word as a new link to restore.
+    adopted.current = e.target.value;
     setValue(e.target.value);
     onQueryChange?.(e.target.value);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    adopted.current = value.trim();
     onSearch(value.trim());
   };
 
   const handleClear = () => {
+    adopted.current = '';
     setValue('');
     onClear?.();
   };
