@@ -50,6 +50,12 @@ export interface Search {
   search: (query: string, requireName?: string) => void;
   /** Typing: a debounced local filter, which never costs a request. */
   preview: (query: string) => void;
+  /**
+   * Drop a debounced preview that has not fired. Tapping a card is an answer
+   * to the board as it stands, and a word settling 300 ms later would narrow
+   * it out from under the drawer that tap opened.
+   */
+  cancelPreview: () => void;
   clear: () => void;
 }
 
@@ -112,6 +118,12 @@ export function itemsFor(status: SearchStatus, board: ProduceItem[]): ProduceIte
 /** Owns the query and its outcome; the board is what it matches against. */
 export function useSearch(board: ProduceItem[]): Search {
   const [query, setQuery] = useState('');
+  // The current query, readable from the debounce callback, which is created
+  // once and would otherwise close over the value at mount.
+  const queryRef = useRef('');
+  useEffect(() => {
+    queryRef.current = query;
+  }, [query]);
   const [phase, setPhase] = useState<Phase>(IDLE);
   // One ticket per search. A slower earlier query must not overwrite a newer
   // one, and `clear()` voids whatever is still in flight.
@@ -192,12 +204,20 @@ export function useSearch(board: ProduceItem[]): Search {
   const preview = useCallback((raw: string) => {
     clearTimeout(previewTimer.current);
     previewTimer.current = setTimeout(() => {
+      const word = raw.trim();
+      // A net-zero edit — a character typed and deleted again — is not a new
+      // query. Voiding the ticket for it cancelled an in-flight linked search
+      // that nothing would then re-issue, and the answer landed on a ticket
+      // no one was holding.
+      if (word === queryRef.current) return;
       ticket.current++; // whatever is in flight answers a query the box no longer holds
-      setQuery(raw.trim());
+      setQuery(word);
       setRequired(null); // a typed word asks for a query, never for one card
       setPhase(IDLE);
     }, PREVIEW_DEBOUNCE_MS);
   }, []);
+
+  const cancelPreview = useCallback(() => clearTimeout(previewTimer.current), []);
 
   const clear = useCallback(() => {
     clearTimeout(previewTimer.current);
@@ -238,5 +258,5 @@ export function useSearch(board: ProduceItem[]): Search {
     return phase.kind === 'local' ? { kind: 'local', items: local } : phase;
   }, [phase, local, required]);
 
-  return { query, status, outcome: phase, search, preview, clear };
+  return { query, status, outcome: phase, search, preview, cancelPreview, clear };
 }

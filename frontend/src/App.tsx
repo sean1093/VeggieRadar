@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Header from './components/Header/Header';
 import BoardCaption from './components/BoardCaption/BoardCaption';
 import ProduceList from './components/ProduceGrid/ProduceList';
@@ -35,7 +35,7 @@ function missSuggestion(query: string, status: SearchStatus): string {
 function App() {
   const { status, freshness, reload } = useBoard();
   const board = boardItems(status);
-  const { query, status: searchStatus, outcome, search: runQuery, preview, clear } = useSearch(board);
+  const { query, status: searchStatus, outcome, search: runQuery, preview, cancelPreview, clear } = useSearch(board);
   const watchlist = useWatchlist();
   // Read straight off the URL rather than from `view`, which does not exist
   // yet and which this feeds. A query in the URL that the search has not
@@ -80,6 +80,16 @@ function App() {
     [runQuery, urlItem, urlQuery, board],
   );
   const searching = searchStatus.kind === 'searching';
+  // Tapping a card answers the board as it stands. A word still in the
+  // debounce would settle 300 ms later, narrow the board under the drawer that
+  // tap just opened, and — for a card off the board — close it.
+  const openCard = useCallback(
+    (item: ProduceItem) => {
+      cancelPreview();
+      view.select(item);
+    },
+    [cancelPreview, view],
+  );
   const toggleWatch = (item: ProduceItem) => watchlist.toggle(item.official_name);
 
   // The URL's query runs itself — on a shared `?q=` and on back/forward alike —
@@ -104,6 +114,12 @@ function App() {
   // change of the URL — the back key, a hash typed in, another link — is a
   // navigation they asked for and is adopted normally.
   const touched = useRef(false);
+  // The word the *URL* is asking the box to show. Updated only where an
+  // external navigation is detected below — a link, the back key, a hash typed
+  // in — never from the box's own word coming back through the mirror. Keying
+  // the box on `view.linkedQuery` instead let a stale echo rewind a character
+  // that landed between the debounce firing and React flushing it.
+  const [urlWord, setUrlWord] = useState(url.query);
   useEffect(() => {
     if (!board.length) return;
     if (adoptedQuery.current === view.linkedQuery) return;
@@ -116,6 +132,7 @@ function App() {
     // the visitor typed, so the URL and the caption follow the box instead of
     // the two disagreeing for the rest of the session.
     if (firstAdoption && touched.current) return;
+    setUrlWord(view.linkedQuery);
     // The URL's item is passed as the name the answer has to contain: a link
     // to a crop off the board must not be settled by a local substring match
     // on some other crop that happens to be on it (`useSearch`).
@@ -160,7 +177,7 @@ function App() {
         onSearch={(q) => { adopting.current = false; touched.current = true; view.applyQuery(q); runLinkedQuery(q); }}
         onQueryChange={(q) => { adopting.current = false; touched.current = true; preview(q); }}
         onClear={() => { adopting.current = false; touched.current = true; view.applyQuery(''); clear(); }}
-        initialQuery={view.linkedQuery}
+        initialQuery={urlWord}
         searching={searching}
       />
 
@@ -202,13 +219,13 @@ function App() {
                 so a query submitted during the first paint can be answered
                 before the board itself arrives. */}
             {status.kind === 'loading' && view.visibleItems.length === 0 && (
-              <ProduceList items={[]} loading onCardClick={view.select} />
+              <ProduceList items={[]} loading onCardClick={openCard} />
             )}
 
             {view.visibleItems.length > 0 && (
               <ProduceList
                 items={view.visibleItems}
-                onCardClick={view.select}
+                onCardClick={openCard}
                 isWatched={watchlist.isWatched}
                 onToggleWatch={toggleWatch}
               />

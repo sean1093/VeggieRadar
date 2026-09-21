@@ -392,6 +392,58 @@ describe('App — a shared live-search result', () => {
     expect(searchProduce).not.toHaveBeenCalled();
   });
 
+  it('survives a character typed and deleted while the link is in flight', async () => {
+    // A net-zero edit is not a new query. Voiding the ticket for it cancelled
+    // the linked search with nothing to re-issue it, so the crop was declared
+    // missing, the item stripped and the real answer discarded.
+    let answer: (r: ApiResponse) => void = () => {};
+    searchProduce.mockReturnValue(new Promise<ApiResponse>((settle) => { answer = settle; }));
+    at('#/i/\u6787\u6777?q=\u6787\u6777');
+    render(<App />);
+    await waitFor(() => expect(searchProduce).toHaveBeenCalled());
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const box = screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/);
+      fireEvent.change(box, { target: { value: '\u6787\u6777x' } });
+      fireEvent.change(box, { target: { value: '\u6787\u6777' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    await act(async () => {
+      answer(found());
+    });
+    expect(await screen.findByTestId('detail-drawer')).toBeInTheDocument();
+    expect(parseUrlState(window.location.hash).item).toBe('\u6787\u6777');
+  });
+
+  it('does not let a pending keystroke close a card just tapped', async () => {
+    // `applyQuery` drops a card the board does not carry, and it runs from the
+    // 300 ms preview. A word typed just before the tap would settle after it.
+    searchProduce.mockResolvedValue(found());
+    at('#/?q=\u6787\u6777');
+    render(<App />);
+    const row = await screen.findByText('\u6787\u6777');
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      fireEvent.change(screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/), { target: { value: '\u9ad8' } });
+      fireEvent.click(row);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(screen.getByTestId('detail-drawer')).toBeInTheDocument();
+    expect(parseUrlState(window.location.hash).item).toBe('\u6787\u6777');
+  });
+
   it('carries the query in the share link for a crop found by search', async () => {
     searchProduce.mockResolvedValue(found());
     const writeText = vi.fn().mockResolvedValue(undefined);
