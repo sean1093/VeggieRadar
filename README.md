@@ -433,8 +433,8 @@ logged and swallowed, never thrown: it must not cost a crawl that succeeded.
 Every attempt is recorded as `diag.mirror_dispatch`
 (`{ at, outcome, last_ok }` — `last_ok` being when the mirror was last actually
 asked to publish, which the outcome alone cannot say), so an expired PAT reads
-as `rejected 401` where an operator looks rather than only in a log — otherwise mirror freshness would revert to the cron with nothing saying
-so. The dispatch also keeps a 30-minute floor: `?action=warm` is public and
+as `rejected 401` where an operator looks rather than only in a log — otherwise
+mirror freshness would revert to the cron with nothing saying so. The dispatch also keeps a 30-minute floor: `?action=warm` is public and
 releases its lock when the crawl ends, so a visitor can drive crawls every few
 minutes, and a crawl costs the backend while a deploy costs a minute of CI
 against Pages' ten-an-hour soft limit. A crawl inside that window is dropped

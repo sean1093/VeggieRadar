@@ -1560,6 +1560,23 @@ describe('mirror deploy dispatch', () => {
     expect(api.handleDiag().mirror_dispatch).toMatchObject({ outcome: 'rejected 401' });
   });
 
+  it('keeps the floor armed when the store can no longer take the record', () => {
+    // Both keys can be new, and a rejected board has just written its chunks
+    // into the same store. Losing the floor would let every later crawl spend
+    // another Pages deploy; losing the record costs diag a line.
+    const { api, dispatches, breakProp, props } = withToken();
+    breakProp('veggie_mirror_dispatch');
+
+    api.refreshBoardCache();
+    api.refreshBoardCache();
+
+    expect(dispatches).toHaveLength(1); // the floor was armed and held
+    expect(props.has('veggie_mirror_dispatch_ok')).toBe(true);
+    // …and diag says the mirror is deploying, not that nothing was ever tried.
+    expect(api.handleDiag().mirror_dispatch).toMatchObject({ outcome: 'unknown' });
+    expect(api.handleDiag().mirror_dispatch.last_ok).not.toBeNull();
+  });
+
   it('says when the mirror was last actually asked to publish', () => {
     // Under a crawl every few minutes the outcome reads `throttled` almost
     // always. That says the newest board is not the published one; it cannot

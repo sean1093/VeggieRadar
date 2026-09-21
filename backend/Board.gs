@@ -319,16 +319,25 @@ function requestMirrorDeploy() {
  * throws: the property store is not worth a crawl.
  */
 function recordDispatch(props, outcome) {
+  var now = new Date().toISOString();
+  // The floor's clock first, and guarded separately. Both may be new keys and
+  // a rejected board has just written its chunks into the same store, so
+  // either write can fail on a full one — under a shared guard the first
+  // failure would take the second write with it. Losing the floor lets every
+  // later crawl spend another Pages deploy; losing the record costs `diag` a
+  // line, which `parseDispatch` reads as "attempted, outcome unknown".
+  //
+  // Only an accepted dispatch arms the floor: a rejection cost no deploy, and
+  // holding the next crawl over it would block the retry that recovers from a
+  // transient GitHub error.
+  if (outcome === 'dispatched') {
+    try {
+      props.setProperty(GH_DISPATCH_OK_PROP, now);
+    } catch (err) {
+      Logger.log('recordDispatch floor failed: ' + err);
+    }
+  }
   try {
-    var now = new Date().toISOString();
-    // The floor's clock first. Both may be new keys and a rejected board has
-    // just written its chunks into the same store, so whichever write comes
-    // second is the one that is lost — and losing this one would let every
-    // later crawl spend another Pages deploy, while losing the record below
-    // only costs `diag` a line. Only an accepted dispatch arms it: a rejection
-    // cost no deploy, and holding the next crawl over it would block the
-    // retry that recovers from a transient GitHub error.
-    if (outcome === 'dispatched') props.setProperty(GH_DISPATCH_OK_PROP, now);
     props.setProperty(GH_DISPATCH_PROP, now + ' ' + outcome);
   } catch (err) {
     Logger.log('recordDispatch failed: ' + err);

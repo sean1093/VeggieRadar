@@ -197,7 +197,10 @@ function handleDiag(full, props) {
  * first attempt, which is also what a deployment with no token shows forever.
  */
 function parseDispatch(value, lastOk) {
-  if (!value) return null;
+  // A missing record beside a present `last_ok` is the partial write the two
+  // keys allow — the floor's clock is written first, deliberately. Reporting
+  // null there would say "never attempted" about a mirror that is deploying.
+  if (!value) return lastOk ? { at: null, outcome: 'unknown', last_ok: lastOk } : null;
   var space = value.indexOf(' ');
   return {
     at: space === -1 ? value : value.substring(0, space),
