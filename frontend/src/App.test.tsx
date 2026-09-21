@@ -218,11 +218,27 @@ describe('App — deep links', () => {
     await screen.findByText('搜尋「蔥」');
 
     const box = screen.getByPlaceholderText(/搜尋蔬果/);
-    fireEvent.change(box, { target: { value: '番茄' } });
-    await waitFor(() => expect(box).toHaveValue('番茄'));
-    // Give the debounce and the URL round trip room to undo it, if they would.
-    await new Promise((settle) => setTimeout(settle, 500));
+    await waitFor(() => expect(box).toHaveValue('蔥')); // the adoption has had the box
+    await typeWord(box, '番茄');
     expect(box).toHaveValue('番茄');
+
+    // Give the debounce and the URL round trip room to undo it, if they would
+    // — on a clock this test controls. Waiting out 500 ms of real time raced
+    // the debounce against a loaded runner, and this failed roughly one run in
+    // eight, here and on CI, always by reverting the box to the link's word.
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(box).toHaveValue('番茄');
+    // …and the word the visitor typed is the one that reached the URL. Back on
+    // the real clock, because the publish rides a state update rather than a
+    // timer: the debounce that starts it has already fired above.
+    await waitFor(() => expect(parseUrlState(window.location.hash).query).toBe('番茄'));
   });
 
   it('narrows the board as you type, and publishes the settled word', async () => {
