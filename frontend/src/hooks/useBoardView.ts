@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { track } from '../lib/analytics';
 import { closeDrawerUrl, pushUrlState, replaceUrlState, useUrlState, type SortMode } from '../lib/urlState';
 import { byValueFirst } from '../lib/utils/value-sort';
+import { trustedBaseline } from '../lib/utils/baseline';
 import type { ProduceItem } from '../types/produce';
 
 export interface FilterOption {
@@ -229,8 +230,11 @@ export function useBoardView(
     return items;
   }, [baseItems, activeFilter, isWatched, sortMode]);
 
+  // Whether 划算優先 is worth offering, by the same rule the ordering itself
+  // uses: a board whose every item is flagged `suspect` would otherwise offer
+  // a sort that cannot move anything.
   const hasBaselines = useMemo(
-    () => baseItems.some((it) => Number.isFinite(it.vs_baseline_percent)),
+    () => baseItems.some((it) => trustedBaseline(it) !== null),
     [baseItems],
   );
 

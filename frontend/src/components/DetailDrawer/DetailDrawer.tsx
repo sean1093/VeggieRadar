@@ -10,6 +10,7 @@ import type { ProduceItem } from '../../types/produce';
 import { fetchProduceTrend } from '../../services/api';
 import { itemUrl } from '../../lib/urlState';
 import { marketPrice } from '../../lib/utils/market-price';
+import { trustedBaseline } from '../../lib/utils/baseline';
 import { track } from '../../lib/analytics';
 
 // recharts is ~half the initial JS and serves exactly one element inside this
@@ -96,7 +97,8 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
   // Which of the drawer's sections this item can show — the signal for
   // whether the variety breakdown and the baseline (§5) are being seen at all.
   const hasVarieties = (item.varieties?.length ?? 0) > 0;
-  const hasBaseline = !suspect && item.vs_baseline_percent != null;
+  const vsBaseline = trustedBaseline(item);
+  const hasBaseline = vsBaseline !== null;
   const hasRetail = marketPrice(item) != null;
 
   useEffect(() => {
@@ -330,13 +332,13 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
           <div>
             <p className="mb-2 text-xs text-stone">近 7 日價格趨勢（元/公斤）</p>
             {chartArea}
-            {!suspect && item.baseline_price != null && item.vs_baseline_percent != null && (
+            {vsBaseline !== null && item.baseline_price != null && (
               <p className="mt-2 text-xs text-stone">
                 近一個月批發中位約 {item.baseline_price} 元/台斤，今日批發
-                {item.vs_baseline_percent < 0
-                  ? `低 ${Math.round(Math.abs(item.vs_baseline_percent))}%`
-                  : item.vs_baseline_percent > 0
-                    ? `高 ${Math.round(item.vs_baseline_percent)}%`
+                {vsBaseline < 0
+                  ? `低 ${Math.round(Math.abs(vsBaseline))}%`
+                  : vsBaseline > 0
+                    ? `高 ${Math.round(vsBaseline)}%`
                     : '持平'}
                 ；卡片徽章與「划算優先」排序以此為準。
               </p>
