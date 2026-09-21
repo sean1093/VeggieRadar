@@ -94,12 +94,18 @@ beforeEach(() => {
 });
 
 /**
- * The search box, once the adoption has put the URL's word in it.
+ * The search box, holding `word`, with anything already scheduled for it
+ * flushed. Typing straight after the first paint races the adoption, which
+ * re-imposes the link's word one commit later and takes the keystroke with it
+ * — the test then fails on whatever that keystroke was for rather than on the
+ * race. The `await` is what closes that window; the value is asserted so a box
+ * that stops carrying the URL's word says so here rather than three
+ * assertions later.
  *
- * The adoption fills the box a commit after it reads the URL, so typing
- * straight after the first paint races it: the keystroke lands, the adoption
- * re-imposes the link's word over it, and the test fails on whatever that
- * keystroke was for instead of on the race.
+ * It cannot *wait for* the adoption: the box is seeded from `url.query` at
+ * first paint, so it already holds that word before anything is adopted. Each
+ * caller waits for a signal of its own first — the answer to the link's own
+ * query, which the adoption is what issues.
  */
 async function settledBox(word: string): Promise<HTMLElement> {
   const box = await screen.findByPlaceholderText(/搜尋蔬果/);
@@ -181,8 +187,10 @@ describe('App — a shared live-search result', () => {
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('今日無交易資料'));
 
     searchProduce.mockResolvedValue(found());
+    // The word is already in the box — the retry here is Enter on it, not a
+    // re-typing, and typing the value an input already holds fires no change
+    // event at all.
     const box = await settledBox('枇杷');
-    await typeWord(box, '枇杷');
     fireEvent.submit(box.closest('form') as HTMLFormElement);
 
     await waitFor(() => expect(screen.getByTestId('produce-list')).toHaveTextContent('枇杷'));
