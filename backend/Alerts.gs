@@ -202,9 +202,11 @@ function withinCooldown(props) {
  * The flag FIRST, the cooldown timestamp second. Both may be new keys, and a
  * properties store filled by a rejected board's chunks can throw on either;
  * whichever comes second is the one that is lost. `incident_open` is what the
- * external probe reads, so it is the one that must survive — losing the
- * cooldown instead costs mail, which the streak and the probe's own limiter
- * bound, and never hides the incident.
+ * external probe reads, so it is the one that must survive. Losing the
+ * cooldown instead costs mail — on the serving path, one attempt per visitor
+ * until the store frees up, which is worse than it sounds and still better
+ * than an incident nobody can see, since a mail nobody receives is exactly the
+ * silence this issue is about.
  */
 function openIncident(props) {
   props.setProperty(ALERT_ACTIVE_PROP, '1');

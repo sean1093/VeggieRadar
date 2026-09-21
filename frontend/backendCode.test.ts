@@ -1317,6 +1317,20 @@ describe('failure alerting', () => {
       expect(api.handleDiag().alert.last_send_failure).toBeNull();
     });
 
+    it('keeps the flag when the store can no longer take the timestamp', () => {
+      // A rejected board writes its chunks into the same properties store, so
+      // a full store is the state this whole issue is about. Whichever of
+      // `openIncident`'s two writes runs second is the one that is lost, and
+      // the flag is the one the external probe reads.
+      const { api, props, breakProp } = loadBackend();
+      breakProp('veggie_alert_sent_at');
+
+      for (let i = 0; i < api.ALERT_FAILURE_STREAK; i++) api.refreshBoardCache();
+
+      expect(props.get('veggie_alert_active')).toBe('1');
+      expect(api.handleDiag().alert.incident_open).toBe(true);
+    });
+
     it('leaves the send path untouched when a recipient is configured', () => {
       const { api, props, mails } = loadBackend();
       for (let i = 0; i < api.ALERT_FAILURE_STREAK; i++) api.refreshBoardCache();
