@@ -119,7 +119,12 @@ export function useBoardView(
   // so it is deliberately not reported as filter_changed.
   const applyQuery = useCallback((query: string) => {
     setMissedItem(null);
-    replaceUrlState({ query: query.trim(), filter: 'all' });
+    // The item goes too. A new query is a new board, and the drawer is not
+    // part of it — reachable only with the drawer closed, since it is a modal.
+    // Leaving it behind stranded an unresolved link: `#/i/枇杷?q=秋葵` with
+    // no drawer, no notice and nothing that would ever resolve it, handed out
+    // again by the next reload or address-bar share.
+    replaceUrlState({ query: query.trim(), filter: 'all', item: null });
   }, []);
 
   const select = useCallback((item: ProduceItem) => pushUrlState({ item: item.name }), []);

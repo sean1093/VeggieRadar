@@ -183,6 +183,50 @@ describe('App — a shared live-search result', () => {
     expect(searchProduce).toHaveBeenLastCalledWith('枇杷');
   });
 
+  it('offers the retry when a busy backend hides behind a matching board', async () => {
+    // `status` collapses a transient phase to a local hit whenever the board
+    // substring-matches, so reading the verdict off it made the busy branch
+    // dead: the item was stripped from the URL and the crop declared absent,
+    // with neither the busy notice nor a retry anywhere on screen.
+    searchProduce.mockResolvedValue({ error: '服務忙碌中，請稍後再試', query: '花椰', transient: true });
+    at('#/i/花椰?q=花椰');
+    render(<App />);
+    await waitFor(() => expect(searchProduce).toHaveBeenCalled());
+
+    expect(screen.queryByText(/今日無交易資料/)).not.toBeInTheDocument();
+    expect(parseUrlState(window.location.hash).item).toBe('花椰');
+  });
+
+  it('keeps the board narrowed while the backend is looking', async () => {
+    // Suspending the board's precedence during the wait swapped the two
+    // matching rows for all 94 and then snapped back.
+    let answer: (r: ApiResponse) => void = () => {};
+    searchProduce.mockReturnValue(new Promise<ApiResponse>((settle) => { answer = settle; }));
+    at('#/i/花椰?q=花椰');
+    render(<App />);
+    await waitFor(() => expect(searchProduce).toHaveBeenCalled());
+
+    const list = screen.getByTestId('produce-list');
+    expect(list).toHaveTextContent('白花椰菜');
+    expect(list).not.toHaveTextContent('高麗菜');
+    answer({ type: 'search', query: '花椰', date: '2026-08-26', count: 0, items: [] });
+  });
+
+  it('releases a link the visitor has moved on from', async () => {
+    // An unresolved item with a query that no longer belongs to it is a dead
+    // link the next reload or address-bar share would hand out again.
+    searchProduce.mockResolvedValue({ error: '服務忙碌中，請稍後再試', query: '枇杷', transient: true });
+    at('#/i/枇杷?q=枇杷');
+    render(<App />);
+    await screen.findByRole('button', { name: /重試|重新/ });
+
+    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '高麗菜' } });
+    fireEvent.submit(screen.getByPlaceholderText(/搜尋蔬果/).closest('form') as HTMLFormElement);
+
+    await waitFor(() => expect(parseUrlState(window.location.hash).item).toBeNull());
+    expect(screen.queryByText(/今日無交易資料/)).not.toBeInTheDocument();
+  });
+
   it('carries the query in the share link for a crop found by search', async () => {
     searchProduce.mockResolvedValue(found());
     const writeText = vi.fn().mockResolvedValue(undefined);

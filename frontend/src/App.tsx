@@ -35,7 +35,7 @@ function missSuggestion(query: string, status: SearchStatus): string {
 function App() {
   const { status, freshness, reload } = useBoard();
   const board = boardItems(status);
-  const { query, status: searchStatus, search: runQuery, preview, clear } = useSearch(board);
+  const { query, status: searchStatus, outcome, search: runQuery, preview, clear } = useSearch(board);
   const watchlist = useWatchlist();
   // Read straight off the URL rather than from `view`, which does not exist
   // yet and which this feeds. A query in the URL that the search has not
@@ -44,13 +44,21 @@ function App() {
   // the crop it names is on nobody's board by definition.
   const url = useUrlState();
   const { query: urlQuery, item: urlItem } = url;
-  // `transient` counts as pending on purpose: a busy backend never said the
-  // crop has no data, and treating its silence as an answer is the same lie
-  // the linked drawer exists to avoid. The visitor sees the busy notice the
-  // search itself raises, and a retry can still find the card.
+  // Whether the link's own question is still open. Read off `outcome`, the
+  // backend's raw verdict, rather than off `searchStatus`: a board that
+  // substring-matches the query masks a busy backend as a local hit, and that
+  // mask would read as an answer nobody gave.
+  //
+  //   - the hook has not taken the URL's query yet, or
+  //   - it is in flight, or
+  //   - the backend was busy, which is not an answer about this crop.
+  //
+  // An idle phase on the URL's own query is not pending: that is a typed word
+  // narrowing the board locally, and the backend will never be asked.
   const searchPending =
-    urlQuery !== ''
-    && (searchStatus.kind === 'idle' || searchStatus.kind === 'searching' || searchStatus.kind === 'transient');
+    urlItem !== null
+    && urlQuery !== ''
+    && (query !== urlQuery || outcome.kind === 'searching' || outcome.kind === 'transient');
   const view = useBoardView(itemsFor(searchStatus, board), watchlist, board, searchPending);
   // Every run of a query the URL owns carries the card the URL is asking for:
   // the first adoption, and equally the retry after a busy backend. Dropping

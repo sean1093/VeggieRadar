@@ -32,6 +32,14 @@ export interface Search {
   query: string;
   status: SearchStatus;
   /**
+   * What the *backend* said, before the board's precedence is applied to it.
+   * `status` is what to render; this is what actually happened, and a caller
+   * deciding whether a linked card has been answered for needs the difference
+   * — a busy backend behind a board that substring-matches the query collapses
+   * to `local` in `status`, and would otherwise read as an answer.
+   */
+  outcome: { kind: SearchStatus['kind'] };
+  /**
    * Enter: the board first, then the backend if the board has no answer.
    *
    * `requireName` is for a link rather than a keystroke — the display name the
@@ -212,18 +220,18 @@ export function useSearch(board: ProduceItem[]): Search {
   // discard the very card that was asked for, and leave the shared link
   // permanently unopenable — after spending the backend request that found it.
   const status = useMemo<SearchStatus>(() => {
-    // The board's precedence is only *suspended*, never revoked: a required
-    // name it does not carry steps aside while the backend is still looking,
-    // and again once the backend has actually produced that card. Any other
-    // answer — 查無此品項, 服務忙磌中 — hands it straight back, because
-    // hiding rows the visitor can see prices for is worse than not opening a
-    // drawer, and 查無此品項 over a board that plainly matches is a lie.
+    // The board's precedence is suspended for one moment only: the backend
+    // has produced the card a link asked for and the board does not carry
+    // it. While the backend is still looking the board keeps its narrowed
+    // rows — yielding there would swap two matching rows for all 94 and
+    // then snap back. Every other answer leaves the board in place, because
+    // hiding rows the visitor can read prices off is worse than not opening
+    // a drawer.
     const unmet = required !== null && !local.some((it) => it.name === required);
-    const looking = phase.kind === 'idle' || phase.kind === 'searching';
     const delivered = phase.kind === 'remote' && phase.items.some((it) => it.name === required);
-    const boardAnswers = local.length > 0 && !(unmet && (looking || delivered));
+    const boardAnswers = local.length > 0 && !(unmet && delivered);
     return boardAnswers || phase.kind === 'local' ? { kind: 'local', items: local } : phase;
   }, [phase, local, required]);
 
-  return { query, status, search, preview, clear };
+  return { query, status, outcome: phase, search, preview, clear };
 }
