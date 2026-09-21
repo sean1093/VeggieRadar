@@ -152,12 +152,20 @@ var ALERT_UNSENT_PROP = 'veggie_alert_unsent_reason';
 var GH_DISPATCH_TOKEN_PROP = 'GH_DISPATCH_TOKEN';
 var GH_DISPATCH_EVENT = 'board-crawled';
 var GH_DISPATCH_URL = 'https://api.github.com/repos/sean1093/VeggieRadar/dispatches';
-// The last attempt, as "<ISO> <outcome>": what `diag` reports, and the floor
-// below reads. A crawl is the backend's own cost and `?action=warm` is public,
-// but a Pages deploy is a minute of CI against a soft limit of ten an hour — so
-// the dispatch keeps a floor of its own, well under the 4 h refresh cycle it
-// exists to follow.
+// The last attempt, as "<ISO> <outcome>": what `diag` reports, including the
+// throttled ones, since those are the crawls the mirror does not carry.
 var GH_DISPATCH_PROP = 'veggie_mirror_dispatch';
+// The last ACCEPTED dispatch, which is the only kind that costs a Pages
+// deploy, and so the only kind that arms the floor below. Separate from the
+// record above on purpose: writing every attempt into the floor's own clock
+// would let a rejected attempt suppress the retry that recovers from it, and
+// a throttled one extend the floor for as long as something kept crawling.
+var GH_DISPATCH_OK_PROP = 'veggie_mirror_dispatch_ok';
+// `?action=warm` is public and releases its lock when the crawl ends, so a
+// visitor can drive crawls every few minutes; a Pages deploy is a minute of CI
+// against a soft limit of ten an hour. A crawl inside this window is not
+// mirrored until the next one, and its board differs from the mirrored one by
+// less than the window.
 var GH_DISPATCH_MIN_INTERVAL_MS = 30 * 60 * 1000;
 
 // Plausibility guard (`Validate.gs`). The refresh used to reject exactly one

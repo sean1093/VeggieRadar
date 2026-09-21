@@ -262,9 +262,15 @@ function requestMirrorDeploy() {
   // `?action=warm` is public, and the lock it takes is released when the crawl
   // ends rather than held for its TTL, so a visitor can drive crawls every few
   // minutes. A crawl costs the backend; a deploy costs a minute of CI against
-  // Pages' ten-an-hour soft limit. The floor is far below the 4 h refresh
-  // cycle, so it never delays the deploy a scheduled crawl asks for.
-  if (withinWindow(dispatchedAt(props), GH_DISPATCH_MIN_INTERVAL_MS)) return 'throttled';
+  // Pages' ten-an-hour soft limit.
+  //
+  // A throttled crawl is dropped, not deferred: the mirror then carries the
+  // previous board until the next crawl. That board is at most one window
+  // older, which is the trade — and it is recorded, because it is the one
+  // state in which the newest board is not the one on the mirror.
+  if (withinWindow(props.getProperty(GH_DISPATCH_OK_PROP), GH_DISPATCH_MIN_INTERVAL_MS)) {
+    return recordDispatch(props, 'throttled');
+  }
   try {
     var response = UrlFetchApp.fetch(GH_DISPATCH_URL, {
       method: 'post',
@@ -301,22 +307,16 @@ function requestMirrorDeploy() {
  */
 function recordDispatch(props, outcome) {
   try {
-    props.setProperty(GH_DISPATCH_PROP, new Date().toISOString() + ' ' + outcome);
+    var now = new Date().toISOString();
+    props.setProperty(GH_DISPATCH_PROP, now + ' ' + outcome);
+    // Only the accepted one arms the floor. A rejection costs no deploy, so
+    // holding the next crawl's attempt over it would only block the retry
+    // that recovers from a transient GitHub error.
+    if (outcome === 'dispatched') props.setProperty(GH_DISPATCH_OK_PROP, now);
   } catch (err) {
     Logger.log('recordDispatch failed: ' + err);
   }
   return outcome;
-}
-
-/** When the last dispatch was attempted, or '' when there has been none. */
-function dispatchedAt(props) {
-  try {
-    var value = props.getProperty(GH_DISPATCH_PROP) || '';
-    var space = value.indexOf(' ');
-    return space === -1 ? value : value.substring(0, space);
-  } catch (err) {
-    return '';
-  }
 }
 
 /** Parses a stored board JSON string, or null when it is absent or corrupt. */

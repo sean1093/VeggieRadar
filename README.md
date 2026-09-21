@@ -82,10 +82,10 @@ MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ CacheServic
                                                                       │
                                                             GET /exec │
                                                                       ▼
-Frontend (GitHub Pages) ◀── validate ◀── GitHub Actions (deploy-pages: when a
-  data/board.json, published inside the bundle's own artifact  crawl lands, on
-                                                     push, 2-hourly fallback)
-        │
+Frontend (GitHub Pages) ◀── validate ◀── GitHub Actions (deploy-pages)
+  data/board.json, published                 runs when a crawl lands (the
+  inside the bundle's own artifact           backend dispatches it), on
+        │                                    push, and 2-hourly as fallback
         ▼
 Browser: localStorage (paints first) ──▶ data/board.json ──▶ GAS /exec
                                          authoritative          only when the mirror
@@ -436,8 +436,11 @@ a log — otherwise mirror freshness would revert to the cron with nothing sayin
 so. The dispatch also keeps a 30-minute floor: `?action=warm` is public and
 releases its lock when the crawl ends, so a visitor can drive crawls every few
 minutes, and a crawl costs the backend while a deploy costs a minute of CI
-against Pages' ten-an-hour soft limit. The floor is far below the 4 h refresh
-cycle it follows.
+against Pages' ten-an-hour soft limit. A crawl inside that window is dropped
+rather than deferred — the mirror keeps the previous board until the next
+crawl, and that board is at most one window older. Only an accepted dispatch
+arms the floor, since only that one cost a deploy; a rejection is retried by
+the next crawl.
 For a board of wholesale *closing* prices, published once a day after market
 close, the remaining lag is invisible.
 
