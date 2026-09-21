@@ -91,6 +91,10 @@ function App() {
   // it as a word the visitor settled on, and publishes it over the very link
   // being adopted. Anything the visitor does cancels the adoption.
   const adopting = useRef(false);
+  // Set the moment the visitor touches the box. A cold board can land after
+  // they have started typing, and the URL's query must not then overwrite
+  // what they are in the middle of: they are here now, the link was before.
+  const touched = useRef(false);
   useEffect(() => {
     if (!board.length) return;
     if (adoptedQuery.current === view.linkedQuery) return;
@@ -99,6 +103,10 @@ function App() {
     // A first load carrying no `?q=` has nothing to restore, and running the
     // empty query here would discard a word typed while the board arrived.
     if (firstAdoption && !view.linkedQuery) return;
+    // Marked adopted above but not run: the mirror below then publishes what
+    // the visitor typed, so the URL and the caption follow the box instead of
+    // the two disagreeing for the rest of the session.
+    if (touched.current) return;
     // The URL's item is passed as the name the answer has to contain: a link
     // to a crop off the board must not be settled by a local substring match
     // on some other crop that happens to be on it (`useSearch`).
@@ -140,9 +148,9 @@ function App() {
           widens the board back to 全部, writes the query to the URL and asks
           the backend. */}
       <Header
-        onSearch={(q) => { adopting.current = false; view.applyQuery(q); runQuery(q); }}
-        onQueryChange={(q) => { adopting.current = false; preview(q); }}
-        onClear={() => { adopting.current = false; view.applyQuery(''); clear(); }}
+        onSearch={(q) => { adopting.current = false; touched.current = true; view.applyQuery(q); runQuery(q); }}
+        onQueryChange={(q) => { adopting.current = false; touched.current = true; preview(q); }}
+        onClear={() => { adopting.current = false; touched.current = true; view.applyQuery(''); clear(); }}
         initialQuery={view.linkedQuery}
         searching={searching}
       />

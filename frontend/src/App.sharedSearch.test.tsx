@@ -148,9 +148,12 @@ describe('App — a shared live-search result', () => {
     const drawer = await screen.findByTestId('detail-drawer');
     expect(within(drawer).getByText('花椰')).toBeInTheDocument();
     expect(searchProduce).toHaveBeenCalledWith('花椰');
-    // The board's own near-match is still what the list behind the drawer
-    // shows; the link's card is what the drawer shows.
-    expect(screen.getByTestId('produce-list')).toHaveTextContent('花椰');
+    // The delivered card joins the board's near-matches rather than replacing
+    // them. Asserting on 白花椰菜 is the point: 花椰 alone would be satisfied
+    // by the delivered row itself and could never fail.
+    const list = screen.getByTestId('produce-list');
+    expect(list).toHaveTextContent('白花椰菜');
+    expect(list).toHaveTextContent('花椰');
   });
 
   it('hands the board back when the backend has nothing to add', async () => {
@@ -283,6 +286,21 @@ describe('App — a shared live-search result', () => {
 
     await new Promise((settle) => setTimeout(settle, 300));
     expect(searchProduce).not.toHaveBeenCalled();
+  });
+
+  it('lets a word typed over a cold board beat the link it landed on', async () => {
+    // The board can land after the visitor has started typing. Running the
+    // URL's query then leaves the box saying one thing and the caption and URL
+    // another, for the rest of the session.
+    searchProduce.mockResolvedValue(found());
+    at('#/?q=蔥');
+    render(<App />);
+    const box = await screen.findByPlaceholderText(/搜尋蔬果/);
+    fireEvent.change(box, { target: { value: '番茄' } });
+
+    await waitFor(() => expect(parseUrlState(window.location.hash).query).toBe('番茄'));
+    expect(box).toHaveValue('番茄');
+    expect(screen.getByTestId('produce-list')).toHaveTextContent('番茄');
   });
 
   it('carries the query in the share link for a crop found by search', async () => {
