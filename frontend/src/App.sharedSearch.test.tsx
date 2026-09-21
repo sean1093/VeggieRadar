@@ -313,6 +313,44 @@ describe('App — a shared live-search result', () => {
     }
   });
 
+  it('still follows the URL after the visitor has used the box', async () => {
+    // The typed-word override is for one moment — a word in progress when a
+    // cold board lands. Latching it for the session killed the back key and
+    // every later link: the mirror just rewrote the URL back to the box.
+    searchProduce.mockResolvedValue(found());
+    render(<App />);
+    await screen.findByText('高麗菜');
+
+    const box = screen.getByPlaceholderText(/搜尋蔬果/);
+    fireEvent.change(box, { target: { value: '蔥' } });
+    fireEvent.submit(box.closest('form') as HTMLFormElement);
+    await waitFor(() => expect(parseUrlState(window.location.hash).query).toBe('蔥'));
+
+    at('#/?q=番茄');
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+
+    await waitFor(() => expect(screen.getByTestId('produce-list')).toHaveTextContent('番茄'));
+    expect(parseUrlState(window.location.hash).query).toBe('番茄');
+    expect(box).toHaveValue('番茄');
+  });
+
+  it('keeps the box out of reach while a linked drawer is open', async () => {
+    // Why the URL and the search can never argue while a drawer is showing:
+    // the drawer is a modal dialog, so the header is hidden from the
+    // accessibility tree and the page takes no pointer events. Typing over a
+    // linked card — which would reset the search phase and drop the link — is
+    // not a path a visitor has. If the drawer ever stops being modal, this is
+    // the test that should fail first.
+    searchProduce.mockResolvedValue(found());
+    at('#/i/\u6787\u6777?q=\u6787\u6777');
+    render(<App />);
+    await screen.findByTestId('detail-drawer');
+
+    const box = screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/);
+    expect(box.closest('[aria-hidden="true"], [data-aria-hidden="true"]')).not.toBeNull();
+    expect(document.body.style.pointerEvents).toBe('none');
+  });
+
   it('carries the query in the share link for a crop found by search', async () => {
     searchProduce.mockResolvedValue(found());
     const writeText = vi.fn().mockResolvedValue(undefined);

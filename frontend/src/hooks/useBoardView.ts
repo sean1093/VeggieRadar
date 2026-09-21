@@ -151,10 +151,14 @@ export function useBoardView(
       // and still stranded by the next query, which is how ✕ over one ended
       // up printing 「that crop has no trading data」 about the price it had
       // just been showing.
-      const survives = url.item !== null && board.some((it) => it.name === url.item);
+      // A query that has not actually moved strands nothing: typing a stray
+      // character over a linked drawer and deleting it again settles back on
+      // the same word, and this runs on that settled word.
+      const unchanged = query.trim() === url.query;
+      const survives = url.item !== null && (unchanged || board.some((it) => it.name === url.item));
       replaceUrlState({ query: query.trim(), filter: 'all', ...(survives ? {} : { item: null }) });
     },
-    [url.item, board],
+    [url.item, url.query, board],
   );
 
   // A link to a crop that is out of season today must not look like a broken

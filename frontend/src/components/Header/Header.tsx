@@ -7,9 +7,10 @@ interface HeaderProps {
    * whenever it changes to something the box is not already showing — a
    * shared `?q=` link, a reload, the back key.
    *
-   * Deliberately not a controlled `value`: every keystroke already goes out
-   * through `onQueryChange`, and sending it back down would cost a render per
-   * character for a value the box already has. Adoption is keyed on this prop
+   * Deliberately a seed rather than the value itself: every keystroke already
+   * goes out through `onQueryChange`, and having the parent own the text and
+   * send it back would cost a render per character for what the box already
+   * has. Adoption is keyed on this prop
    * *changing*, never on it merely differing, because a difference is the
    * normal state mid-word — the URL only catches up once the typing debounce
    * settles, and re-imposing it before then would delete what is being typed.

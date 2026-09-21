@@ -91,9 +91,11 @@ function App() {
   // it as a word the visitor settled on, and publishes it over the very link
   // being adopted. Anything the visitor does cancels the adoption.
   const adopting = useRef(false);
-  // Set the moment the visitor touches the box. A cold board can land after
-  // they have started typing, and the URL's query must not then overwrite
-  // what they are in the middle of: they are here now, the link was before.
+  // Set the moment the visitor touches the box. It only ever suppresses the
+  // *first* adoption: a cold board can land after they have started typing,
+  // and the URL's query must not overwrite a word in progress. Every later
+  // change of the URL — the back key, a hash typed in, another link — is a
+  // navigation they asked for and is adopted normally.
   const touched = useRef(false);
   useEffect(() => {
     if (!board.length) return;
@@ -106,7 +108,7 @@ function App() {
     // Marked adopted above but not run: the mirror below then publishes what
     // the visitor typed, so the URL and the caption follow the box instead of
     // the two disagreeing for the rest of the session.
-    if (touched.current) return;
+    if (firstAdoption && touched.current) return;
     // The URL's item is passed as the name the answer has to contain: a link
     // to a crop off the board must not be settled by a local substring match
     // on some other crop that happens to be on it (`useSearch`).
