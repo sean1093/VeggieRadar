@@ -103,9 +103,11 @@ beforeEach(() => {
  * assertions later.
  *
  * It cannot *wait for* the adoption: the box is seeded from `url.query` at
- * first paint, so it already holds that word before anything is adopted. Each
- * caller waits for a signal of its own first — the answer to the link's own
- * query, which the adoption is what issues.
+ * first paint, so it already holds that word before anything is adopted. Where
+ * a caller needs the adoption to have happened it waits for a signal of its
+ * own first — the answer to the link's own query, which the adoption is what
+ * issues. The rest reach here before any adoption is possible: the board is
+ * held, or the URL carries no query to adopt.
  */
 async function settledBox(word: string): Promise<HTMLElement> {
   const box = await screen.findByPlaceholderText(/搜尋蔬果/);
