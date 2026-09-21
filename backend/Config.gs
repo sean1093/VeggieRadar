@@ -132,6 +132,13 @@ var ALERT_SENT_PROP = 'veggie_alert_sent_at';
 
 var ALERT_ACTIVE_PROP = 'veggie_alert_active';
 
+// Why the last alert mail did not go out, as a `classifyMailError` CATEGORY —
+// never the raw text, which can quote the recipient address. Opening an
+// incident no longer depends on being able to send one (an unset ALERT_EMAIL
+// used to leave the backend knowing it was broken and telling nobody, `diag`
+// included), so this is what says the mailbox is silent on purpose.
+var ALERT_UNSENT_PROP = 'veggie_alert_unsent_reason';
+
 // Plausibility guard (`Validate.gs`). The refresh used to reject exactly one
 // thing — an EMPTY board — so a throttled crawl or a MOA unit change would
 // overwrite 94 good prices with 40 wrong ones, and `updateHistory` would bake

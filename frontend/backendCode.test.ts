@@ -1162,13 +1162,17 @@ describe('failure alerting', () => {
     expect(mails).toHaveLength(0);
   });
 
-  it('never lets a mail failure break the refresh', () => {
-    const { api, breakMail, logs } = loadBackend();
+  it('never lets a mail failure break the refresh, and still opens the incident', () => {
+    const { api, breakMail, props, logs } = loadBackend();
     breakMail();
     for (let i = 0; i < api.ALERT_FAILURE_STREAK; i++) {
       expect(() => api.refreshBoardCache()).not.toThrow();
     }
-    expect(logs.some((l) => l.includes('alert bookkeeping failed'))).toBe(true);
+    // The backend knows it is broken whether or not it could say so, and the
+    // category says which half failed (#65).
+    expect(props.get('veggie_alert_active')).toBe('1');
+    expect(props.get('veggie_alert_unsent_reason')).toBe('mail_quota_exhausted');
+    expect(logs.some((l) => l.includes('alert mail failure'))).toBe(true);
   });
 
   it('never lets a mail failure break board serving', () => {
@@ -1218,11 +1222,87 @@ describe('failure alerting', () => {
     });
   });
 
+  describe('an incident opens even when nobody can be told (#65)', () => {
+    // The external probe watches this project from outside by reading
+    // `diag.alert.incident_open`. While that depended on a mail going out, a
+    // deployment with no ALERT_EMAIL reported health for a pipeline that had
+    // already given up.
+
+    it('opens the incident and arms the cooldown with no recipient configured', () => {
+      const { api, props, mails } = loadBackend();
+      props.delete(api.ALERT_EMAIL_PROP);
+
+      for (let i = 0; i < api.ALERT_FAILURE_STREAK; i++) api.refreshBoardCache();
+
+      expect(mails).toHaveLength(0); // there is nowhere to send it
+      expect(props.get('veggie_alert_active')).toBe('1');
+      expect(api.handleDiag().alert).toMatchObject({
+        incident_open: true,
+        recipient_configured: false,
+        last_send_failure: 'no_recipient',
+      });
+    });
+
+    it('does not re-attempt a send for every later failure inside the cooldown', () => {
+      const { api, props, logs } = loadBackend();
+      props.delete(api.ALERT_EMAIL_PROP);
+      for (let i = 0; i < api.ALERT_FAILURE_STREAK + 4; i++) api.refreshBoardCache();
+
+      // One attempt, not one per failure: the cooldown arms on the incident,
+      // which is exactly what could not happen while the send threw.
+      expect(logs.filter((l) => l.includes('no alert recipient'))).toHaveLength(1);
+    });
+
+    it('opens it on the serving path too', () => {
+      const { api, props, mails } = loadBackend();
+      props.delete(api.ALERT_EMAIL_PROP);
+      api.storeBoard({
+        type: 'board', date: '2026-08-26', roc_date: '115.08.26', count: 1,
+        items: [{ code: 'C1', name: '高麗菜' }],
+        generated_at: new Date(Date.now() - api.ALERT_SILENCE_MS - 60_000).toISOString(),
+      });
+
+      expect(api.readBoard().items).toHaveLength(1); // prices still served
+      expect(props.get('veggie_alert_active')).toBe('1');
+      expect(mails).toHaveLength(0);
+
+      // And a second visitor does not re-take the decision.
+      api.readBoard();
+      expect(props.get('veggie_alert_unsent_reason')).toBe('no_recipient');
+    });
+
+    it('closes it again on recovery, since no retry can ever deliver', () => {
+      const { api, props } = loadBackend(plausibleRows());
+      props.delete(api.ALERT_EMAIL_PROP);
+      props.set('veggie_alert_active', '1');
+      props.set('veggie_alert_sent_at', new Date().toISOString());
+
+      api.refreshBoardCache();
+
+      // Holding it open to retry an all-clear that can never be sent would
+      // page the probe forever for a backend that recovered.
+      expect(props.has('veggie_alert_active')).toBe(false);
+      expect(api.handleDiag().alert.incident_open).toBe(false);
+    });
+
+    it('leaves the send path untouched when a recipient is configured', () => {
+      const { api, props, mails } = loadBackend();
+      for (let i = 0; i < api.ALERT_FAILURE_STREAK; i++) api.refreshBoardCache();
+
+      expect(mails).toHaveLength(1);
+      expect(mails[0].to).toBe('owner@example.com');
+      expect(props.get('veggie_alert_active')).toBe('1');
+      expect(props.has('veggie_alert_unsent_reason')).toBe(false);
+    });
+  });
+
   it('exposes alert state through diag without leaking the address', () => {
     const { api } = loadBackend();
     api.refreshBoardCache();
     const diag = api.handleDiag();
-    expect(diag.alert).toEqual({ failure_streak: 1, incident_open: false, last_sent: null, recipient_configured: true });
+    expect(diag.alert).toEqual({
+      failure_streak: 1, incident_open: false, last_sent: null, recipient_configured: true, last_send_failure: null,
+    });
     expect(JSON.stringify(diag)).not.toContain('owner@example.com');
   });
 

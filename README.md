@@ -463,13 +463,26 @@ observation.
 Alerting swallows every error by design: it sits on both the refresh and the
 serving path, and no mail-quota, properties or lock failure may take the board
 down with it. `diag` reports `alert.failure_streak` / `alert.incident_open` /
-`alert.last_sent` / `alert.recipient_configured` — never the address, since
-`diag` is public. The recipient is not in the source either: `alertRecipient()`
-reads the `ALERT_EMAIL` script property, and that property is **required** —
-there is deliberately no fallback to the deploying account's e-mail, because
-reading it needs the `userinfo.email` scope the manifest does not grant, and
-adding a scope forces re-consent before the Web App runs again. Unset, every
-mail fails as `no_recipient` and `diag` shows `recipient_configured: false`.
+`alert.last_sent` / `alert.recipient_configured` / `alert.last_send_failure` —
+never the address, since `diag` is public. The recipient is not in the source
+either: `alertRecipient()` reads the `ALERT_EMAIL` script property, and that
+property is **required** — there is deliberately no fallback to the deploying
+account's e-mail, because reading it needs the `userinfo.email` scope the
+manifest does not grant, and adding a scope forces re-consent before the Web
+App runs again. Unset, every mail fails as `no_recipient` and `diag` shows
+`recipient_configured: false`.
+
+Opening an incident does **not** depend on being able to send one.
+`sendAlertMail` returns a failure *category* rather than throwing, and both
+callers open the incident either way, so `incident_open` says what the backend
+knows about itself and `last_send_failure` says why the mailbox is silent. It
+used to throw: `openIncident` never ran, the cooldown never armed, and a
+deployment with no `ALERT_EMAIL` reported `incident_open: false` for a pipeline
+that had already given up — which the external probe reads as health (#65).
+Recovery is the mirror of that rule: a failed all-clear keeps the incident open
+so the next healthy refresh retries it, except for `no_recipient`, where no
+retry can ever deliver and holding it open would page the probe forever for a
+backend that recovered.
 `?action=alerttest` needs the operator token; its limiter stays
 as defence in depth and is a durable timestamp rather than a cache key, since
 cache eviction would otherwise re-open the endpoint.
@@ -626,7 +639,8 @@ GET {WEB_APP_URL}/exec?action=diag[&token=…]
      "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null,
      "last_validation": { "at": "2026-09-02T16:05:08.087Z", "ok": true, "reasons": [], "suspects": [] },
      "history": { "items": 97, "min_days": 1, "max_days": 24 },
-     "alert": { "failure_streak": 0, "incident_open": false, "last_sent": null, "recipient_configured": true } }
+     "alert": { "failure_streak": 0, "incident_open": false, "last_sent": null, "recipient_configured": true,
+                "last_send_failure": null } }
 
 GET {WEB_APP_URL}/exec?action=alerttest&token=…
 → { "type": "alerttest", "sent": true, "message": "已寄出測試信" }
@@ -986,9 +1000,11 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
      There is one token, with no expiry or scope: rotating it means changing
      both places.
    - `ALERT_EMAIL` — **required**: where failure alerts go. Unset, no alert
-     can be sent (`diag` shows `recipient_configured: false`, and
-     `?action=alerttest` answers `no_recipient`). See §2 for why there is no
-     fallback to the deploying account.
+     can be sent (`diag` shows `recipient_configured: false` and, once
+     something has failed, `last_send_failure: "no_recipient"`;
+     `?action=alerttest` answers `no_recipient`). The incident still opens, so
+     the external probe still sees it. See §2 for why there is no fallback to
+     the deploying account.
 3. Run `installDailyTrigger()` once in the editor — it installs the refresh
    trigger on `REFRESH_INTERVAL_HOURS` and warms the board so the first visitor
    never hits a cold crawl. Confirm with `?action=diag`: `triggers` must list

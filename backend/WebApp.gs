@@ -177,6 +177,10 @@ function handleDiag(full, props) {
       last_sent: props[ALERT_SENT_PROP] || null,
       // Whether a mail could go anywhere at all — the address itself stays out.
       recipient_configured: !!props[ALERT_EMAIL_PROP],
+      // Why the last alert mail did not go out, as a category. An incident now
+      // opens whether or not anyone could be told about it, so this is what
+      // says the mailbox is silent and roughly what to fix.
+      last_send_failure: props[ALERT_UNSENT_PROP] || null,
     },
   };
 }
