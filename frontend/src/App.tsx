@@ -64,9 +64,13 @@ function App() {
   // the first adoption, and equally the retry after a busy backend. Dropping
   // it on the retry let the board's substring match settle the query and the
   // linked card vanish — the failure mode, one button later.
+  // …but only for a card the board cannot produce on its own. Requiring a
+  // name the board already carries skips the local short-circuit and spends a
+  // backend request on a query the board answers offline — and if that request
+  // fails, takes the list down with it.
   const runLinkedQuery = useCallback(
-    (q: string) => runQuery(q, urlItem ?? undefined),
-    [runQuery, urlItem],
+    (q: string) => runQuery(q, urlItem !== null && !board.some((it) => it.name === urlItem) ? urlItem : undefined),
+    [runQuery, urlItem, board],
   );
   const searching = searchStatus.kind === 'searching';
   const toggleWatch = (item: ProduceItem) => watchlist.toggle(item.official_name);
@@ -81,6 +85,12 @@ function App() {
   // after a submit it re-applied the previous query while the box showed the
   // new one. Each distinct URL query is therefore adopted exactly once.
   const adoptedQuery = useRef<string | null>(null);
+  // Set while the hook has been asked for the URL's query and has not taken it
+  // yet. Both effects run in the same commit, so without this the mirror below
+  // sees the *pre-adoption* `query` — an empty string on a first load — reads
+  // it as a word the visitor settled on, and publishes it over the very link
+  // being adopted. Anything the visitor does cancels the adoption.
+  const adopting = useRef(false);
   useEffect(() => {
     if (!board.length) return;
     if (adoptedQuery.current === view.linkedQuery) return;
@@ -92,7 +102,10 @@ function App() {
     // The URL's item is passed as the name the answer has to contain: a link
     // to a crop off the board must not be settled by a local substring match
     // on some other crop that happens to be on it (`useSearch`).
-    if (view.linkedQuery !== query) runLinkedQuery(view.linkedQuery);
+    if (view.linkedQuery !== query) {
+      adopting.current = true;
+      runLinkedQuery(view.linkedQuery);
+    }
   }, [board.length, view.linkedQuery, query, runLinkedQuery]);
 
   // …and the settled word goes back the other way. `query` only moves once the
@@ -107,7 +120,11 @@ function App() {
   const { applyQuery } = view;
   useEffect(() => {
     if (adoptedQuery.current === null) return; // nothing adopted yet: the board is still arriving
-    if (query === view.linkedQuery) return;
+    if (query === view.linkedQuery) {
+      adopting.current = false; // the hook has caught up; the box owns the URL again
+      return;
+    }
+    if (adopting.current) return; // mid-adoption: `query` is the value being replaced
     adoptedQuery.current = query;
     applyQuery(query);
   }, [query, view.linkedQuery, applyQuery]);
@@ -123,9 +140,9 @@ function App() {
           widens the board back to 全部, writes the query to the URL and asks
           the backend. */}
       <Header
-        onSearch={(q) => { view.applyQuery(q); runQuery(q); }}
-        onQueryChange={preview}
-        onClear={() => { view.applyQuery(''); clear(); }}
+        onSearch={(q) => { adopting.current = false; view.applyQuery(q); runQuery(q); }}
+        onQueryChange={(q) => { adopting.current = false; preview(q); }}
+        onClear={() => { adopting.current = false; view.applyQuery(''); clear(); }}
         initialQuery={view.linkedQuery}
         searching={searching}
       />

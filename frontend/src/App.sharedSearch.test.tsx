@@ -243,6 +243,48 @@ describe('App — a shared live-search result', () => {
     expect(parseUrlState(window.location.hash).item).toBe('高麗菜');
   });
 
+  it('keeps the whole link through adoption, query included', async () => {
+    // Both effects run in one commit, so the mirror used to see the
+    // pre-adoption query — empty on a first load — and publish it over the
+    // link it was adopting, stripping `?q=` and, once the item went with it,
+    // the drawer as well.
+    searchProduce.mockResolvedValue(found());
+    at('#/i/枇杷?q=枇杷');
+    render(<App />);
+    await screen.findByTestId('detail-drawer');
+
+    const settled = parseUrlState(window.location.hash);
+    expect(settled.item).toBe('枇杷');
+    expect(settled.query).toBe('枇杷');
+  });
+
+  it('releases a board item when a new query replaces it', async () => {
+    // ✕ or a new search over a live-search drawer strands its card: the item
+    // is on screen but nothing will resolve it once the query moves on.
+    searchProduce.mockResolvedValue(found());
+    at('#/i/枇杷?q=枇杷');
+    render(<App />);
+    await screen.findByTestId('detail-drawer');
+
+    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '高麗菜' } });
+    fireEvent.submit(screen.getByPlaceholderText(/搜尋蔬果/).closest('form') as HTMLFormElement);
+
+    await waitFor(() => expect(parseUrlState(window.location.hash).item).toBeNull());
+    expect(screen.queryByText(/今日無交易資料/)).not.toBeInTheDocument();
+  });
+
+  it('does not spend a backend request for a board item’s own link', async () => {
+    // `#/i/高麗菜?q=蔥` is an ordinary URL. Requiring a name the board already
+    // carries would skip the local short-circuit and pay for an answer the
+    // board has offline — and take the list down if that request failed.
+    at('#/i/高麗菜?q=蔥');
+    render(<App />);
+    await screen.findByTestId('detail-drawer');
+
+    await new Promise((settle) => setTimeout(settle, 300));
+    expect(searchProduce).not.toHaveBeenCalled();
+  });
+
   it('carries the query in the share link for a crop found by search', async () => {
     searchProduce.mockResolvedValue(found());
     const writeText = vi.fn().mockResolvedValue(undefined);

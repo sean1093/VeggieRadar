@@ -142,12 +142,19 @@ export function useBoardView(
       // nothing that would ever resolve it, handed out again by the next
       // reload or address-bar share.
       //
-      // An item that *is* on screen stays. This runs from the typing preview
-      // too, and the preview settles 300 ms late — long enough for a card
-      // tapped in between to have opened a drawer this would then close.
-      replaceUrlState({ query: query.trim(), filter: 'all', ...(selectedItem ? {} : { item: null }) });
+      // An item the *board* carries stays. It survives any query, because
+      // `selectedItem` falls back to the board, and this runs from the typing
+      // preview too — which settles 300 ms late, long enough for a card tapped
+      // in between to have opened a drawer this would then close.
+      //
+      // Being open right now is not the test: a live-search card is on screen
+      // and still stranded by the next query, which is how ✕ over one ended
+      // up printing 「that crop has no trading data」 about the price it had
+      // just been showing.
+      const survives = url.item !== null && board.some((it) => it.name === url.item);
+      replaceUrlState({ query: query.trim(), filter: 'all', ...(survives ? {} : { item: null }) });
     },
-    [selectedItem],
+    [url.item, board],
   );
 
   // A link to a crop that is out of season today must not look like a broken
