@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiResponse, ProduceItem } from './types/produce';
 
@@ -294,13 +294,23 @@ describe('App — a shared live-search result', () => {
     // another, for the rest of the session.
     searchProduce.mockResolvedValue(found());
     at('#/?q=蔥');
-    render(<App />);
-    const box = await screen.findByPlaceholderText(/搜尋蔬果/);
-    fireEvent.change(box, { target: { value: '番茄' } });
+    // The typing debounce is 300 ms and the board lands on its own schedule;
+    // racing both with wall-clock waits is how this test flaked under load.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<App />);
+      const box = await screen.findByPlaceholderText(/搜尋蔬果/);
+      fireEvent.change(box, { target: { value: '番茄' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
 
-    await waitFor(() => expect(parseUrlState(window.location.hash).query).toBe('番茄'));
-    expect(box).toHaveValue('番茄');
-    expect(screen.getByTestId('produce-list')).toHaveTextContent('番茄');
+      expect(parseUrlState(window.location.hash).query).toBe('番茄');
+      expect(box).toHaveValue('番茄');
+      expect(screen.getByTestId('produce-list')).toHaveTextContent('番茄');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('carries the query in the share link for a crop found by search', async () => {
