@@ -1303,6 +1303,20 @@ describe('failure alerting', () => {
       expect(api.handleDiag().alert.last_send_failure).toBeNull();
     });
 
+    it('clears a category left behind by the build this replaces', () => {
+      // The deployed backend can close an incident without touching the
+      // category, because it has no category to touch. This is the branch
+      // that repairs that state on the first healthy refresh after the
+      // deploy; nothing the new code writes can reach it.
+      const { api, props } = loadBackend(plausibleRows());
+      props.set('veggie_alert_unsent_reason', 'mail_quota_exhausted');
+
+      api.refreshBoardCache();
+
+      expect(props.has('veggie_alert_unsent_reason')).toBe(false);
+      expect(api.handleDiag().alert.last_send_failure).toBeNull();
+    });
+
     it('leaves the send path untouched when a recipient is configured', () => {
       const { api, props, mails } = loadBackend();
       for (let i = 0; i < api.ALERT_FAILURE_STREAK; i++) api.refreshBoardCache();

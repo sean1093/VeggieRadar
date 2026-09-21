@@ -198,9 +198,17 @@ function withinCooldown(props) {
   return withinWindow(props.getProperty(ALERT_SENT_PROP), ALERT_COOLDOWN_MS);
 }
 
+/**
+ * The flag FIRST, the cooldown timestamp second. Both may be new keys, and a
+ * properties store filled by a rejected board's chunks can throw on either;
+ * whichever comes second is the one that is lost. `incident_open` is what the
+ * external probe reads, so it is the one that must survive — losing the
+ * cooldown instead costs mail, which the streak and the probe's own limiter
+ * bound, and never hides the incident.
+ */
 function openIncident(props) {
-  props.setProperty(ALERT_SENT_PROP, new Date().toISOString());
   props.setProperty(ALERT_ACTIVE_PROP, '1');
+  props.setProperty(ALERT_SENT_PROP, new Date().toISOString());
 }
 
 /**
