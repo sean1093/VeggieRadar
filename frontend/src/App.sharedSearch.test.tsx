@@ -351,6 +351,47 @@ describe('App — a shared live-search result', () => {
     expect(document.body.style.pointerEvents).toBe('none');
   });
 
+  it('treats 搜尋 on the link’s own word as another try at the link', async () => {
+    // 搜尋 rather than 重試 after a busy backend used to take the board's
+    // short-circuit, make no request, strip the item and print the very
+    // sentence this work exists to remove.
+    searchProduce.mockResolvedValueOnce({ error: '\u670d\u52d9\u5fd9\u788c\u4e2d\uff0c\u8acb\u7a0d\u5f8c\u518d\u8a66', query: '\u82b1\u6930', transient: true });
+    at('#/i/\u82b1\u6930?q=\u82b1\u6930');
+    render(<App />);
+    await screen.findByText(/\u670d\u52d9\u5fd9\u788c\u4e2d/);
+
+    searchProduce.mockResolvedValue({
+      type: 'search',
+      query: '\u82b1\u6930',
+      date: '2026-08-26',
+      count: 1,
+      items: [{ ...loquat, code: 'X98', name: '\u82b1\u6930', official_name: '\u82b1\u6930', category: '\u8f9b\u9999\u985e' }],
+    });
+    const box = screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/);
+    fireEvent.submit(box.closest('form') as HTMLFormElement);
+
+    const drawer = await screen.findByTestId('detail-drawer');
+    expect(within(drawer).getByText('\u82b1\u6930')).toBeInTheDocument();
+    expect(screen.queryByText(/\u4eca\u65e5\u7121\u4ea4\u6613\u8cc7\u6599/)).not.toBeInTheDocument();
+  });
+
+  it('spends no request when 搜尋 asks a new question', async () => {
+    // A word the visitor typed is their question, not the link's: it takes the
+    // board's short-circuit as any typed search does.
+    searchProduce.mockResolvedValueOnce({ error: '\u670d\u52d9\u5fd9\u788c\u4e2d\uff0c\u8acb\u7a0d\u5f8c\u518d\u8a66', query: '\u82b1\u6930', transient: true });
+    at('#/i/\u82b1\u6930?q=\u82b1\u6930');
+    render(<App />);
+    await screen.findByText(/\u670d\u52d9\u5fd9\u788c\u4e2d/);
+    searchProduce.mockClear();
+
+    const box = screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/);
+    fireEvent.change(box, { target: { value: '\u9ad8\u9e97\u83dc' } });
+    fireEvent.submit(box.closest('form') as HTMLFormElement);
+
+    await waitFor(() => expect(screen.getByTestId('produce-list')).toHaveTextContent('\u9ad8\u9e97\u83dc'));
+    expect(searchProduce).not.toHaveBeenCalled();
+  });
+
   it('carries the query in the share link for a crop found by search', async () => {
     searchProduce.mockResolvedValue(found());
     const writeText = vi.fn().mockResolvedValue(undefined);

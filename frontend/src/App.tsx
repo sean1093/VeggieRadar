@@ -69,8 +69,15 @@ function App() {
   // backend request on a query the board answers offline — and if that request
   // fails, takes the list down with it.
   const runLinkedQuery = useCallback(
-    (q: string) => runQuery(q, urlItem !== null && !board.some((it) => it.name === urlItem) ? urlItem : undefined),
-    [runQuery, urlItem, board],
+    (q: string) => {
+      // Required only when this run is the link's own question: the same query
+      // the URL carries, for a card the board cannot produce itself. A new
+      // word is the visitor's question and takes the board's short-circuit;
+      // requiring a name there would spend a request the board answers free.
+      const needed = urlItem !== null && q.trim() === urlQuery && !board.some((it) => it.name === urlItem);
+      runQuery(q, needed ? urlItem : undefined);
+    },
+    [runQuery, urlItem, urlQuery, board],
   );
   const searching = searchStatus.kind === 'searching';
   const toggleWatch = (item: ProduceItem) => watchlist.toggle(item.official_name);
@@ -150,7 +157,7 @@ function App() {
           widens the board back to 全部, writes the query to the URL and asks
           the backend. */}
       <Header
-        onSearch={(q) => { adopting.current = false; touched.current = true; view.applyQuery(q); runQuery(q); }}
+        onSearch={(q) => { adopting.current = false; touched.current = true; view.applyQuery(q); runLinkedQuery(q); }}
         onQueryChange={(q) => { adopting.current = false; touched.current = true; preview(q); }}
         onClear={() => { adopting.current = false; touched.current = true; view.applyQuery(''); clear(); }}
         initialQuery={view.linkedQuery}
