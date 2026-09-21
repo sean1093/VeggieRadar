@@ -460,6 +460,61 @@ describe('App — a shared live-search result', () => {
     expect(screen.getByRole('button', { name: '\u91cd\u8a66' })).toBeInTheDocument();
   });
 
+  it('shares the query that found the card, not whatever is in the box', async () => {
+    // Tapping a card inside the 300 ms debounce leaves a newer word in the
+    // box. Quoting that in the link sends the recipient a question whose
+    // answer never contains this crop.
+    searchProduce.mockResolvedValue(found());
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    at('#/?q=\u6787\u6777');
+    render(<App />);
+    const row = await screen.findByText('\u6787\u6777');
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      fireEvent.change(screen.getByPlaceholderText(/\u641c\u5c0b\u852c\u679c/), { target: { value: '\u9ad8' } });
+      fireEvent.click(row);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const drawer = screen.getByTestId('detail-drawer');
+    within(drawer).getByRole('button', { name: /\u5206\u4eab/ }).click();
+    await waitFor(() => expect(writeText).toHaveBeenCalled());
+    expect(parseUrlState(new URL(writeText.mock.calls[0][0]).hash).query).toBe('\u6787\u6777');
+  });
+
+  it('restores a query the box had abandoned', async () => {
+    // `urlWord` only moved where an external navigation was detected, so
+    // returning to a query the box had already left changed nothing and the
+    // box kept the abandoned word under a caption that said otherwise.
+    searchProduce.mockResolvedValue(found());
+    at('#/?q=\u8525');
+    render(<App />);
+    const box = await screen.findByPlaceholderText(/\u641c\u5c0b\u852c\u679c/);
+    await waitFor(() => expect(box).toHaveValue('\u8525'));
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      fireEvent.change(box, { target: { value: '\u756a\u8304' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    await waitFor(() => expect(parseUrlState(window.location.hash).query).toBe('\u756a\u8304'));
+
+    at('#/?q=\u8525');
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+
+    await waitFor(() => expect(box).toHaveValue('\u8525'));
+  });
+
   it('carries the query in the share link for a crop found by search', async () => {
     searchProduce.mockResolvedValue(found());
     const writeText = vi.fn().mockResolvedValue(undefined);

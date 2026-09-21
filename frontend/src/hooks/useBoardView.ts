@@ -35,10 +35,12 @@ export interface BoardView {
   /** A link named an item today's board does not carry. */
   notice: string | null;
   /**
-   * The open item came back from live search rather than off the board, so a
-   * share link for it has to carry the query that found it (`itemUrl`).
+   * The query a share link for the open card has to carry, or '' for a card
+   * the recipient's own board will have. Pinned to the query that *found* the
+   * card rather than read live: a word typed after tapping it would otherwise
+   * be handed to the recipient, whose search for it never returns this crop.
    */
-  selectedFromSearch: boolean;
+  shareQuery: string;
 }
 
 const SORT_KEY = 'veggieradar_sort_v1';
@@ -131,23 +133,26 @@ export function useBoardView(
     return baseItems.find(named) ?? board.find(named) ?? null;
   }, [url.item, baseItems, board]);
 
-  // A card the visitor has open stays open until they close it. Off the board
-  // it lives only inside the search phase, so anything that resets that phase
-  // — a keystroke settling, a query being voided — used to take the drawer
-  // with it and then declare the crop missing. Held here so the drawer
-  // outlives the answer that produced it.
-  const [openCard, setOpenCard] = useState<ProduceItem | null>(null);
-  if (found && openCard?.name !== found.name) setOpenCard(found);
+  // A card the visitor has open stays open until they close it, together with
+  // the query that found it. Off the board it lives only inside the search
+  // phase, so anything that resets that phase — a keystroke settling, a query
+  // being voided — used to take the drawer with it and then declare the crop
+  // missing. Held here so the drawer outlives the answer that produced it, and
+  // so a share link quotes the question that produced it rather than whatever
+  // is in the box by the time the visitor taps 分享.
+  const [openCard, setOpenCard] = useState<{ item: ProduceItem; query: string } | null>(null);
+  if (found && openCard?.item.name !== found.name) setOpenCard({ item: found, query: url.query });
   else if (!url.item && openCard !== null) setOpenCard(null);
-  const selectedItem = found ?? (url.item !== null && openCard?.name === url.item ? openCard : null);
+  const held = url.item !== null && openCard?.item.name === url.item ? openCard : null;
+  const selectedItem = found ?? held?.item ?? null;
 
   // On the board or not: what decides whether a share link needs the query.
   // Read off `board` rather than off a flag, because that is the same list the
   // recipient will look in.
-  const selectedFromSearch = useMemo(
-    () => selectedItem !== null && !board.some((it) => it.name === selectedItem.name),
-    [selectedItem, board],
-  );
+  const shareQuery = useMemo(() => {
+    if (selectedItem === null || board.some((it) => it.name === selectedItem.name)) return '';
+    return held?.query ?? url.query;
+  }, [selectedItem, board, held, url.query]);
 
   // Widening the board back to 全部 for a new query is a reset, not a choice,
   // so it is deliberately not reported as filter_changed.
@@ -251,7 +256,7 @@ export function useBoardView(
     select,
     close,
     applyQuery,
-    selectedFromSearch,
+    shareQuery,
     linkedQuery: url.query,
     notice: missedItem === null ? null : `「${missedItem}」今日無交易資料`,
   };

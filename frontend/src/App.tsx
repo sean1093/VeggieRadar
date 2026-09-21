@@ -151,6 +151,12 @@ function App() {
     }
     if (adopting.current) return; // mid-adoption: `query` is the value being replaced
     adoptedQuery.current = query;
+    // The box's word is now what the URL says, so it is also what the box
+    // should be restored to on a later navigation back to it. Leaving this
+    // behind let `urlWord` go stale: returning to a query the box had already
+    // abandoned changed nothing, and the box kept the abandoned word while the
+    // caption and the list followed the URL.
+    setUrlWord(query);
     applyQuery(query);
   }, [query, view.linkedQuery, applyQuery]);
 
@@ -260,7 +266,7 @@ function App() {
           allProduceItems={board}
           watched={watchlist.isWatched(view.selectedItem.official_name)}
           onToggleWatch={toggleWatch}
-          shareQuery={view.selectedFromSearch ? query : ''}
+          shareQuery={view.shareQuery}
         />
       )}
     </div>
