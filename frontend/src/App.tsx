@@ -42,8 +42,15 @@ function App() {
   // answered means the board view must not yet call a linked item missing:
   // `#/i/<name>?q=<name>` is what a shared live-search result looks like, and
   // the crop it names is on nobody's board by definition.
-  const urlQuery = useUrlState().query;
-  const searchPending = urlQuery !== '' && (searchStatus.kind === 'idle' || searchStatus.kind === 'searching');
+  const url = useUrlState();
+  const { query: urlQuery, item: urlItem } = url;
+  // `transient` counts as pending on purpose: a busy backend never said the
+  // crop has no data, and treating its silence as an answer is the same lie
+  // the linked drawer exists to avoid. The visitor sees the busy notice the
+  // search itself raises, and a retry can still find the card.
+  const searchPending =
+    urlQuery !== ''
+    && (searchStatus.kind === 'idle' || searchStatus.kind === 'searching' || searchStatus.kind === 'transient');
   const view = useBoardView(itemsFor(searchStatus, board), watchlist, board, searchPending);
   const searching = searchStatus.kind === 'searching';
   const toggleWatch = (item: ProduceItem) => watchlist.toggle(item.official_name);
@@ -66,8 +73,11 @@ function App() {
     // A first load carrying no `?q=` has nothing to restore, and running the
     // empty query here would discard a word typed while the board arrived.
     if (firstAdoption && !view.linkedQuery) return;
-    if (view.linkedQuery !== query) runQuery(view.linkedQuery);
-  }, [board.length, view.linkedQuery, query, runQuery]);
+    // The URL's item is passed as the name the answer has to contain: a link
+    // to a crop off the board must not be settled by a local substring match
+    // on some other crop that happens to be on it (`useSearch`).
+    if (view.linkedQuery !== query) runQuery(view.linkedQuery, view.selectedItem?.name ?? urlItem ?? undefined);
+  }, [board.length, view.linkedQuery, query, runQuery, view.selectedItem, urlItem]);
 
   // …and the settled word goes back the other way. `query` only moves once the
   // typing debounce has settled, so this publishes one word rather than one

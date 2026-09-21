@@ -156,10 +156,19 @@ export function useBoardView(
   // price the sender was looking at seconds earlier.
   const missing =
     url.item !== null && selectedItem === null && !searchPending && baseItems.length + board.length > 0;
+  //
+  // The notice is also answered by the crop simply arriving. A search that
+  // failed transiently and then succeeded on retry puts the price on the board
+  // without opening any drawer and without touching the query, and a sentence
+  // saying there is no trading data, directly above that price, is worse than
+  // no sentence at all.
+  const missedNowOnScreen =
+    missedItem !== null
+    && (baseItems.some((it) => it.name === missedItem) || board.some((it) => it.name === missedItem));
   if (missing && missedItem !== url.item) setMissedItem(url.item);
-  // Any drawer that does open answers the notice: the shopper has moved on,
-  // whether he tapped a row or followed another link.
-  else if (selectedItem !== null && missedItem !== null) setMissedItem(null);
+  // Any drawer that does open answers the notice too: the shopper has moved
+  // on, whether he tapped a row or followed another link.
+  else if (missedItem !== null && (selectedItem !== null || missedNowOnScreen)) setMissedItem(null);
   useEffect(() => {
     if (missing) replaceUrlState({ item: null });
   }, [missing]);

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiResponse, ProduceItem } from './types/produce';
 
@@ -98,6 +98,59 @@ describe('App — a shared live-search result', () => {
     // The query survives the rewrite — only the item is dropped.
     await waitFor(() => expect(parseUrlState(window.location.hash).item).toBeNull());
     expect(parseUrlState(window.location.hash).query).toBe('枇杷');
+  });
+
+  it('keeps the link alive when the backend is merely busy', async () => {
+    // A transient failure is not an answer. Treating it as one strips the item
+    // from the URL and says the crop has no trading data — the same lie, on
+    // the one branch where the backend never claimed anything.
+    searchProduce.mockResolvedValue({ error: '服務忙磌中，請稍後再試', query: '枇杷', transient: true });
+    at('#/i/枇杷?q=枇杷');
+    render(<App />);
+    await screen.findByText(/服務忙磌中/);
+
+    expect(screen.queryByText(/今日無交易資料/)).not.toBeInTheDocument();
+    expect(parseUrlState(window.location.hash).item).toBe('枇杷');
+  });
+
+  it('drops the no-data notice once a retry produces the crop', async () => {
+    // The notice must not outlive the data it denies: a retry that succeeds
+    // puts the price on the board without opening a drawer, and a sentence
+    // saying there is none, directly above it, is worse than no sentence.
+    searchProduce.mockResolvedValue(notFound());
+    at('#/i/枇杷?q=枇杷');
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('今日無交易資料'));
+
+    searchProduce.mockResolvedValue(found());
+    fireEvent.change(screen.getByPlaceholderText(/搜尋蔬果/), { target: { value: '枇杷' } });
+    fireEvent.submit(screen.getByPlaceholderText(/搜尋蔬果/).closest('form') as HTMLFormElement);
+
+    await waitFor(() => expect(screen.getByTestId('produce-list')).toHaveTextContent('枇杷'));
+    expect(screen.queryByText(/今日無交易資料/)).not.toBeInTheDocument();
+  });
+
+  it('asks the backend when the board only near-matches the linked crop', async () => {
+    // `matcher` is a substring match, so `?q=花椰` hits 白花椰菜 on the board
+    // while 花椰 itself is not on it. Answering that locally would settle the
+    // query and leave the linked card unreachable — which is the whole point
+    // of the required name.
+    searchProduce.mockResolvedValue({
+      type: 'search',
+      query: '花椰',
+      date: '2026-08-26',
+      count: 1,
+      items: [{ ...loquat, code: 'X98', name: '花椰', official_name: '花椰', category: '辛香類' }],
+    });
+    at('#/i/花椰?q=花椰');
+    render(<App />);
+
+    const drawer = await screen.findByTestId('detail-drawer');
+    expect(within(drawer).getByText('花椰')).toBeInTheDocument();
+    expect(searchProduce).toHaveBeenCalledWith('花椰');
+    // The board's own near-match is still what the list behind the drawer
+    // shows; the link's card is what the drawer shows.
+    expect(screen.getByTestId('produce-list')).toHaveTextContent('花椰');
   });
 
   it('carries the query in the share link for a crop found by search', async () => {

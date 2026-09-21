@@ -31,8 +31,15 @@ export type SearchStatus =
 export interface Search {
   query: string;
   status: SearchStatus;
-  /** Enter: the board first, then the backend if the board has no answer. */
-  search: (query: string) => void;
+  /**
+   * Enter: the board first, then the backend if the board has no answer.
+   *
+   * `requireName` is for a link rather than a keystroke — the display name the
+   * answer has to contain. Without it a query that substring-matches some
+   * other crop on the board is answered locally, and the card the link was
+   * for is never fetched.
+   */
+  search: (query: string, requireName?: string) => void;
   /** Typing: a debounced local filter, which never costs a request. */
   preview: (query: string) => void;
   clear: () => void;
@@ -109,13 +116,18 @@ export function useSearch(board: ProduceItem[]): Search {
   useEffect(() => () => clearTimeout(previewTimer.current), []);
 
   const local = useMemo(() => (query ? board.filter(matcher(query)) : NO_ITEMS), [board, query]);
+  // The display name a *link* is asking for, when the current query came from
+  // one. Null for anything a person typed. It is the one thing that can make
+  // the board's own answer insufficient — see `status` at the bottom.
+  const [required, setRequired] = useState<string | null>(null);
 
   const search = useCallback(
-    async (raw: string) => {
+    async (raw: string, requireName?: string) => {
       const q = raw.trim();
       clearTimeout(previewTimer.current);
       const mine = ++ticket.current;
       setQuery(q);
+      setRequired(requireName ?? null);
       if (!q) {
         setPhase(IDLE);
         return;
@@ -126,7 +138,14 @@ export function useSearch(board: ProduceItem[]): Search {
 
       // The board answers most queries with no request at all; only a miss
       // costs a live backend query.
-      if (board.some(matcher(q))) {
+      //
+      // `requireName` is what a *link* asks for. `matcher` is a substring
+      // match, so a query can hit the board without the crop it was meant to
+      // find being on it — `?q=芥菜` matches 包心芥菜. Short-circuiting there
+      // would answer the query and still leave the linked card unreachable, so
+      // when a name is required the local answer has to contain it.
+      const hits = board.filter(matcher(q));
+      if (hits.length > 0 && (!requireName || hits.some((it) => it.name === requireName))) {
         setPhase({ kind: 'local' });
         report('local_hit');
         return;
@@ -167,6 +186,7 @@ export function useSearch(board: ProduceItem[]): Search {
     previewTimer.current = setTimeout(() => {
       ticket.current++; // whatever is in flight answers a query the box no longer holds
       setQuery(raw.trim());
+      setRequired(null); // a typed word asks for a query, never for one card
       setPhase(IDLE);
     }, PREVIEW_DEBOUNCE_MS);
   }, []);
@@ -175,6 +195,7 @@ export function useSearch(board: ProduceItem[]): Search {
     clearTimeout(previewTimer.current);
     ticket.current++;
     setQuery('');
+    setRequired(null);
     setPhase(IDLE);
   }, []);
 
@@ -184,10 +205,16 @@ export function useSearch(board: ProduceItem[]): Search {
   // asked for. Whatever the backend answers afterwards — a hit, a miss or
   // 服務忙碌中 — must not hide rows that are now on screen. (Analytics keep
   // the outcome the request actually had; the UI shows the truth.)
-  const status = useMemo<SearchStatus>(
-    () => (local.length || phase.kind === 'local' ? { kind: 'local', items: local } : phase),
-    [phase, local],
-  );
+  //
+  // `required` is where that rule stops. A link names one card, and `matcher`
+  // is a substring match: `?q=花椰` finds 白花椰菜 on the board while 花椰
+  // itself is elsewhere. Letting the board win there would answer the query,
+  // discard the very card that was asked for, and leave the shared link
+  // permanently unopenable — after spending the backend request that found it.
+  const status = useMemo<SearchStatus>(() => {
+    const boardAnswers = local.length > 0 && (required === null || local.some((it) => it.name === required));
+    return boardAnswers || phase.kind === 'local' ? { kind: 'local', items: local } : phase;
+  }, [phase, local, required]);
 
   return { query, status, search, preview, clear };
 }
