@@ -188,6 +188,11 @@ var SHEET_LAST_WRITE_PROP = 'veggie_sheet_last_write';
 // closing prices through the evening, so the last crawl of a day is the one
 // worth keeping.
 var SHEET_CORRECTION_MS = 6 * 60 * 60 * 1000;
+// And how many such corrections a date may have. The board keeps a trading
+// date until the next one publishes, so across a weekend or a holiday an
+// uncapped rule would re-replace the same unchanged day every few hours for
+// as long as the break lasts.
+var SHEET_MAX_CORRECTIONS = 1;
 
 // Plausibility guard (`Validate.gs`). The refresh used to reject exactly one
 // thing — an EMPTY board — so a throttled crawl or a MOA unit change would

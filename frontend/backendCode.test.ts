@@ -47,8 +47,9 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   let dispatchStatus = 204;
   let dispatchThrows = false;
   const locks = { waits: 0, tries: 0, releases: 0, contended: false };
-  /** The long-term history spreadsheet (#22): tab name → rows, in memory. */
-  const tabs = new Map<string, unknown[][]>();
+  /** The long-term history spreadsheet (#22), in memory: a grid, not a list. */
+  type Tab = { rows: unknown[][]; maxRows: number; textColumnA: boolean };
+  const tabs = new Map<string, Tab>();
   const openedIds: string[] = [];
   let sheetThrows = false;
   const mails: { to: string; subject: string; body: string }[] = [];
@@ -74,15 +75,36 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
 
   /** The slice of the Sheets API `SheetHistory.gs` uses, and nothing more. */
   const tabApi = (name: string) => {
-    const rows = () => tabs.get(name) as unknown[][];
+    const tab = () => tabs.get(name) as Tab;
+    const rows = () => tab().rows;
     return {
       getLastRow: () => rows().length,
+      // A real tab is a fixed grid: `setValues` past `getMaxRows()` throws
+      // rather than growing it, which is what killed the first version of the
+      // archive in review — a default 1000-row tab fills in about five days.
+      getMaxRows: () => tab().maxRows,
+      insertRowsAfter: (after: number, howMany: number) => {
+        tab().maxRows = Math.max(tab().maxRows, after) + howMany;
+      },
       getRange: (row: number, col: number, numRows: number, numCols: number) => ({
         setValues: (values: unknown[][]) => {
-          values.forEach((v, i) => { rows()[row - 1 + i] = v; });
+          if (row + values.length - 1 > tab().maxRows) {
+            throw new Error('The coordinates or dimensions of the range are invalid.');
+          }
+          values.forEach((v, i) => {
+            // …and a date-looking string lands in a date cell unless the
+            // column says otherwise, coming back as a Date.
+            rows()[row - 1 + i] = v.map((cell, j) =>
+              j === 0 && tab().textColumnA === false && typeof cell === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(cell)
+                ? new Date(`${cell}T00:00:00`)
+                : cell);
+          });
         },
         getValues: () =>
           rows().slice(row - 1, row - 1 + numRows).map((r) => (r ?? []).slice(col - 1, col - 1 + numCols)),
+        setNumberFormat: (format: string) => {
+          if (col === 1 && format === '@') tab().textColumnA = true;
+        },
       }),
       deleteRows: (start: number, count: number) => void rows().splice(start - 1, count),
     };
@@ -96,7 +118,9 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
         return {
           getSheetByName: (name: string) => (tabs.has(name) ? tabApi(name) : null),
           insertSheet: (name: string) => {
-            tabs.set(name, []);
+            // Sheets' own default for a new tab, which is the whole point of
+            // `growFor`.
+            tabs.set(name, { rows: [], maxRows: 1000, textColumnA: false });
             return tabApi(name);
           },
         };
@@ -128,7 +152,12 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     },
     LockService: {
       getScriptLock: () => ({
-        waitLock: (_ms: number) => void (locks.waits += 1),
+        waitLock: (_ms: number) => {
+          locks.waits += 1;
+          // The real one throws when it cannot acquire inside the timeout,
+          // which is what every `withHistoryLock` caller has to survive.
+          if (locks.contended) throw new Error('Could not obtain lock');
+        },
         tryLock: (_ms: number) => {
           locks.tries += 1;
           return !locks.contended;
@@ -1756,7 +1785,7 @@ describe('long-term history in a Sheet', () => {
       expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('appended');
 
       expect(openedIds).toEqual([SHEET_ID]);
-      const rows = tabs.get('2026') as unknown[][];
+      const rows = (tabs.get('2026') as { rows: unknown[][] }).rows;
       expect(rows[0]).toEqual(api.SHEET_HEADER);
       expect(rows).toHaveLength(5); // header + 4
       expect(rows[1][0]).toBe('2026-09-21');
@@ -1767,7 +1796,7 @@ describe('long-term history in a Sheet', () => {
       const { api, tabs } = configured();
       api.appendDailyHistory(boardOf('2026-09-21'));
       expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('already written');
-      expect(tabs.get('2026')).toHaveLength(5);
+      expect((tabs.get('2026') as { rows: unknown[][] }).rows).toHaveLength(5);
     });
 
     it('replaces the day when the numbers have moved on', () => {
@@ -1780,7 +1809,7 @@ describe('long-term history in a Sheet', () => {
       corrected.items[1].avg_price = 41.5;
       expect(api.appendDailyHistory(corrected)).toBe('replaced');
 
-      const rows = tabs.get('2026') as unknown[][];
+      const rows = (tabs.get('2026') as { rows: unknown[][] }).rows;
       expect(rows).toHaveLength(5); // still one day, not two
       expect(rows[4][4]).toBe(41.5);
     });
@@ -1791,7 +1820,7 @@ describe('long-term history in a Sheet', () => {
       api.appendDailyHistory(boardOf('2026-09-21', 8));
       api.appendDailyHistory(boardOf('2026-09-21'));
 
-      const rows = tabs.get('2026') as unknown[][];
+      const rows = (tabs.get('2026') as { rows: unknown[][] }).rows;
       const dates = rows.slice(1).map((r) => r[0]);
       expect(dates.filter((d) => d === '2026-09-20')).toHaveLength(4);
       expect(dates.filter((d) => d === '2026-09-21')).toHaveLength(4);
@@ -1803,7 +1832,7 @@ describe('long-term history in a Sheet', () => {
       api.appendDailyHistory(boardOf('2027-01-02'));
 
       expect([...tabs.keys()]).toEqual(['2026', '2027']);
-      expect(tabs.get('2027')).toHaveLength(5);
+      expect((tabs.get('2027') as { rows: unknown[][] }).rows).toHaveLength(5);
     });
 
     it('never lets a Sheets failure cost the board', () => {
@@ -1813,9 +1842,94 @@ describe('long-term history in a Sheet', () => {
       const board = api.refreshBoardCache();
       expect(board.count).toBeGreaterThan(0);
       expect(props.get('veggie_last_refresh_ok')).toBeTruthy();
-      expect(logs.some((l) => l.includes('appendDailyHistory failed'))).toBe(true);
+      expect(logs.some((l) => l.includes('archiveDay failed'))).toBe(true);
       // And nothing is recorded, so the next refresh tries the same day again.
       expect(props.has('veggie_sheet_last_write')).toBe(false);
+    });
+
+    it('grows the grid it is writing into', () => {
+      // A tab is a fixed grid and `setValues` does not expand it: at ~160 rows
+      // a trading day, a default 1000-row tab is full inside a week, and every
+      // write after that throws out of bounds — an archive that dies on about
+      // day five with nothing but a log line to show for it.
+      const { api, tabs } = configured();
+      const dayOf = (n: number) => {
+        const board = boardOf(`2026-09-${String(n).padStart(2, '0')}`, (9 - n) * 24);
+        board.items = Array.from({ length: 180 }, (_, i) => ({
+          ...board.items[1], code: `X${i}`, name: `菜${i}`, official_name: `菜${i}`,
+        }));
+        return board;
+      };
+      for (let day = 1; day <= 8; day++) expect(api.appendDailyHistory(dayOf(day))).toBe('appended');
+
+      const tab = tabs.get('2026') as { rows: unknown[][]; maxRows: number };
+      expect(tab.rows).toHaveLength(8 * 180 + 1); // 1441 rows, past the 1000 a new tab has
+      expect(tab.maxRows).toBeGreaterThanOrEqual(tab.rows.length);
+    });
+
+    it('keeps the date column text, so a replacement can find its own day', () => {
+      // Left as a date, Sheets parses `2026-09-21` into a value it hands back
+      // as a `Date`, `dropDay` matches nothing, and the "replacement"
+      // duplicates the day instead.
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+      const tab = tabs.get('2026') as { rows: unknown[][]; textColumnA: boolean };
+      expect(tab.textColumnA).toBe(true);
+      expect(tab.rows[1][0]).toBe('2026-09-21');
+
+      api.appendDailyHistory(boardOf('2026-09-21'));
+      expect(tab.rows).toHaveLength(5);
+    });
+
+    it('still finds the day when the column holds real dates', () => {
+      // A tab someone reformatted by hand, or one written before the format
+      // was set. The comparison normalises rather than trusting the cell type.
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+      const tab = tabs.get('2026') as { rows: unknown[][]; textColumnA: boolean };
+      tab.textColumnA = false;
+      tab.rows = tab.rows.map((row, i) => (i === 0 ? row : [new Date('2026-09-21T00:00:00'), ...row.slice(1)]));
+
+      expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('replaced');
+      expect(tab.rows).toHaveLength(5);
+    });
+
+    it('corrects a day once, not every few hours until the market reopens', () => {
+      // The board keeps a trading date until the next one publishes, so over a
+      // weekend an uncapped rule would delete and rewrite the same unchanged
+      // Friday every 8 hours.
+      const { api, tabs, props } = configured();
+      api.appendDailyHistory(boardOf('2026-09-18', 48));
+      expect(api.appendDailyHistory(boardOf('2026-09-18', 40))).toBe('replaced');
+      expect(api.appendDailyHistory(boardOf('2026-09-18', 24))).toBe('already corrected');
+      expect(api.appendDailyHistory(boardOf('2026-09-18'))).toBe('already corrected');
+
+      expect((tabs.get('2026') as { rows: unknown[][] }).rows).toHaveLength(5);
+      expect(props.get('veggie_sheet_last_write')).toContain(' 1');
+    });
+
+    it('does not drop the day for a board it would write nothing for', () => {
+      // Every item flagged: the rows are built before anything is deleted, so
+      // a correction that has nothing to say leaves what is there alone.
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+      const allFlagged = boardOf('2026-09-21');
+      allFlagged.items.forEach((it: Record<string, unknown>) => { it.suspect = true; });
+
+      expect(api.appendDailyHistory(allFlagged)).toBe('nothing to write');
+      expect((tabs.get('2026') as { rows: unknown[][] }).rows).toHaveLength(5);
+    });
+
+    it('serialises with the other history write, and never throws on contention', () => {
+      // Two executions genuinely overlap — the 4-hourly trigger and a
+      // `?action=warm` rebuild — and a check-then-append race would archive
+      // the day twice.
+      const { api, contendLock, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+      contendLock();
+
+      expect(() => api.appendDailyHistory(boardOf('2026-09-20', 30))).not.toThrow();
+      expect((tabs.get('2026') as { rows: unknown[][] }).rows).toHaveLength(5); // nothing added
     });
 
     it('is driven by the refresh, and says so in diag without reading the sheet', () => {
