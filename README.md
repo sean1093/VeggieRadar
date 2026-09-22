@@ -474,7 +474,15 @@ What each failure does, in the order the client meets them:
 | No mirror deployed yet (404) | the pre-mirror path: GAS, with the localStorage fallback |
 | Mirror is a truncated file, an error page, or breaks the §3 contract | reports `board_schema_mismatch` and asks GAS |
 | Mirror does not answer within 3 s | asks GAS — a CDN that slow is only delaying the request its absence makes necessary |
-| Mirror is stale **and** GAS is down | the stale mirror stays on screen with the connection note (`board_fallback`, `served: 'static'`) |
+| Mirror is stale **and** GAS is down | the newer of the stale mirror and this browser's cached board stays on screen with the connection note (`board_fallback`, `served: 'static'` or `'cache'`) |
+
+Past the authority window neither of those two is "what the app serves" — they
+are two copies of the past, ranked by the only thing that can rank them: when
+the backend crawled each one. Ranking them by source instead let a mirror
+whose deploy pipeline had been stuck for days outrank a board this browser
+loaded an hour earlier (#79). A board whose `generated_at` cannot be parsed
+never wins: its real age is unknown, which is the same reason `boardAgeMs`
+counts it stale.
 
 The publish side is symmetric: a mirror is only overwritten by a payload that
 passes `frontend/scripts/validate-board.mjs` (the §3 contract, ≥ 60 items,

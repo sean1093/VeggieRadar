@@ -50,6 +50,31 @@ const UNREACHABLE = '目前連不上伺服器，顯示上次成功載入的行�
  */
 type Fallback = { board: BoardResponse; source: 'static' | 'cache' } | null;
 
+/**
+ * The newer of two old boards, by the only thing that can rank them: when the
+ * backend crawled each one.
+ *
+ * Both are past the authority window by the time this is asked, so neither is
+ * "what the app serves" — they are two copies of the past, and the shopper
+ * should be shown the one that is less of it. Ranking them by source instead
+ * let a mirror whose deploy pipeline stopped days ago outrank a board this
+ * browser loaded an hour earlier (#79).
+ *
+ * A board whose `generated_at` cannot be parsed loses to one that can: its
+ * real age is unknown, which is the same reason `boardAgeMs` counts it stale.
+ * Ties and two undatable boards keep `a`, so the mirror stays preferred where
+ * there is nothing to choose between them.
+ */
+function fresher(a: Fallback, b: Fallback): Fallback {
+  if (!a) return b;
+  if (!b) return a;
+  const at = Date.parse(a.board.generated_at ?? '');
+  const bt = Date.parse(b.board.generated_at ?? '');
+  if (isNaN(bt)) return a;
+  if (isNaN(at)) return b;
+  return bt > at ? b : a;
+}
+
 const NO_NOTICE: FreshnessNotice = { note: null, checkedAt: null };
 // One shared empty board keeps the identity stable, so the memos downstream of
 // it do not recompute on every render of a boardless screen.
@@ -122,17 +147,19 @@ export function useBoard(): Board {
           return;
         }
 
-        // A stale mirror still goes on screen at once — the same trade as the
-        // cache paint — but the read continues to GAS, whose `readBoard`
+        // Past the authority window the mirror is just another old board, so
+        // the newer of the two wins: it goes on screen at once — the same
+        // trade as the cache paint — and it is what a failed read degrades
+        // onto. The read continues to GAS either way, whose `readBoard`
         // queues the rebuild that unsticks a dead pipeline. That self-heal is
         // why the mirror may only ever be a layer in front of GAS, never a
         // replacement.
-        if (mirror) setStatus({ kind: 'ready', board: mirror, source: 'static' });
-
-        // The stale mirror outranks the cache as the fallback: it is what the
-        // shopper is already reading, and swapping in different old prices on
-        // a failed refresh would be a change with nothing behind it.
-        const fallback: Fallback = mirror ? { board: mirror, source: 'static' } : held;
+        const fallback = fresher(mirror ? { board: mirror, source: 'static' } : null, held);
+        // Only when the mirror won: repainting the board already on screen
+        // with a copy of itself is a render for nothing.
+        if (fallback && fallback.board === mirror) {
+          setStatus({ kind: 'ready', board: mirror, source: 'static' });
+        }
         const res = await fetchBoard();
         if (mine !== generation.current) return;
         settle(res, fallback);

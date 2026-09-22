@@ -211,7 +211,7 @@ describe('useBoard', () => {
     const mirror = agedBoard('2026-09-01', 9);
     fetchStaticBoardMock.mockResolvedValueOnce(mirror).mockResolvedValue(null);
     fetchBoardMock.mockResolvedValue(FAILURE);
-    readCachedBoardMock.mockReturnValue(board('2026-09-02')); // newer, and not what was on screen
+    readCachedBoardMock.mockReturnValue(agedBoard('2026-09-02', 30)); // older, so the mirror is what paints
     const { result } = renderHook(() => useBoard());
     await waitFor(() => expect(result.current.status.kind).toBe('degraded'));
 
@@ -335,12 +335,56 @@ describe('useBoard', () => {
       expect(result.current.freshness.note).not.toBe(REFRESHING);
     });
 
+    it('lets a newer cached board outrank a mirror that stopped publishing', async () => {
+      // A deploy pipeline that has been stuck for days leaves a mirror far
+      // older than a board this browser loaded an hour ago. Ranking by source
+      // put the older prices on screen and degraded onto them (#79).
+      const mirror = agedBoard('2026-09-01', 72);
+      const cached = agedBoard('2026-09-03', 1);
+      readCachedBoardMock.mockReturnValue(cached);
+      fetchStaticBoardMock.mockResolvedValue(mirror);
+      fetchBoardMock.mockResolvedValue(FAILURE);
+      const gtag = vi.fn();
+      vi.stubGlobal('gtag', gtag);
+
+      const { result } = renderHook(() => useBoard());
+
+      await waitFor(() =>
+        expect(result.current.status).toEqual({
+          kind: 'degraded', board: cached, source: 'cache', reason: UNREACHABLE,
+        }),
+      );
+      // The incident is reported as what it is: this visit was saved by one
+      // browser's own copy, not by the mirror.
+      expect(gtag).toHaveBeenCalledWith('event', 'board_fallback', { served: 'cache' });
+      expect(gtag).not.toHaveBeenCalledWith('event', 'board_fallback', { served: 'static' });
+    });
+
+    it('never lets an undatable board win, in either direction', async () => {
+      // A board whose `generated_at` cannot be read has an unknown age, which
+      // is why `boardAgeMs` counts it stale; it cannot be the newer of two.
+      const undatable = board('2026-09-03', { generated_at: 'not a date' });
+      readCachedBoardMock.mockReturnValue(undatable);
+      fetchStaticBoardMock.mockResolvedValue(agedBoard('2026-09-01', 72));
+      fetchBoardMock.mockResolvedValue(FAILURE);
+
+      const { result } = renderHook(() => useBoard());
+      await waitFor(() => expect(result.current.status).toMatchObject({ source: 'static' }));
+
+      // …and the same rule the other way round: the datable cache wins over
+      // an undatable mirror.
+      readCachedBoardMock.mockReturnValue(agedBoard('2026-09-03', 1));
+      fetchStaticBoardMock.mockResolvedValue(board('2026-09-01', { generated_at: undefined }));
+      const second = renderHook(() => useBoard());
+      await waitFor(() => expect(second.result.current.status).toMatchObject({ source: 'cache' }));
+    });
+
     it('keeps the stale mirror on screen when GAS is down as well', async () => {
       const mirror = agedBoard('2026-09-01', 20);
-      // The browser also has an older localStorage copy; the mirror wins the
-      // fallback because it is what the shopper is already reading, and
-      // swapping in different old prices on a failure explains nothing.
-      readCachedBoardMock.mockReturnValue(board('2026-08-30'));
+      // The browser also has a localStorage copy, crawled before the mirror
+      // was: the mirror is the newer of the two old boards, so it is what the
+      // shopper reads and what the failure degrades onto.
+      readCachedBoardMock.mockReturnValue(agedBoard('2026-08-30', 40));
       fetchStaticBoardMock.mockResolvedValue(mirror);
       fetchBoardMock.mockResolvedValue(FAILURE);
       const gtag = vi.fn();
