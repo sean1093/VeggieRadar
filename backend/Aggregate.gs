@@ -15,8 +15,10 @@ function aggregateGroup(def, todayRows, prevRows) {
   if (today.volume < MIN_TRADE_VOLUME || today.avg <= 0) return null;
 
   var changePercent = 0;
+  var prevVolume = null;
   if (prevRows && prevRows.length) {
     var prev = weightedAverage(prevRows);
+    prevVolume = Math.round(prev.volume);
     if (prev.avg > 0) {
       changePercent = ((today.avg - prev.avg) / prev.avg) * 100;
     }
@@ -42,11 +44,40 @@ function aggregateGroup(def, todayRows, prevRows) {
     markets_count: today.markets
   };
 
+  // TRANSIENT, and stripped before the board is stored (`refreshBoardCache`):
+  // `validateBoard`'s collapsed-volume rule is about today against the
+  // previous TRADING DAY, and the stored board is not that — on the second
+  // refresh of a day it is that same day, which is how a flagged item came
+  // back unflagged a few hours later. The comparison is already in hand here,
+  // and carrying it on the card beats re-deriving it or keeping a copy of
+  // yesterday's volumes in the properties store.
+  if (prevVolume !== null) card.prev_volume = prevVolume;
+
   // A blended average can sit far from every stall when varieties diverge
   // (綠竹筍 trades at 2.5× 麻竹筍). The drawer decomposes it when that happens.
   var varieties = varietyBreakdown(def, todayRows, today.volume);
   if (varieties) card.varieties = varieties;
   return card;
+}
+
+/**
+ * Removes the fields `aggregateGroup` attaches for the guard alone, in place.
+ * Takes the ITEMS, not the board that holds them — a board passed here would
+ * be a silent no-op.
+ *
+ * Every path that hands cards to a client calls this: the refresh before it
+ * stores the board (and so before the mirror copies it), and the live search
+ * before it answers and caches. The published payload is a contract
+ * (README §3), and a field that exists between building a card and judging it
+ * has no business in either.
+ *
+ * The rejected board deliberately keeps them: that copy is evidence for
+ * whoever reads it, and the comparison the guard made is part of it.
+ */
+function dropTransient(items) {
+  if (!items) return items;
+  for (var i = 0; i < items.length; i++) delete items[i].prev_volume;
+  return items;
 }
 
 /**

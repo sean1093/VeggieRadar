@@ -245,7 +245,9 @@ function liveRootCards(root, dates) {
     }
   }
 
-  var payload = { date: rocToISO(dates.latest), rows: todayRows.length, items: items };
+  // Live cards come off the same `aggregateGroup` as the board's, so they
+  // carry the guard's own `prev_volume` — which is neither cached nor served.
+  var payload = { date: rocToISO(dates.latest), rows: todayRows.length, items: dropTransient(items) };
   cache.put(cacheKey, JSON.stringify(payload), SEARCH_CACHE_TTL);
   return payload;
 }

@@ -203,6 +203,10 @@ function refreshBoardCache() {
   }));
   if (verdict.ok) {
     markSuspects(board, verdict.suspects);
+    // Everything the guard needed and nobody else may see. Stripped here
+    // rather than never attached, because the guard's own comparison is a
+    // build-time fact: see `prev_volume` in `aggregateGroup`.
+    dropTransient(board.items);
     storeBoard(board);
     updateHistory(board);
     props.setProperty(LAST_OK_PROP, board.generated_at + ' ' + board.roc_date + ' ' + board.count + ' items');

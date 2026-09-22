@@ -2082,8 +2082,12 @@ describe('validateBoard', () => {
 
   it('(e) flags a huge move only when the volume collapsed with it', () => {
     const { api } = loadBackend();
-    const prev = guardBoard(40); // yesterday: 60 000 kg per item
-    const suspects = (extra: Record<string, unknown>) => api.validateBoard(boardWithItem(extra), prev).suspects;
+    const prev = guardBoard(40);
+    // Yesterday's 60 000 kg comes off the card, not off the stored board: the
+    // stored board is the previous trading day only on the day's FIRST
+    // refresh (#77).
+    const suspects = (extra: Record<string, unknown>) =>
+      api.validateBoard(boardWithItem({ prev_volume: 60000, ...extra }), prev).suspects;
 
     expect(suspects({ change_percent: 200, trade_volume: 60000 })).toEqual([]); // volume held: a real move
     expect(suspects({ change_percent: 200, trade_volume: 12000 })).toEqual([]); // exactly 20% of yesterday
@@ -2095,6 +2099,8 @@ describe('validateBoard', () => {
   it('(e) leaves a newly listed item alone — there is no volume to compare', () => {
     const { api } = loadBackend();
     const board = guardBoard(40);
+    // No `prev_volume`: the crop did not trade yesterday, so the rule has
+    // nothing to say about today's move.
     board.items[0] = guardItem('新上架', 10, { change_percent: 400, trade_volume: 100 });
     expect(api.validateBoard(board, guardBoard(40)).suspects).toEqual([]);
   });
@@ -2124,7 +2130,8 @@ describe('validateBoard', () => {
 
   it('never rejects a board over its items — 39 good prices beat none', () => {
     const { api } = loadBackend();
-    const verdict = api.validateBoard(boardWithItem({ change_percent: 900, trade_volume: 100 }), guardBoard(40));
+    const verdict = api.validateBoard(
+      boardWithItem({ change_percent: 900, trade_volume: 100, prev_volume: 60000 }), guardBoard(40));
     expect(verdict).toMatchObject({ ok: true, reasons: [], suspects: ['品項0'] });
   });
 
@@ -2276,6 +2283,80 @@ describe('refreshBoardCache — plausibility guard', () => {
     const history = api.readHistory().items;
     expect(history['番茄']).toBeUndefined();
     expect(history['高麗菜']).toEqual([[rocDate(0), 20]]);
+  });
+
+  describe('the flag survives the day it was raised (#77)', () => {
+    /** The names the published board carries `suspect: true` on. */
+    const flagged = (api: { readDurableBoard: () => string }) =>
+      (JSON.parse(api.readDurableBoard()) as { items: { name: string; suspect?: boolean }[] })
+        .items.filter((it) => it.suspect === true).map((it) => it.name);
+
+    /** 番茄 triples on a tenth of its volume; `todayVolume` can move between refreshes. */
+    const refreshing = (todayVolume: () => number) =>
+      loadBackend({}, moaByDate(rootRows(GUARD_DEFS, (name, roc) =>
+        name === '番茄' && roc === rocDate(0)
+          ? { price: 90, volume: todayVolume() }
+          : { price: 20, volume: 60000 })));
+
+    it('keeps it on the second refresh of the same trading day', () => {
+      // The refresh runs every few hours. The second one of the day used to
+      // compare today's volume against the stored board — which by then was
+      // that same morning — so the rule could not fire and the item came back
+      // unflagged, with its badges and its place in 划算優先 restored.
+      const { api } = refreshing(() => 6000);
+      api.storeBoard(storedBoardOf(GUARD_DEFS.length));
+
+      api.refreshBoardCache();
+      expect(flagged(api)).toEqual(['番茄']);
+
+      api.refreshBoardCache();
+      expect(flagged(api)).toEqual(['番茄']);
+    });
+
+    it('drops it when the volume recovers later the same day', () => {
+      // The flag is not sticky either: it is a verdict on today's numbers, and
+      // when those change the verdict changes with them.
+      let volume = 6000;
+      const { api } = refreshing(() => volume);
+      api.storeBoard(storedBoardOf(GUARD_DEFS.length));
+
+      api.refreshBoardCache();
+      expect(flagged(api)).toEqual(['番茄']);
+
+      volume = 60000; // the day's trading caught up with the price
+      api.refreshBoardCache();
+      expect(flagged(api)).toEqual([]);
+    });
+
+    it('never publishes the comparison the guard used', () => {
+      // `prev_volume` is a build-time fact for the guard. The payload is a
+      // contract (README §3) and the mirror is a copy of it.
+      const { api } = refreshing(() => 6000);
+      api.storeBoard(storedBoardOf(GUARD_DEFS.length));
+      api.refreshBoardCache();
+
+      const stored = JSON.parse(api.readDurableBoard()) as { items: Record<string, unknown>[] };
+      expect(stored.items.some((it) => 'prev_volume' in it)).toBe(false);
+    });
+
+    it('never answers a live search with it either', () => {
+      // `liveRootCards` builds its cards with the same `aggregateGroup`, and
+      // caches them for an hour: a leak there outlives the request.
+      const { api } = refreshing(() => 6000);
+      const answer = api.handleSearch({ query: '番茄' }) as { items?: Record<string, unknown>[] };
+
+      expect(answer.items?.length).toBeGreaterThan(0);
+      expect(answer.items?.some((it) => 'prev_volume' in it)).toBe(false);
+    });
+
+    it('keeps it in the rejected copy, which is evidence rather than a payload', () => {
+      const { api } = halfEmptyRefresh();
+      api.refreshBoardCache();
+
+      const rejected = JSON.parse(api.readChunkedProp(api.REJECTED_PROP_PREFIX, api.REJECTED_PROP_COUNT)) as
+        { items: Record<string, unknown>[] };
+      expect(rejected.items.every((it) => 'prev_volume' in it)).toBe(true);
+    });
   });
 
   it('accepts the first board ever built, with nothing to compare it against', () => {
