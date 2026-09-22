@@ -160,15 +160,23 @@ export function useBoard(): Board {
   // Nothing on screen — the error state — still reads the cache, which a
   // successful read since mount may have filled.
   const reload = useCallback(() => {
+    // Only a board that already knows where it came from is held: `Fallback`
+    // names the two sources `board_fallback` distinguishes, and inventing a
+    // label for a GAS board would put "a lone browser's cache saved a visit"
+    // on an incident that is nothing of the kind. A GAS board lives in the
+    // cache anyway (`fetchBoard` writes it), so it is read back below.
     const onScreen: Fallback =
-      status.kind === 'ready' || status.kind === 'degraded'
-        // A GAS board is in localStorage by the time it is on screen
-        // (`fetchBoard` writes it), so `cache` is the truthful name for it
-        // once it is the thing being fallen back on.
-        ? { board: status.board, source: status.source === 'static' ? 'static' : 'cache' }
+      (status.kind === 'ready' || status.kind === 'degraded') && status.source !== 'gas'
+        ? { board: status.board, source: status.source }
         : null;
-    const cached = readCachedBoard();
-    const held: Fallback = onScreen ?? (cached ? { board: cached, source: 'cache' } : null);
+    // Read only when there is nothing to hold: this runs in a click handler,
+    // and a whole board's `JSON.parse` for a value about to be discarded is
+    // not free.
+    const fromCache = (): Fallback => {
+      const cached = readCachedBoard();
+      return cached ? { board: cached, source: 'cache' } : null;
+    };
+    const held: Fallback = onScreen ?? fromCache();
     setStatus(held ? { kind: 'ready', board: held.board, source: held.source } : { kind: 'loading' });
     load(held);
   }, [load, status]);

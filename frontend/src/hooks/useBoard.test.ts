@@ -203,18 +203,25 @@ describe('useBoard', () => {
 
   it('holds the board a retry was pressed over even when the mirror has gone', async () => {
     // The mirror 404s on the retry — a deploy in flight — so nothing new
-    // paints. What the visitor was reading is still the honest fallback.
+    // paints. What the visitor was reading is still the honest fallback, and
+    // it is reported as the incident it is: `served: 'static'` can only come
+    // from the held board here, since this read has no mirror of its own.
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
     const mirror = agedBoard('2026-09-01', 9);
     fetchStaticBoardMock.mockResolvedValueOnce(mirror).mockResolvedValue(null);
     fetchBoardMock.mockResolvedValue(FAILURE);
-    readCachedBoardMock.mockReturnValue(null);
+    readCachedBoardMock.mockReturnValue(board('2026-09-02')); // newer, and not what was on screen
     const { result } = renderHook(() => useBoard());
     await waitFor(() => expect(result.current.status.kind).toBe('degraded'));
 
+    gtag.mockClear();
     await act(async () => result.current.reload());
     expect(result.current.status).toEqual({
       kind: 'degraded', board: mirror, source: 'static', reason: UNREACHABLE,
     });
+    expect(gtag).toHaveBeenCalledWith('event', 'board_fallback', { served: 'static' });
+    expect(gtag).not.toHaveBeenCalledWith('event', 'board_fallback', { served: 'cache' });
   });
 
   it('returns to the skeleton when a reload has no cache to paint', async () => {
