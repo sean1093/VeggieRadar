@@ -196,8 +196,11 @@ export function useBoard(): Board {
     // The cache is read only when there is nothing on screen: this runs in a
     // click handler, and a whole board's `JSON.parse` for a value about to be
     // discarded is not free.
+    // Prices, not merely a status: the warming placeholder is a `ready` board
+    // with no items, and holding it would degrade onto a blank screen while
+    // the cache still had the last real ones.
     const onScreen: Fallback =
-      status.kind === 'ready' || status.kind === 'degraded'
+      (status.kind === 'ready' || status.kind === 'degraded') && status.board.items.length > 0
         ? { board: status.board, source: status.source }
         : null;
     const cached = onScreen ? null : readCachedBoard();

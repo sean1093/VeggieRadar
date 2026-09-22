@@ -463,8 +463,8 @@ the age from `generated_at` against the backend's own `BOARD_MAX_AGE_MS` (6 h,
 mirrored in `src/lib/utils/freshness.ts`): under it, the mirror answers the
 visit outright and is written to localStorage; over it, it is ranked against
 whatever is already on screen — it paints immediately when it is the newer of
-the two (see the table below) — and the read continues to GAS either way. **The self-heal chain is therefore
-unchanged** — a stale mirror sends the client to `/exec`, whose `readBoard`
+the two (see the table below) — and the read continues to GAS either way.
+**The self-heal chain is therefore unchanged** — a stale mirror sends the client to `/exec`, whose `readBoard`
 queues the rebuild exactly as before. The mirror is a layer in front of GAS,
 never a replacement for it.
 
@@ -475,7 +475,7 @@ What each failure does, in the order the client meets them:
 | No mirror deployed yet (404) | the pre-mirror path: GAS, with the localStorage fallback |
 | Mirror is a truncated file, an error page, or breaks the §3 contract | reports `board_schema_mismatch` and asks GAS |
 | Mirror does not answer within 3 s | asks GAS — a CDN that slow is only delaying the request its absence makes necessary |
-| Mirror is stale **and** GAS is down | the newer of the stale mirror and this browser's cached board stays on screen with the connection note (`board_fallback`, `served: 'static'` or `'cache'`) |
+| Mirror is stale **and** GAS is down | the newer of the stale mirror and whatever is already on screen stays there with the connection note (`board_fallback` names which: `static`, `cache`, or `gas` for a retry over prices GAS gave us earlier) |
 
 Past the authority window neither of those two is "what the app serves" — they
 are two copies of the past, ranked by the only thing that can rank them: when

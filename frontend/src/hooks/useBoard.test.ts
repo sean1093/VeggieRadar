@@ -224,6 +224,51 @@ describe('useBoard', () => {
     expect(gtag).not.toHaveBeenCalledWith('event', 'board_fallback', { served: 'cache' });
   });
 
+  it('degrades a retry back onto the GAS board it was pressed over', async () => {
+    // The third fallback source: not a pipeline incident (`static`) and not a
+    // browser's own copy saving a visit (`cache`), but a retry over prices
+    // GAS itself gave us earlier.
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
+    const live = board('2026-09-03');
+    fetchStaticBoardMock.mockResolvedValue(null);
+    fetchBoardMock.mockResolvedValue(live);
+    readCachedBoardMock.mockReturnValue(null);
+    const { result } = renderHook(() => useBoard());
+    await waitFor(() => expect(result.current.status).toEqual({ kind: 'ready', board: live, source: 'gas' }));
+
+    fetchStaticBoardMock.mockResolvedValue(agedBoard('2026-08-01', 200)); // a mirror far older
+    fetchBoardMock.mockResolvedValue(FAILURE);
+    gtag.mockClear();
+    await act(async () => result.current.reload());
+
+    expect(result.current.status).toEqual({
+      kind: 'degraded', board: live, source: 'gas', reason: UNREACHABLE,
+    });
+    expect(gtag).toHaveBeenCalledWith('event', 'board_fallback', { served: 'gas' });
+  });
+
+  it('holds prices, not a warming placeholder', async () => {
+    // `readBoard` answers a cold backend with a board that has no items. It is
+    // `ready`, and it is nothing to fall back on: the cache has the last real
+    // prices and is what the retry must reach for.
+    const warming = board('2026-09-03', { items: [], count: 0, warming: true, stale: true });
+    const cached = board('2026-09-02');
+    fetchStaticBoardMock.mockResolvedValue(null);
+    fetchBoardMock.mockResolvedValue(warming);
+    readCachedBoardMock.mockReturnValue(null);
+    const { result } = renderHook(() => useBoard());
+    await waitFor(() => expect(result.current.status).toMatchObject({ kind: 'ready', board: warming }));
+
+    readCachedBoardMock.mockReturnValue(cached); // a good board landed in the cache meanwhile
+    fetchBoardMock.mockResolvedValue(FAILURE);
+    await act(async () => result.current.reload());
+
+    expect(result.current.status).toEqual({
+      kind: 'degraded', board: cached, source: 'cache', reason: UNREACHABLE,
+    });
+  });
+
   it('never blanks a GAS board either, whatever the cache answers', async () => {
     // Unreachable from today's UI — the retry renders under the connection
     // note, which no `gas` board carries — but the paint rule has no
