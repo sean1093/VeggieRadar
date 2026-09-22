@@ -2339,6 +2339,16 @@ describe('refreshBoardCache — plausibility guard', () => {
       expect(stored.items.some((it) => 'prev_volume' in it)).toBe(false);
     });
 
+    it('never answers a live search with it either', () => {
+      // `liveRootCards` builds its cards with the same `aggregateGroup`, and
+      // caches them for an hour: a leak there outlives the request.
+      const { api } = refreshing(() => 6000);
+      const answer = api.handleSearch({ query: '番茄' }) as { items?: Record<string, unknown>[] };
+
+      expect(answer.items?.length).toBeGreaterThan(0);
+      expect(answer.items?.some((it) => 'prev_volume' in it)).toBe(false);
+    });
+
     it('keeps it in the rejected copy, which is evidence rather than a payload', () => {
       const { api } = halfEmptyRefresh();
       api.refreshBoardCache();

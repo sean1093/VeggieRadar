@@ -25,7 +25,9 @@
  *
  * @param {Object} next board from `buildBoard`.
  * @param {Object|null} prev the stored board, parsed. Null on first deploy —
- *   then only the absolute floor can fire, since every other rule compares.
+ *   then only the BOARD-level rules stop firing, since those are what compare
+ *   with it. The item-level rules read the card itself: what it says about
+ *   today, and what `aggregateGroup` recorded about the previous trading day.
  * @returns {{ok: boolean, reasons: string[], suspects: string[]}} `reasons`
  *   lists EVERY triggered board-level rule in English (it travels to `diag`
  *   and into the failure mail); `suspects` holds item display names.
@@ -96,7 +98,6 @@ function validateBoard(next, prev) {
   var suspects = [];
   for (var k = 0; k < items.length; k++) {
     var it = items[k];
-    var before = prevByName[it.name];
     var suspect = false;
 
     // (e) A huge move on collapsed volume is one outlier transaction carrying

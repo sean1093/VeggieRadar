@@ -61,6 +61,24 @@ function aggregateGroup(def, todayRows, prevRows) {
 }
 
 /**
+ * Removes the fields `aggregateGroup` attaches for the guard alone, in place.
+ *
+ * Every path that hands cards to a client calls this: the refresh before it
+ * stores the board (and so before the mirror copies it), and the live search
+ * before it answers and caches. The published payload is a contract
+ * (README §3), and a field that exists between building a card and judging it
+ * has no business in either.
+ *
+ * The rejected board deliberately keeps them: that copy is evidence for
+ * whoever reads it, and the comparison the guard made is part of it.
+ */
+function dropTransient(items) {
+  if (!items) return items;
+  for (var i = 0; i < items.length; i++) delete items[i].prev_volume;
+  return items;
+}
+
+/**
  * Per-variety summary for one board item, or null when a breakdown would add
  * nothing (fewer than two meaningful varieties). Shares are computed against
  * the item's TOTAL traded volume, so they stay honest even when folded-away

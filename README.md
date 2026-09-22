@@ -338,10 +338,11 @@ the last verdict as `last_validation`.
 
 The volume rule compares today with the **previous trading day**, which the
 card carries from the crawl for exactly as long as the guard needs it and no
-longer: the stored board is only the previous trading day on the day's *first*
-refresh, and comparing against it on the second published a flagged item
-unflagged a few hours later, with its badges and its place in 划算優先 back
-(#77).
+longer — `dropTransient` runs on every path that hands cards to a client, the
+refresh before it stores and the live search before it answers and caches. The
+stored board is only the previous trading day on the day's *first* refresh, and
+comparing against it on the second published a flagged item unflagged a few
+hours later, with its badges and its place in 划算優先 back (#77).
 
 Marked items stay **on** the board with `suspect: true`: an old price beats a
 blank. What they lose is everything derived from comparing days — they are

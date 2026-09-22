@@ -206,7 +206,7 @@ function refreshBoardCache() {
     // Everything the guard needed and nobody else may see. Stripped here
     // rather than never attached, because the guard's own comparison is a
     // build-time fact: see `prev_volume` in `aggregateGroup`.
-    dropTransient(board);
+    dropTransient(board.items);
     storeBoard(board);
     updateHistory(board);
     props.setProperty(LAST_OK_PROP, board.generated_at + ' ' + board.roc_date + ' ' + board.count + ' items');
@@ -359,20 +359,6 @@ function dispatchFailedAt(record) {
   if (space === -1) return '';
   var outcome = record.substring(space + 1);
   return outcome === 'failed' || outcome.indexOf('rejected') === 0 ? record.substring(0, space) : '';
-}
-
-/**
- * Removes the fields that exist only between building a board and validating
- * it. The published payload is a contract (README §3) and the mirror is a copy
- * of it, so a field the guard needs must not ride along into either.
- *
- * The rejected branch deliberately does not call this: that copy is evidence
- * for whoever reads it, and the comparison the guard made is part of it.
- */
-function dropTransient(board) {
-  if (!board || !board.items) return board;
-  for (var i = 0; i < board.items.length; i++) delete board.items[i].prev_volume;
-  return board;
 }
 
 /** Parses a stored board JSON string, or null when it is absent or corrupt. */
