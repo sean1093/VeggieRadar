@@ -176,6 +176,75 @@ describe('useBoard', () => {
     expect(result.current.status).toEqual({ kind: 'ready', board: recovered, source: 'gas' });
   });
 
+  it('keeps the stale mirror on screen through a retry, and through its failure', async () => {
+    // The state the retry exists for: a mirror past its 6 h authority beside a
+    // backend that will not answer. The mirror is deliberately not cached
+    // while it is stale, so re-reading localStorage answered null for the very
+    // board the visitor is reading — and the retry blanked their prices (#78).
+    const mirror = agedBoard('2026-09-01', 9);
+    fetchStaticBoardMock.mockResolvedValue(mirror);
+    fetchBoardMock.mockResolvedValue(FAILURE);
+    readCachedBoardMock.mockReturnValue(null);
+    const { result } = renderHook(() => useBoard());
+    await waitFor(() => expect(result.current.status.kind).toBe('degraded'));
+
+    const { promise, resolve } = Promise.withResolvers<ApiResponse>();
+    fetchBoardMock.mockReturnValue(promise);
+    act(() => result.current.reload());
+    expect(result.current.status).toEqual({ kind: 'ready', board: mirror, source: 'static' });
+
+    // …and a retry that fails again lands back on the same prices with the
+    // connection note, not on an empty error screen.
+    await act(async () => resolve(FAILURE));
+    expect(result.current.status).toEqual({
+      kind: 'degraded', board: mirror, source: 'static', reason: UNREACHABLE,
+    });
+  });
+
+  it('holds the board a retry was pressed over even when the mirror has gone', async () => {
+    // The mirror 404s on the retry — a deploy in flight — so nothing new
+    // paints. What the visitor was reading is still the honest fallback, and
+    // it is reported as the incident it is: `served: 'static'` can only come
+    // from the held board here, since this read has no mirror of its own.
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
+    const mirror = agedBoard('2026-09-01', 9);
+    fetchStaticBoardMock.mockResolvedValueOnce(mirror).mockResolvedValue(null);
+    fetchBoardMock.mockResolvedValue(FAILURE);
+    readCachedBoardMock.mockReturnValue(board('2026-09-02')); // newer, and not what was on screen
+    const { result } = renderHook(() => useBoard());
+    await waitFor(() => expect(result.current.status.kind).toBe('degraded'));
+
+    gtag.mockClear();
+    await act(async () => result.current.reload());
+    expect(result.current.status).toEqual({
+      kind: 'degraded', board: mirror, source: 'static', reason: UNREACHABLE,
+    });
+    expect(gtag).toHaveBeenCalledWith('event', 'board_fallback', { served: 'static' });
+    expect(gtag).not.toHaveBeenCalledWith('event', 'board_fallback', { served: 'cache' });
+  });
+
+  it('never blanks a GAS board either, whatever the cache answers', async () => {
+    // Unreachable from today's UI — the retry renders under the connection
+    // note, which no `gas` board carries — but the paint rule has no
+    // exceptions, and the next caller (a pull-to-refresh, an auto-retry when
+    // the connection returns) must not have to know that.
+    const live = board('2026-09-03');
+    fetchStaticBoardMock.mockResolvedValue(null);
+    fetchBoardMock.mockResolvedValue(live);
+    readCachedBoardMock.mockReturnValue(null); // private mode, or a quota-full store
+    const { result } = renderHook(() => useBoard());
+    await waitFor(() => expect(result.current.status).toEqual({ kind: 'ready', board: live, source: 'gas' }));
+
+    const { promise, resolve } = Promise.withResolvers<ApiResponse>();
+    fetchBoardMock.mockReturnValue(promise);
+    act(() => result.current.reload());
+    expect(result.current.status).toEqual({ kind: 'ready', board: live, source: 'gas' });
+
+    await act(async () => resolve(board('2026-09-04')));
+    expect(result.current.status.kind).toBe('ready');
+  });
+
   it('returns to the skeleton when a reload has no cache to paint', async () => {
     fetchBoardMock.mockResolvedValue(FAILURE);
     const { result } = renderHook(() => useBoard());
