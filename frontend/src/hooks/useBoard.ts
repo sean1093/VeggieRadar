@@ -160,24 +160,28 @@ export function useBoard(): Board {
   // Nothing on screen — the error state — still reads the cache, which a
   // successful read since mount may have filled.
   const reload = useCallback(() => {
-    // Only a board that already knows where it came from is held: `Fallback`
-    // names the two sources `board_fallback` distinguishes, and inventing a
-    // label for a GAS board would put "a lone browser's cache saved a visit"
-    // on an incident that is nothing of the kind. A GAS board lives in the
-    // cache anyway (`fetchBoard` writes it), so it is read back below.
-    const onScreen: Fallback =
-      (status.kind === 'ready' || status.kind === 'degraded') && status.source !== 'gas'
-        ? { board: status.board, source: status.source }
-        : null;
-    // Read only when there is nothing to hold: this runs in a click handler,
-    // and a whole board's `JSON.parse` for a value about to be discarded is
-    // not free.
+    // What is on screen, whatever it came from. This decides the paint, and
+    // the rule there has no exceptions: nothing that is already showing
+    // prices may be replaced by a skeleton.
+    const onScreen = status.kind === 'ready' || status.kind === 'degraded' ? status : null;
+    // What may be FALLEN BACK on is narrower: `Fallback` names the two sources
+    // `board_fallback` distinguishes, and inventing a label for a GAS board
+    // would put "a lone browser's cache saved a visit" on an incident that is
+    // nothing of the kind. A GAS board is in the cache anyway (`fetchBoard`
+    // writes it, except for a zero-item warming board), so it is read back
+    // below and carries its own label when it is there.
+    //
+    // The read happens only when there is nothing to hold: this runs in a
+    // click handler, and a whole board's `JSON.parse` for a value about to be
+    // discarded is not free.
     const fromCache = (): Fallback => {
       const cached = readCachedBoard();
       return cached ? { board: cached, source: 'cache' } : null;
     };
-    const held: Fallback = onScreen ?? fromCache();
-    setStatus(held ? { kind: 'ready', board: held.board, source: held.source } : { kind: 'loading' });
+    const held: Fallback =
+      onScreen && onScreen.source !== 'gas' ? { board: onScreen.board, source: onScreen.source } : fromCache();
+    const painted = onScreen ?? held;
+    setStatus(painted ? { kind: 'ready', board: painted.board, source: painted.source } : { kind: 'loading' });
     load(held);
   }, [load, status]);
 

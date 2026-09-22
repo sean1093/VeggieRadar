@@ -224,6 +224,27 @@ describe('useBoard', () => {
     expect(gtag).not.toHaveBeenCalledWith('event', 'board_fallback', { served: 'cache' });
   });
 
+  it('never blanks a GAS board either, whatever the cache answers', async () => {
+    // Unreachable from today's UI — the retry renders under the connection
+    // note, which no `gas` board carries — but the paint rule has no
+    // exceptions, and the next caller (a pull-to-refresh, an auto-retry when
+    // the connection returns) must not have to know that.
+    const live = board('2026-09-03');
+    fetchStaticBoardMock.mockResolvedValue(null);
+    fetchBoardMock.mockResolvedValue(live);
+    readCachedBoardMock.mockReturnValue(null); // private mode, or a quota-full store
+    const { result } = renderHook(() => useBoard());
+    await waitFor(() => expect(result.current.status).toEqual({ kind: 'ready', board: live, source: 'gas' }));
+
+    const { promise, resolve } = Promise.withResolvers<ApiResponse>();
+    fetchBoardMock.mockReturnValue(promise);
+    act(() => result.current.reload());
+    expect(result.current.status).toEqual({ kind: 'ready', board: live, source: 'gas' });
+
+    await act(async () => resolve(board('2026-09-04')));
+    expect(result.current.status.kind).toBe('ready');
+  });
+
   it('returns to the skeleton when a reload has no cache to paint', async () => {
     fetchBoardMock.mockResolvedValue(FAILURE);
     const { result } = renderHook(() => useBoard());
