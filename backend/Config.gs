@@ -173,6 +173,22 @@ var GH_DISPATCH_MIN_INTERVAL_MS = 30 * 60 * 1000;
 // anyone kept crawling, and get the token secondary-rate-limited for it.
 var GH_DISPATCH_FAIL_BACKOFF_MS = 5 * 60 * 1000;
 
+// Long-term price history in a Google Sheet (`SheetHistory.gs`, #22). The
+// ScriptProperties history is a rolling 28 trading days by design — 500 KB is
+// what it gets — so 「比去年同期」 and a per-variety baseline need somewhere
+// else to be measured from. The spreadsheet is the deployer's own, named by
+// this property; unset, the whole thing is off and nothing changes.
+var HISTORY_SHEET_ID_PROP = 'HISTORY_SHEET_ID';
+// The last trading day archived, as "<ISO date> <generated_at>". The date says
+// whether today is already written; the timestamp says whether the numbers
+// under it have moved since.
+var SHEET_LAST_WRITE_PROP = 'veggie_sheet_last_write';
+// How much later a crawl of the SAME trading day counts as a correction
+// rather than the 4-hourly refresh revisiting it. MOA completes a day's
+// closing prices through the evening, so the last crawl of a day is the one
+// worth keeping.
+var SHEET_CORRECTION_MS = 6 * 60 * 60 * 1000;
+
 // Plausibility guard (`Validate.gs`). The refresh used to reject exactly one
 // thing — an EMPTY board — so a throttled crawl or a MOA unit change would
 // overwrite 94 good prices with 40 wrong ones, and `updateHistory` would bake

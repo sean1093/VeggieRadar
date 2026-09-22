@@ -168,6 +168,13 @@ function handleDiag(full, props) {
     // our own rule text and our own item names — never platform or MOA text.
     last_validation: parseValidation(props[LAST_VALIDATION_PROP]),
     history: historySummary(),
+    // The long archive (#22), from the properties alone — never a read of the
+    // Sheet itself. `diag` is public and unauthenticated, and a spreadsheet
+    // read here would let anyone spend the deployment's Sheets quota.
+    sheet_history: {
+      configured: !!props[HISTORY_SHEET_ID_PROP],
+      last_write: parseSheetWrite(props[SHEET_LAST_WRITE_PROP]),
+    },
     // Whether the mirror is being republished by the crawl or left to the
     // fallback cron: an expired PAT would 401 on every refresh and nothing
     // else here would say so. Outcome and time only, never the token.

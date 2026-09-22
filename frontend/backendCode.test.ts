@@ -47,6 +47,10 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   let dispatchStatus = 204;
   let dispatchThrows = false;
   const locks = { waits: 0, tries: 0, releases: 0, contended: false };
+  /** The long-term history spreadsheet (#22): tab name → rows, in memory. */
+  const tabs = new Map<string, unknown[][]>();
+  const openedIds: string[] = [];
+  let sheetThrows = false;
   const mails: { to: string; subject: string; body: string }[] = [];
   let mailThrows = false;
   let brokenPropKey: string | null = null;
@@ -68,7 +72,36 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     };
   };
 
+  /** The slice of the Sheets API `SheetHistory.gs` uses, and nothing more. */
+  const tabApi = (name: string) => {
+    const rows = () => tabs.get(name) as unknown[][];
+    return {
+      getLastRow: () => rows().length,
+      getRange: (row: number, col: number, numRows: number, numCols: number) => ({
+        setValues: (values: unknown[][]) => {
+          values.forEach((v, i) => { rows()[row - 1 + i] = v; });
+        },
+        getValues: () =>
+          rows().slice(row - 1, row - 1 + numRows).map((r) => (r ?? []).slice(col - 1, col - 1 + numCols)),
+      }),
+      deleteRows: (start: number, count: number) => void rows().splice(start - 1, count),
+    };
+  };
+
   const services = {
+    SpreadsheetApp: {
+      openById: (id: string) => {
+        if (sheetThrows) throw new Error('Requested entity was not found');
+        openedIds.push(id);
+        return {
+          getSheetByName: (name: string) => (tabs.has(name) ? tabApi(name) : null),
+          insertSheet: (name: string) => {
+            tabs.set(name, []);
+            return tabApi(name);
+          },
+        };
+      },
+    },
     UrlFetchApp: {
       fetch: (url: string, options?: Record<string, unknown>) => respond(url, options),
       fetchAll: (reqs: { url: string }[]) => reqs.map((r) => respond(r.url)),
@@ -152,6 +185,8 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'REFRESH_INTERVAL_HOURS', 'installDailyTrigger', 'refreshBoardCache',
     'doGet', 'isAdmin', 'alertRecipient', 'redactFailure', 'ADMIN_TOKEN_PROP', 'ALERT_EMAIL_PROP',
     'requestMirrorDeploy', 'GH_DISPATCH_TOKEN_PROP', 'GH_DISPATCH_EVENT', 'GH_DISPATCH_URL',
+    'appendDailyHistory', 'historyRowsFor', 'SHEET_HEADER', 'HISTORY_SHEET_ID_PROP',
+    'SHEET_LAST_WRITE_PROP', 'SHEET_CORRECTION_MS',
     'GH_DISPATCH_MIN_INTERVAL_MS', 'GH_DISPATCH_FAIL_BACKOFF_MS', 'GH_DISPATCH_PROP', 'GH_DISPATCH_OK_PROP',
     'validateBoard', 'markSuspects', 'readChunkedProp',
     'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
@@ -171,7 +206,8 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   props.set('ALERT_EMAIL', 'owner@example.com');
   return {
     api,
-    logs, props, cache, triggers, fetches, locks, mails, dispatches,
+    logs, props, cache, triggers, fetches, locks, mails, dispatches, tabs, openedIds,
+    breakSheet: () => { sheetThrows = true; },
     breakDispatch: () => { dispatchThrows = true; },
     rejectDispatch: (code: number) => { dispatchStatus = code; },
     breakMail: () => { mailThrows = true; },
@@ -1612,6 +1648,190 @@ describe('mirror deploy dispatch', () => {
     // …and the same harness does dispatch when the board is good.
     api.refreshBoardCache();
     expect(dispatches).toHaveLength(1);
+  });
+});
+
+/**
+ * The long-term history Sheet (#22).
+ *
+ * The rolling 28-day store in ScriptProperties is untouched and still what
+ * every baseline is measured against; this is one more copy, in a spreadsheet
+ * the deployer owns, for the comparisons that quota cannot hold. What has to
+ * hold: it is off until configured, it costs the board nothing when it fails,
+ * and a trading day lands in it exactly once.
+ */
+describe('long-term history in a Sheet', () => {
+  const goodRows = plausibleRows();
+  const SHEET_ID = '1AbCdEfGh_stub';
+
+  /** A board as `buildBoard` shapes one, crawled `hoursAgo` ago. */
+  const boardOf = (date: string, hoursAgo = 0, over: Record<string, unknown> = {}) => ({
+    type: 'board',
+    date,
+    roc_date: '115.09.21',
+    generated_at: new Date(Date.now() - hoursAgo * 3_600_000).toISOString(),
+    count: 2,
+    items: [
+      {
+        code: 'LA1', name: '高麗菜', official_name: '甘藍', category: '葉菜類',
+        avg_price: 22.1, catty_price: 13.3, change_percent: -1.5, trade_volume: 570700,
+        unit: '公斤', markets_count: 13,
+        varieties: [
+          { name: '初秋', catty_price: 12, retail_price: 20, share_percent: 61 },
+          { name: '雪翠', catty_price: 15, retail_price: 25, share_percent: 22 },
+        ],
+      },
+      {
+        code: 'FF2', name: '番茄', official_name: '番茄', category: '果菜類',
+        avg_price: 40, catty_price: 24, change_percent: 3, trade_volume: 12000,
+        unit: '公斤', markets_count: 6,
+      },
+    ],
+    ...over,
+  });
+
+  describe('historyRowsFor — what actually gets archived', () => {
+    it('writes one blend row per item and one per variety', () => {
+      const { api } = loadBackend();
+      const rows = api.historyRowsFor(boardOf('2026-09-21')) as unknown[][];
+
+      expect(rows).toHaveLength(4); // 2 items + 2 varieties on the first
+      expect(rows[0]).toEqual(['2026-09-21', '高麗菜', '甘藍', '', 22.1, 570700, 13, '']);
+      // The variety row carries the share, not a volume nobody measured: the
+      // breakdown publishes shares and prices and drops the volume it grouped
+      // by, so `share × total` would be an invented number in an archive.
+      expect(rows[1]).toEqual(['2026-09-21', '高麗菜', '甘藍', '初秋', 20, '', '', 61]);
+      expect(rows[3]).toEqual(['2026-09-21', '番茄', '番茄', '', 40, 12000, 6, '']);
+    });
+
+    it('converts the variety price back to the column\'s unit', () => {
+      // The card publishes 元/台斤; every price in this column is 元/公斤, so
+      // one unit reads down the whole archive.
+      const { api } = loadBackend();
+      const rows = api.historyRowsFor(boardOf('2026-09-21')) as unknown[][];
+      expect(rows[1][4]).toBe(20); // 12 元/台斤 ÷ 0.6
+      expect(rows[2][4]).toBe(25); // 15 元/台斤 ÷ 0.6
+    });
+
+    it('skips an item the plausibility guard flagged', () => {
+      // Same reason `updateHistory` skips it: an archive exists to be measured
+      // against later, and a flagged observation must not bend that.
+      const { api } = loadBackend();
+      const board = boardOf('2026-09-21');
+      board.items[0].suspect = true;
+      const rows = api.historyRowsFor(board) as unknown[][];
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0][1]).toBe('番茄');
+    });
+
+    it('matches the header it is written under', () => {
+      const { api } = loadBackend();
+      const rows = api.historyRowsFor(boardOf('2026-09-21')) as unknown[][];
+      for (const row of rows) expect(row).toHaveLength(api.SHEET_HEADER.length);
+    });
+  });
+
+  describe('appendDailyHistory', () => {
+    const configured = () => {
+      const back = loadBackend(goodRows);
+      back.props.set(back.api.HISTORY_SHEET_ID_PROP, SHEET_ID);
+      return back;
+    };
+
+    it('does nothing at all until a sheet is configured', () => {
+      // How this ships. Nothing is opened, nothing is written, and the refresh
+      // behaves exactly as it did.
+      const { api, openedIds, tabs } = loadBackend(goodRows);
+      expect(api.refreshBoardCache().count).toBeGreaterThan(0);
+
+      expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('unconfigured');
+      expect(openedIds).toEqual([]);
+      expect(tabs.size).toBe(0);
+      expect(api.handleDiag().sheet_history).toEqual({ configured: false, last_write: null });
+    });
+
+    it('creates the year tab with its header and appends the day', () => {
+      const { api, tabs, openedIds } = configured();
+      expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('appended');
+
+      expect(openedIds).toEqual([SHEET_ID]);
+      const rows = tabs.get('2026') as unknown[][];
+      expect(rows[0]).toEqual(api.SHEET_HEADER);
+      expect(rows).toHaveLength(5); // header + 4
+      expect(rows[1][0]).toBe('2026-09-21');
+    });
+
+    it('writes a trading day once, however often the refresh revisits it', () => {
+      // The refresh runs every 4 h and re-crawls the same day.
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21'));
+      expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('already written');
+      expect(tabs.get('2026')).toHaveLength(5);
+    });
+
+    it('replaces the day when the numbers have moved on', () => {
+      // MOA completes a day's closing prices through the evening, so a crawl
+      // of the same date hours later is a correction, not a duplicate.
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+
+      const corrected = boardOf('2026-09-21');
+      corrected.items[1].avg_price = 41.5;
+      expect(api.appendDailyHistory(corrected)).toBe('replaced');
+
+      const rows = tabs.get('2026') as unknown[][];
+      expect(rows).toHaveLength(5); // still one day, not two
+      expect(rows[4][4]).toBe(41.5);
+    });
+
+    it('keeps other days intact when it replaces one', () => {
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-20', 30));
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+      api.appendDailyHistory(boardOf('2026-09-21'));
+
+      const rows = tabs.get('2026') as unknown[][];
+      const dates = rows.slice(1).map((r) => r[0]);
+      expect(dates.filter((d) => d === '2026-09-20')).toHaveLength(4);
+      expect(dates.filter((d) => d === '2026-09-21')).toHaveLength(4);
+    });
+
+    it('puts each year in its own tab', () => {
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-12-31', 30));
+      api.appendDailyHistory(boardOf('2027-01-02'));
+
+      expect([...tabs.keys()]).toEqual(['2026', '2027']);
+      expect(tabs.get('2027')).toHaveLength(5);
+    });
+
+    it('never lets a Sheets failure cost the board', () => {
+      const { api, breakSheet, logs, props } = configured();
+      breakSheet();
+
+      const board = api.refreshBoardCache();
+      expect(board.count).toBeGreaterThan(0);
+      expect(props.get('veggie_last_refresh_ok')).toBeTruthy();
+      expect(logs.some((l) => l.includes('appendDailyHistory failed'))).toBe(true);
+      // And nothing is recorded, so the next refresh tries the same day again.
+      expect(props.has('veggie_sheet_last_write')).toBe(false);
+    });
+
+    it('is driven by the refresh, and says so in diag without reading the sheet', () => {
+      const { api, tabs, openedIds } = configured();
+      api.refreshBoardCache();
+
+      expect(tabs.size).toBe(1);
+      const opens = openedIds.length;
+      const diag = api.handleDiag();
+      expect(diag.sheet_history.configured).toBe(true);
+      expect(diag.sheet_history.last_write.date).toBe(api.readBoard().date);
+      // `diag` is public: a spreadsheet read here would let anyone spend the
+      // deployment's Sheets quota.
+      expect(openedIds).toHaveLength(opens);
+      expect(JSON.stringify(diag)).not.toContain(SHEET_ID);
+    });
   });
 });
 

@@ -214,6 +214,9 @@ function refreshBoardCache() {
     // store, never before it, and never in the rejected branch below: a deploy
     // publishes whatever `?action=board` answers at the time.
     requestMirrorDeploy();
+    // The long archive, if one is configured. Same contract: after the store,
+    // never throws, and a day it misses costs the archive, not the board.
+    appendDailyHistory(board);
     recordRefreshOutcome(true,
       '看板已重新建立。\n\n' +
       '交易日：' + board.roc_date + '\n' +
