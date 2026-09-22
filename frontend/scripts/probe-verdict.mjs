@@ -73,6 +73,9 @@ export function reachabilityCategory(res) {
 /** Checks with this status are shown and explained, but do not fail the run. */
 export const DEGRADED = 'degraded';
 
+/** The mirror is still publishing, but on the fallback cron rather than on the crawl. */
+export const DISPATCH_FAILING = 'dispatch_failing';
+
 /**
  * How late a mirror may be before lateness stops being the explanation.
  *
@@ -271,4 +274,70 @@ export function applyVerdict(checks, thresholds) {
   }
 
   return checks;
+}
+
+/**
+ * How long the dispatch may be silent before the mirror is really back on the
+ * cron: two missed crawls at the backend's 4 h cadence, which is also the age
+ * at which the probe already calls a board too old — past that the `mirror`
+ * check is the one that should be speaking.
+ */
+export const DISPATCH_QUIET_MS = 8 * 60 * 60 * 1000;
+
+/** Outcomes `recordDispatch` writes when the POST reached GitHub and failed. */
+const dispatchFailed = (outcome) => outcome === 'failed' || outcome.indexOf('rejected') === 0;
+
+/**
+ * What `diag.mirror_dispatch` says about the deploy the backend asks for when
+ * a crawl lands (README §2).
+ *
+ * Never a page. A failing dispatch costs freshness, not availability: the
+ * 2-hourly schedule still publishes, and the `mirror` check is what bounds how
+ * old the file may get either way. But an expired PAT answers 401 on every
+ * crawl and nothing else would say so from outside — which is the whole reason
+ * an external probe exists.
+ *
+ * @param {unknown} dispatch `diag.mirror_dispatch`, or null/absent.
+ * @param {number} [now] clock, for tests.
+ * @returns {{status: string, category?: string, detail: string}}
+ */
+export function dispatchState(dispatch, now = Date.now()) {
+  if (!dispatch || typeof dispatch !== 'object') {
+    // Not a fault: with no `GH_DISPATCH_TOKEN` the backend skips the POST and
+    // the schedule is the mechanism, which is how this shipped.
+    return { status: 'skipped', detail: 'no dispatch recorded — GH_DISPATCH_TOKEN unset, the cron is the fallback' };
+  }
+  const outcome = typeof dispatch.outcome === 'string' ? dispatch.outcome : '';
+  const acceptedAt = typeof dispatch.last_ok === 'string' ? Date.parse(dispatch.last_ok) : NaN;
+  const accepted = !isNaN(acceptedAt);
+  const since = accepted ? `last accepted ${dispatch.last_ok}` : 'never accepted';
+
+  if (!dispatchFailed(outcome)) {
+    // `dispatched` and `throttled` are the channel working — a throttle only
+    // happens inside 30 minutes of an accepted dispatch. `unknown` is the
+    // partial write where the floor's clock landed and the record did not,
+    // and it only means that BESIDE a `last_ok`.
+    if (outcome === 'dispatched' || outcome === 'throttled' || accepted) {
+      return { status: 'ok', detail: `${outcome || 'unknown'}, ${since}` };
+    }
+    // Neither a known outcome nor a time: there is nothing here to judge, and
+    // calling that healthy would be the lie this check exists to prevent.
+    return {
+      status: 'skipped',
+      detail: `unreadable dispatch record (outcome ${JSON.stringify(dispatch.outcome)}, no last_ok)`,
+    };
+  }
+
+  // A single rejection is not the fallback yet: the next crawl retries behind
+  // the 5-minute backoff, and one missed deploy leaves the mirror one crawl
+  // older than it would have been. Silence is what matters.
+  if (accepted && now - acceptedAt < DISPATCH_QUIET_MS) {
+    return { status: 'ok', detail: `${outcome}, ${since} — one missed deploy; the next crawl retries` };
+  }
+  return {
+    status: DEGRADED,
+    category: DISPATCH_FAILING,
+    detail: `${outcome}, ${since} — the mirror is on the fallback cron;`
+      + ' check the GH_DISPATCH_TOKEN script property (a fine-grained PAT with contents: write)',
+  };
 }

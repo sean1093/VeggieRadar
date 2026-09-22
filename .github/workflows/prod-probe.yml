@@ -171,9 +171,16 @@ jobs:
               // flipping from a silent backend to a late mirror would dedupe
               // against the previous note and leave the thread describing the
               // opposite fault.
-              const what = degraded.map((c) => c.name).sort().join(', ');
+              // Only the rows whose degradation IS one of those softenings.
+              // A check that is born degraded — `mirror_dispatch`, which this
+              // alert does not own — belongs in the annotations above, not in
+              // a heading that says which fault the thread is describing: a
+              // dispatch that flaps would otherwise rewrite the heading every
+              // run and defeat the dedupe below.
+              const softened = degraded.filter((c) => CATEGORIES.includes(c.category));
+              const what = softened.map((c) => c.name).sort().join(', ');
               const heading = holdOpen
-                ? (degraded.length ? `still degraded — ${what}` : 'not verified')
+                ? (softened.length ? `still degraded — ${what}` : 'not verified')
                 : 'recovered';
               if (existing) {
                 // Say it once. A held-open alert can stay held for as long as
