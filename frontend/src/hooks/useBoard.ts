@@ -28,7 +28,7 @@ export type BoardStatus =
    * the stale mirror it was revalidating, or the localStorage copy. Old prices
    * plus `reason` and a retry beat a blank page in front of a stall.
    */
-  | { kind: 'degraded'; board: BoardResponse; source: 'static' | 'cache'; reason: string }
+  | { kind: 'degraded'; board: BoardResponse; source: 'static' | 'cache' | 'gas'; reason: string }
   /** The fetch failed with nothing to fall back on. */
   | { kind: 'error'; message: string };
 
@@ -48,7 +48,7 @@ const UNREACHABLE = '目前連不上伺服器，顯示上次成功載入的行�
  * what the union forbids, and `served` is the same word the analytics event
  * reports.
  */
-type Fallback = { board: BoardResponse; source: 'static' | 'cache' } | null;
+type Fallback = { board: BoardResponse; source: 'static' | 'cache' | 'gas' } | null;
 
 /**
  * The newer of two old boards, by the only thing that can rank them: when the
@@ -155,8 +155,10 @@ export function useBoard(): Board {
         // why the mirror may only ever be a layer in front of GAS, never a
         // replacement.
         const fallback = fresher(mirror ? { board: mirror, source: 'static' } : null, held);
-        // Only when the mirror won: repainting the board already on screen
-        // with a copy of itself is a render for nothing.
+        // Only when the mirror won. `held` is what is already on screen — the
+        // cached board at mount, the retried board on a reload — so painting
+        // it again would be a render for nothing, and painting a mirror that
+        // lost would put older prices over newer ones.
         if (fallback && fallback.board === mirror) {
           setStatus({ kind: 'ready', board: mirror, source: 'static' });
         }
@@ -187,28 +189,20 @@ export function useBoard(): Board {
   // Nothing on screen — the error state — still reads the cache, which a
   // successful read since mount may have filled.
   const reload = useCallback(() => {
-    // What is on screen, whatever it came from. This decides the paint, and
-    // the rule there has no exceptions: nothing that is already showing
-    // prices may be replaced by a skeleton.
-    const onScreen = status.kind === 'ready' || status.kind === 'degraded' ? status : null;
-    // What may be FALLEN BACK on is narrower: `Fallback` names the two sources
-    // `board_fallback` distinguishes, and inventing a label for a GAS board
-    // would put "a lone browser's cache saved a visit" on an incident that is
-    // nothing of the kind. A GAS board is in the cache anyway (`fetchBoard`
-    // writes it, except for a zero-item warming board), so it is read back
-    // below and carries its own label when it is there.
+    // Whatever is on screen, carrying the source it came from — `gas`
+    // included, which `board_fallback` reports as its own kind of incident
+    // rather than being relabelled into one of the other two.
     //
-    // The read happens only when there is nothing to hold: this runs in a
+    // The cache is read only when there is nothing on screen: this runs in a
     // click handler, and a whole board's `JSON.parse` for a value about to be
     // discarded is not free.
-    const fromCache = (): Fallback => {
-      const cached = readCachedBoard();
-      return cached ? { board: cached, source: 'cache' } : null;
-    };
-    const held: Fallback =
-      onScreen && onScreen.source !== 'gas' ? { board: onScreen.board, source: onScreen.source } : fromCache();
-    const painted = onScreen ?? held;
-    setStatus(painted ? { kind: 'ready', board: painted.board, source: painted.source } : { kind: 'loading' });
+    const onScreen: Fallback =
+      status.kind === 'ready' || status.kind === 'degraded'
+        ? { board: status.board, source: status.source }
+        : null;
+    const cached = onScreen ? null : readCachedBoard();
+    const held: Fallback = onScreen ?? (cached ? { board: cached, source: 'cache' } : null);
+    setStatus(held ? { kind: 'ready', board: held.board, source: held.source } : { kind: 'loading' });
     load(held);
   }, [load, status]);
 

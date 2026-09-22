@@ -1,6 +1,6 @@
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { boardItems, useBoard } from './useBoard';
+import { boardItems, useBoard, type BoardStatus } from './useBoard';
 import { fetchBoard, fetchStaticBoard, readCachedBoard, writeCachedBoard } from '../services/api';
 import type * as ApiModule from '../services/api';
 import type { ApiResponse, BoardResponse, ProduceItem } from '../types/produce';
@@ -363,20 +363,67 @@ describe('useBoard', () => {
     it('never lets an undatable board win, in either direction', async () => {
       // A board whose `generated_at` cannot be read has an unknown age, which
       // is why `boardAgeMs` counts it stale; it cannot be the newer of two.
-      const undatable = board('2026-09-03', { generated_at: 'not a date' });
-      readCachedBoardMock.mockReturnValue(undatable);
-      fetchStaticBoardMock.mockResolvedValue(agedBoard('2026-09-01', 72));
+      const mirror = agedBoard('2026-09-01', 72);
+      readCachedBoardMock.mockReturnValue(board('2026-09-03', { generated_at: 'not a date' }));
+      fetchStaticBoardMock.mockResolvedValue(mirror);
       fetchBoardMock.mockResolvedValue(FAILURE);
 
       const { result } = renderHook(() => useBoard());
-      await waitFor(() => expect(result.current.status).toMatchObject({ source: 'static' }));
+      await waitFor(() => expect(result.current.status).toEqual({
+        kind: 'degraded', board: mirror, source: 'static', reason: UNREACHABLE,
+      }));
 
       // …and the same rule the other way round: the datable cache wins over
-      // an undatable mirror.
-      readCachedBoardMock.mockReturnValue(agedBoard('2026-09-03', 1));
+      // an undatable mirror, which starts from the cache already on screen and
+      // so has to be asserted after the failure lands.
+      const cached = agedBoard('2026-09-03', 1);
+      readCachedBoardMock.mockReturnValue(cached);
       fetchStaticBoardMock.mockResolvedValue(board('2026-09-01', { generated_at: undefined }));
       const second = renderHook(() => useBoard());
-      await waitFor(() => expect(second.result.current.status).toMatchObject({ source: 'cache' }));
+      await waitFor(() => expect(second.result.current.status).toEqual({
+        kind: 'degraded', board: cached, source: 'cache', reason: UNREACHABLE,
+      }));
+    });
+
+    it('keeps the mirror on a tie, which is what a cache written from it is', async () => {
+      // The ordinary state: the cache was written from this very mirror while
+      // it was fresh, so the two carry the same `generated_at` and there is
+      // nothing to choose between them.
+      const mirror = agedBoard('2026-09-01', 9);
+      readCachedBoardMock.mockReturnValue({ ...mirror });
+      fetchStaticBoardMock.mockResolvedValue(mirror);
+      fetchBoardMock.mockResolvedValue(FAILURE);
+
+      const { result } = renderHook(() => useBoard());
+      await waitFor(() => expect(result.current.status).toEqual({
+        kind: 'degraded', board: mirror, source: 'static', reason: UNREACHABLE,
+      }));
+    });
+
+    it('never flashes the older mirror over the newer board on screen', async () => {
+      // The paint, not just the fallback: the loser must never reach the
+      // screen at all, not even for the render between the mirror landing and
+      // GAS answering.
+      const cached = agedBoard('2026-09-03', 1);
+      readCachedBoardMock.mockReturnValue(cached);
+      fetchStaticBoardMock.mockResolvedValue(agedBoard('2026-09-01', 72));
+      const { promise, resolve } = Promise.withResolvers<ApiResponse>();
+      fetchBoardMock.mockReturnValue(promise);
+
+      // Every render, not just the ones that settle: the hook body runs on
+      // each one, so this records what the screen would have shown.
+      const painted: BoardStatus[] = [];
+      renderHook(() => {
+        const board = useBoard();
+        painted.push(board.status);
+        return board;
+      });
+      await act(async () => {});
+      await act(async () => resolve(FAILURE));
+
+      const boards = painted.map((status) => boardItems(status));
+      expect(boards.every((items) => items.length === 0 || items === cached.items)).toBe(true);
+      expect(boards.some((items) => items === cached.items)).toBe(true); // it was on screen throughout
     });
 
     it('keeps the stale mirror on screen when GAS is down as well', async () => {

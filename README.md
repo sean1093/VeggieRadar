@@ -461,8 +461,9 @@ close, the remaining lag is invisible.
 and `age_ms` inside it froze the moment it was written, so the client recomputes
 the age from `generated_at` against the backend's own `BOARD_MAX_AGE_MS` (6 h,
 mirrored in `src/lib/utils/freshness.ts`): under it, the mirror answers the
-visit outright and is written to localStorage; over it, the prices still paint
-immediately and the read continues to GAS. **The self-heal chain is therefore
+visit outright and is written to localStorage; over it, it is ranked against
+whatever is already on screen — it paints immediately when it is the newer of
+the two (see the table below) — and the read continues to GAS either way. **The self-heal chain is therefore
 unchanged** — a stale mirror sends the client to `/exec`, whose `readBoard`
 queues the rebuild exactly as before. The mirror is a layer in front of GAS,
 never a replacement for it.
@@ -929,7 +930,7 @@ wrapper, `src/lib/analytics.ts`. Each event exists to settle a decision:
 | Event | Params | Decision it informs |
 | --- | --- | --- |
 | `board_loaded` | `source` (`static` / `gas`), `stale`, `age_bucket` | Baseline for every ratio below; `source` is how the mirror's share of the reads is measured — the number that says whether GAS still carries the board (§2). A cache paint sends nothing: it is not yet a load |
-| `board_fallback` | `served` (`static` / `cache` / `none`) | Fallback rate. `static` means the mirror went stale *and* GAS is down — a pipeline incident; `cache` is one browser's own copy saving one visit |
+| `board_fallback` | `served` (`static` / `cache` / `gas` / `none`) | Fallback rate. `static` means the mirror went stale *and* GAS is down — a pipeline incident; `cache` is one browser's own copy saving one visit; `gas` is a retry over a board GAS itself gave us earlier |
 | `search_result` | `outcome` (`local_hit` / `remote_hit` / `not_found` / `transient`), `query_length` | Live-miss and busy rates → the search index in #21; whether the 15 s deadline holds |
 | `sort_changed` | `mode` | 划算優先 adoption → 「今日推薦」 (§9) |
 | `filter_changed` | `filter` | Which categories and 關注 get used |
