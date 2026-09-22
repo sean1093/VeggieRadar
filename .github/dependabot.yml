@@ -13,6 +13,20 @@ updates:
       # reviewed on its own.
       minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # TypeScript 7 is held, and not by anything in this repo: typescript-eslint
+      # THROWS on import under it ("typescript-eslint does not support TS 7.0"),
+      # so the lint job cannot run at all, and its peer range is still
+      # `typescript: >=4.8.4 <6.1.0` on both latest (8.70.1) and canary
+      # (8.70.2-alpha.5). Everything else is ready: with `baseUrl` dropped from
+      # tsconfig.app.json (TS 7 removed the option) the typecheck, all 616 tests
+      # and the production build pass on 7.0.2.
+      #
+      # Without this, every TS 7 patch release reopens a PR that cannot merge
+      # and burns a CI run proving it. Issue #83 is the reminder to delete this
+      # block — check with `npm view typescript-eslint peerDependencies.typescript`.
+      - dependency-name: typescript
+        versions: [">=7.0.0"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
