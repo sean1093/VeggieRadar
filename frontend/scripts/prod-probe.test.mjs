@@ -19,7 +19,7 @@ import { createServer } from 'node:http';
 import { readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { MIRROR_BACKSTOP_MS } from './probe-verdict.mjs';
 
 const HOUR = 60 * 60 * 1000;
@@ -96,6 +96,13 @@ beforeAll(async () => {
 });
 
 afterAll(() => new Promise((done) => server.close(done)));
+
+// Reset here rather than at the end of a test body: a failing assertion would
+// otherwise leak a broken dispatch into every run after it.
+afterEach(() => {
+  mirrorDispatch = null;
+  triggersInstalled = true;
+});
 
 /** Runs the real probe against the stand-in and returns its result file. */
 async function probe() {
@@ -174,7 +181,6 @@ describe('prod-probe, end to end', () => {
     expect(result.mirror.status).toBe('degraded');
     expect(result.exitCode).toBe(1);
     expect(result.summary_md).not.toMatch(/not paging/);
-    triggersInstalled = true;
   });
 
   it('pages for a mirror old enough to mean nothing is publishing', async () => {
@@ -220,7 +226,6 @@ describe('prod-probe, end to end', () => {
     expect(broken.summary_md).not.toMatch(/Apps Script never answered/);
     expect(broken.exitCode).toBe(0);
     expect(broken.ok).toBe(true);
-    mirrorDispatch = null;
   });
 
   it('pages for a board that cannot be dated at all', async () => {

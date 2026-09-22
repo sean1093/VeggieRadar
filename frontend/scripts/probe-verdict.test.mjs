@@ -9,6 +9,7 @@ import {
   servingFor,
   dispatchState,
   DISPATCH_FAILING,
+  DISPATCH_QUIET_MS,
 } from './probe-verdict.mjs';
 import { BOARD_HEALTHY_ITEMS } from '../src/types/board.schema.ts';
 import { BOARD_MAX_AGE_MS } from '../src/lib/utils/freshness.ts';
@@ -321,6 +322,37 @@ describe('dispatchState — the deploy the crawl asks for', () => {
     expect(dispatchState({ outcome: 'unknown', last_ok: at })).toMatchObject({ status: 'ok' });
     expect(dispatchState({ last_ok: at }).status).toBe('ok'); // no outcome reads as unknown
     expect(dispatchState({ outcome: 'dispatched', last_ok: at }).detail).toContain(at);
+  });
+
+  it('will not call an unreadable record healthy', () => {
+    // A record with neither a known outcome nor a time says nothing. Reading
+    // it as working is the lie this check exists to prevent; reading it as
+    // broken would page-adjacent-warn on a shape nobody has seen.
+    for (const junk of [{}, [], { outcome: 5 }, { outcome: 'dispatched-ish' }]) {
+      expect(dispatchState(junk)).toMatchObject({ status: 'skipped' });
+    }
+    // …but an unknown outcome BESIDE a last_ok is the partial write, and that
+    // is a dispatch that happened.
+    expect(dispatchState({ outcome: 'surprise', last_ok: '2026-09-22T01:00:00.000Z' })).toMatchObject({
+      status: 'ok',
+    });
+  });
+
+  it('lets one missed deploy pass, and degrades the silence after it', () => {
+    const now = Date.parse('2026-09-22T12:00:00.000Z');
+    const at = (msAgo) => new Date(now - msAgo).toISOString();
+
+    // A 502 minutes after an accepted dispatch is one missed deploy: the next
+    // crawl retries behind the 5-minute backoff, and the mirror is one crawl
+    // older than it would have been. Saying "the mirror is on the fallback
+    // cron" there would be false.
+    expect(dispatchState({ outcome: 'rejected 502', last_ok: at(60 * 60 * 1000) }, now)).toMatchObject({
+      status: 'ok',
+    });
+    // Past two missed crawls it is the fallback cron, and that is worth saying.
+    expect(dispatchState({ outcome: 'rejected 502', last_ok: at(DISPATCH_QUIET_MS + 1000) }, now)).toMatchObject({
+      status: DEGRADED, category: DISPATCH_FAILING,
+    });
   });
 
   it('degrades a rejection, and names what to look at', () => {
