@@ -176,6 +176,47 @@ describe('useBoard', () => {
     expect(result.current.status).toEqual({ kind: 'ready', board: recovered, source: 'gas' });
   });
 
+  it('keeps the stale mirror on screen through a retry, and through its failure', async () => {
+    // The state the retry exists for: a mirror past its 6 h authority beside a
+    // backend that will not answer. The mirror is deliberately not cached
+    // while it is stale, so re-reading localStorage answered null for the very
+    // board the visitor is reading — and the retry blanked their prices (#78).
+    const mirror = agedBoard('2026-09-01', 9);
+    fetchStaticBoardMock.mockResolvedValue(mirror);
+    fetchBoardMock.mockResolvedValue(FAILURE);
+    readCachedBoardMock.mockReturnValue(null);
+    const { result } = renderHook(() => useBoard());
+    await waitFor(() => expect(result.current.status.kind).toBe('degraded'));
+
+    const { promise, resolve } = Promise.withResolvers<ApiResponse>();
+    fetchBoardMock.mockReturnValue(promise);
+    act(() => result.current.reload());
+    expect(result.current.status).toEqual({ kind: 'ready', board: mirror, source: 'static' });
+
+    // …and a retry that fails again lands back on the same prices with the
+    // connection note, not on an empty error screen.
+    await act(async () => resolve(FAILURE));
+    expect(result.current.status).toEqual({
+      kind: 'degraded', board: mirror, source: 'static', reason: UNREACHABLE,
+    });
+  });
+
+  it('holds the board a retry was pressed over even when the mirror has gone', async () => {
+    // The mirror 404s on the retry — a deploy in flight — so nothing new
+    // paints. What the visitor was reading is still the honest fallback.
+    const mirror = agedBoard('2026-09-01', 9);
+    fetchStaticBoardMock.mockResolvedValueOnce(mirror).mockResolvedValue(null);
+    fetchBoardMock.mockResolvedValue(FAILURE);
+    readCachedBoardMock.mockReturnValue(null);
+    const { result } = renderHook(() => useBoard());
+    await waitFor(() => expect(result.current.status.kind).toBe('degraded'));
+
+    await act(async () => result.current.reload());
+    expect(result.current.status).toEqual({
+      kind: 'degraded', board: mirror, source: 'static', reason: UNREACHABLE,
+    });
+  });
+
   it('returns to the skeleton when a reload has no cache to paint', async () => {
     fetchBoardMock.mockResolvedValue(FAILURE);
     const { result } = renderHook(() => useBoard());

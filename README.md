@@ -56,7 +56,10 @@ actually being quoted when one crop trades at two very different prices.
 - **Degrade honestly, never blankly.** The last good board is kept in
   localStorage: when the backend is unreachable the app serves those prices with
   「目前連不上伺服器」 plus a retry, because stale prices beat a blank page in
-  front of a stall. A busy backend during search says 「服務忙碌中」 — never
+  front of a stall. The retry keeps them too — it holds whatever is on screen
+  rather than re-reading the cache, since a stale mirror is painted without
+  being cached and re-reading answered null for the very board being read
+  (#78). A busy backend during search says 「服務忙碌中」 — never
   「查無此品項」, which would be a lie about the produce rather than about us.
 - **Shareable.** Every screen is a URL. The item drawer, a search, the filter
   and the sort all live in the hash (`#/i/高麗菜`, `#/?f=葉菜類&sort=value`),

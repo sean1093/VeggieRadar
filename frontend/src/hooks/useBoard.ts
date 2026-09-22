@@ -101,12 +101,13 @@ export function useBoard(): Board {
   // board with the degraded state. Only the newest read may touch the status.
   const generation = useRef(0);
 
-  // One read of the board, in order (README §2). `cached` is what is already
-  // on screen, so a failure has something to degrade onto even when there is
-  // no mirror. Every state change sits behind a promise on purpose: the mount
-  // effect calls this, and nothing may be set synchronously inside an effect.
+  // One read of the board, in order (README §2). `held` is what is already on
+  // screen and where it came from, so a failure has something to degrade onto
+  // even when there is no mirror — and says so truthfully in the analytics.
+  // Every state change sits behind a promise on purpose: the mount effect
+  // calls this, and nothing may be set synchronously inside an effect.
   const load = useCallback(
-    (cached: BoardResponse | null) => {
+    (held: Fallback) => {
       const mine = ++generation.current;
       fetchStaticBoard().then(async (mirror) => {
         if (mine !== generation.current) return;
@@ -131,11 +132,7 @@ export function useBoard(): Board {
         // The stale mirror outranks the cache as the fallback: it is what the
         // shopper is already reading, and swapping in different old prices on
         // a failed refresh would be a change with nothing behind it.
-        const fallback: Fallback = mirror
-          ? { board: mirror, source: 'static' }
-          : cached
-            ? { board: cached, source: 'cache' }
-            : null;
+        const fallback: Fallback = mirror ? { board: mirror, source: 'static' } : held;
         const res = await fetchBoard();
         if (mine !== generation.current) return;
         settle(res, fallback);
@@ -148,16 +145,33 @@ export function useBoard(): Board {
   // only reads — nothing is set synchronously inside it. Both dependencies
   // are stable, so this runs once.
   useEffect(() => {
-    load(initialCache);
+    load(initialCache ? { board: initialCache, source: 'cache' } : null);
   }, [load, initialCache]);
 
-  // Retry, from the error screen or the connection note. Re-reads the cache
-  // because a successful read since mount has refreshed it.
+  // Retry, from the error screen or the connection note.
+  //
+  // Whatever is on screen stays on screen. Re-reading localStorage instead
+  // answered null for a board painted from the mirror — which is deliberately
+  // not cached while it is stale — so the retry replaced the visitor's prices
+  // with the skeleton, in the one state it exists for (§1: degrade honestly,
+  // never blankly). It is also what a retry that fails again degrades back
+  // onto, instead of an empty error screen.
+  //
+  // Nothing on screen — the error state — still reads the cache, which a
+  // successful read since mount may have filled.
   const reload = useCallback(() => {
+    const onScreen: Fallback =
+      status.kind === 'ready' || status.kind === 'degraded'
+        // A GAS board is in localStorage by the time it is on screen
+        // (`fetchBoard` writes it), so `cache` is the truthful name for it
+        // once it is the thing being fallen back on.
+        ? { board: status.board, source: status.source === 'static' ? 'static' : 'cache' }
+        : null;
     const cached = readCachedBoard();
-    setStatus(cached ? { kind: 'ready', board: cached, source: 'cache' } : { kind: 'loading' });
-    load(cached);
-  }, [load]);
+    const held: Fallback = onScreen ?? (cached ? { board: cached, source: 'cache' } : null);
+    setStatus(held ? { kind: 'ready', board: held.board, source: held.source } : { kind: 'loading' });
+    load(held);
+  }, [load, status]);
 
   const freshness = useMemo<FreshnessNotice>(() => {
     if (status.kind !== 'ready' && status.kind !== 'degraded') return NO_NOTICE;
