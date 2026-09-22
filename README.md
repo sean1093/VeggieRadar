@@ -1198,6 +1198,15 @@ could drift:
 | `gas_trigger` | `triggers` includes `refreshBoardCache` | `trigger_missing` |
 | `gas_incident` | `alert.incident_open === false` | `incident_open` |
 | `gas_history` | `history.items ≥ 60` | `history_thin` |
+| `mirror_dispatch` | `mirror_dispatch.outcome` is not a failure | `dispatch_failing` (⚠️ only, never a page) |
+
+`mirror_dispatch` is the one check that can never page. With no
+`GH_DISPATCH_TOKEN` it is *skipped* — that is how the backend ships, and the
+2-hourly cron is the mechanism (§2). With one configured, a rejection (an
+expired PAT answers 401 on every crawl) costs freshness, not availability: the
+cron still publishes and the `mirror` check above is what bounds how old the
+file may get. So it is reported and named, with the property to look at, and
+the run stays green.
 
 `60` is `BOARD_HEALTHY_ITEMS` in `board.schema.ts`: a typical day publishes
 ~90 of ~100 defined items (§1), and MOA throttling a batch shows up as a board

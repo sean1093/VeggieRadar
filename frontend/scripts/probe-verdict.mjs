@@ -73,6 +73,9 @@ export function reachabilityCategory(res) {
 /** Checks with this status are shown and explained, but do not fail the run. */
 export const DEGRADED = 'degraded';
 
+/** The mirror is still publishing, but on the fallback cron rather than on the crawl. */
+export const DISPATCH_FAILING = 'dispatch_failing';
+
 /**
  * How late a mirror may be before lateness stops being the explanation.
  *
@@ -271,4 +274,41 @@ export function applyVerdict(checks, thresholds) {
   }
 
   return checks;
+}
+
+/**
+ * What `diag.mirror_dispatch` says about the deploy the backend asks for when
+ * a crawl lands (README §2).
+ *
+ * Never a page. A failing dispatch costs freshness, not availability: the
+ * 2-hourly schedule still publishes, and the `mirror` check is what bounds how
+ * old the file may get either way. But an expired PAT answers 401 on every
+ * crawl and nothing else would say so from outside — which is the whole reason
+ * an external probe exists.
+ *
+ * @param {unknown} dispatch `diag.mirror_dispatch`, or null/absent.
+ * @returns {{status: string, category?: string, detail: string}}
+ */
+export function dispatchState(dispatch) {
+  if (!dispatch || typeof dispatch !== 'object') {
+    // Not a fault: with no `GH_DISPATCH_TOKEN` the backend skips the POST and
+    // the schedule is the mechanism, which is how this shipped.
+    return { status: 'skipped', detail: 'no dispatch recorded — GH_DISPATCH_TOKEN unset, the cron is the fallback' };
+  }
+  const outcome = typeof dispatch.outcome === 'string' ? dispatch.outcome : 'unknown';
+  const lastOk = typeof dispatch.last_ok === 'string' ? dispatch.last_ok : null;
+  const since = lastOk ? `, last accepted ${lastOk}` : ', never accepted';
+  // `throttled` is a dispatch the 30-minute floor declined, which only happens
+  // when one was accepted inside that window; `unknown` is the partial write
+  // where the floor's clock landed and the record did not. Both mean the
+  // channel works.
+  if (outcome === 'dispatched' || outcome === 'throttled' || outcome === 'unknown') {
+    return { status: 'ok', detail: `${outcome}${since}` };
+  }
+  return {
+    status: DEGRADED,
+    category: DISPATCH_FAILING,
+    detail: `mirror_dispatch: ${outcome}${since} — the mirror is on the fallback cron;`
+      + ' check the GH_DISPATCH_TOKEN script property (a fine-grained PAT with contents: write)',
+  };
 }

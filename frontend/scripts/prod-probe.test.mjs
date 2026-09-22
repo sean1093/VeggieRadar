@@ -61,6 +61,8 @@ const PAGE = '<html><head><title>今日菜價 · VeggieRadar</title></head>'
 let mirrorBody = JSON.stringify(board());
 /** Flipped by the one test that needs `?action=diag` to report a fault. */
 let triggersInstalled = true;
+/** What `?action=diag` says about the mirror deploy dispatch (#68). */
+let mirrorDispatch = null;
 let server;
 let origin;
 
@@ -80,6 +82,7 @@ beforeAll(async () => {
               triggers: triggersInstalled ? ['refreshBoardCache'] : [],
               alert: { incident_open: false },
               history: { items: 93 },
+              mirror_dispatch: mirrorDispatch,
             })
           : JSON.stringify(board()),
       );
@@ -114,7 +117,12 @@ async function probe() {
   });
   try {
     const result = JSON.parse(readFileSync(out, 'utf8'));
-    return { ...result, exitCode: code, mirror: result.checks.find((c) => c.name === 'mirror') };
+      return {
+      ...result,
+      exitCode: code,
+      mirror: result.checks.find((c) => c.name === 'mirror'),
+      dispatch: result.checks.find((c) => c.name === 'mirror_dispatch'),
+    };
   } finally {
     rmSync(out, { force: true });
   }
@@ -186,6 +194,33 @@ describe('prod-probe, end to end', () => {
     expect(result.mirror.status).toBe('failed');
     expect(result.mirror.detail).toMatch(/schema/);
     expect(result.exitCode).toBe(1);
+  });
+
+  it('reports the mirror dispatch without paging for it', async () => {
+    // The state this ships in: no `GH_DISPATCH_TOKEN`, so the backend records
+    // nothing and the cron is the mechanism. Skipped, not failed.
+    mirrorBody = JSON.stringify(board());
+    const off = await probe();
+    expect(off.dispatch.status).toBe('skipped');
+    expect(off.exitCode).toBe(0);
+
+    // Configured and working.
+    mirrorDispatch = { at: new Date().toISOString(), outcome: 'dispatched', last_ok: new Date().toISOString() };
+    const on = await probe();
+    expect(on.dispatch.status).toBe('ok');
+    expect(on.exitCode).toBe(0);
+
+    // An expired PAT: visible, named, and still not a page — the mirror is on
+    // the fallback cron, and the `mirror` check is what bounds its age.
+    mirrorDispatch = { at: new Date().toISOString(), outcome: 'rejected 401', last_ok: null };
+    const broken = await probe();
+    expect(broken.dispatch).toMatchObject({ status: 'degraded', category: 'dispatch_failing' });
+    expect(broken.summary_md).toMatch(/GH_DISPATCH_TOKEN/);
+    // …and it must not borrow the note that says Apps Script never answered.
+    expect(broken.summary_md).not.toMatch(/Apps Script never answered/);
+    expect(broken.exitCode).toBe(0);
+    expect(broken.ok).toBe(true);
+    mirrorDispatch = null;
   });
 
   it('pages for a board that cannot be dated at all', async () => {

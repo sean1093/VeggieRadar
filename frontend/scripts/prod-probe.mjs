@@ -42,7 +42,9 @@ import { fileURLToPath } from 'node:url';
 import { BOARD_HEALTHY_ITEMS, boardMismatch } from '../src/types/board.schema.ts';
 import { BOARD_MAX_AGE_MS } from '../src/lib/utils/freshness.ts';
 import { attemptSuffix, get as request, isTransientStatic, outcome, withRetry } from './gas-retry.mjs';
-import { applyVerdict, DEGRADED, MIRROR_BACKSTOP_MS, reachabilityCategory, servingFor } from './probe-verdict.mjs';
+import {
+  applyVerdict, DEGRADED, dispatchState, GAS_UNREACHABLE, MIRROR_BACKSTOP_MS, reachabilityCategory, servingFor,
+} from './probe-verdict.mjs';
 
 const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -293,6 +295,7 @@ async function checkDiag() {
     skipped('gas_trigger', 'diag unavailable'),
     skipped('gas_incident', 'diag unavailable'),
     skipped('gas_history', 'diag unavailable'),
+    skipped('mirror_dispatch', 'diag unavailable'),
   ];
 
   const name = 'gas_diag';
@@ -316,6 +319,9 @@ async function checkDiag() {
   const triggers = Array.isArray(diag.triggers) ? diag.triggers : [];
   const incidentOpen = alert.incident_open;
   const historyItems = history.items;
+  // Whether the mirror is being republished by the crawl or left to the
+  // fallback cron. Reported, never paged — see `dispatchState`.
+  const dispatch = dispatchState(diag.mirror_dispatch);
 
   return [
     ok(name, 'HTTP 200, JSON'),
@@ -338,6 +344,7 @@ async function checkDiag() {
           `history.items ${JSON.stringify(historyItems)} < ${BOARD_HEALTHY_ITEMS} — baselines stop publishing`,
           res.body,
         ),
+    { name: 'mirror_dispatch', ...dispatch },
   ];
 }
 
@@ -361,7 +368,10 @@ function renderSummary(checks, checkedAt) {
   // outage that every visitor is being served by a healthy backend, in the
   // same summary whose table shows that backend degraded.
   const degradedMirror = checks.some((c) => c.name === 'mirror' && c.status === DEGRADED);
-  const degradedBackend = checks.some((c) => c.name !== 'mirror' && c.status === DEGRADED);
+  // The softening itself, not "anything that is not the mirror": a check that
+  // is born degraded — `mirror_dispatch` — would otherwise print the note
+  // below, which tells the reader that Apps Script never answered.
+  const degradedBackend = checks.some((c) => c.status === DEGRADED && c.category === GAS_UNREACHABLE);
   // Only when nothing else in the run pages. A softened mirror beside a
   // missing `refreshBoardCache` still opens `[prod-alert] trigger_missing`,
   // and a note headed "not paging" inside that issue would be a plain lie.

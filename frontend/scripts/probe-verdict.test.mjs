@@ -7,6 +7,8 @@ import {
   MIRROR_BACKSTOP_MS,
   reachabilityCategory,
   servingFor,
+  dispatchState,
+  DISPATCH_FAILING,
 } from './probe-verdict.mjs';
 import { BOARD_HEALTHY_ITEMS } from '../src/types/board.schema.ts';
 import { BOARD_MAX_AGE_MS } from '../src/lib/utils/freshness.ts';
@@ -295,5 +297,43 @@ describe('servingFor — which mirrors may be softened at all', () => {
     // measurement here would withdraw the other softening and page for a
     // backend outage the mirror is covering.
     expect(measure({ ageMs: -60 * 1000 })).toEqual({ ageMs: -60 * 1000, count: 93 });
+  });
+});
+
+describe('dispatchState — the deploy the crawl asks for', () => {
+  it('says nothing is configured rather than calling it a fault', () => {
+    // How this ships: with no `GH_DISPATCH_TOKEN` the backend skips the POST
+    // and the 2-hourly cron is the mechanism. A probe that paged for that
+    // would page every run on a healthy deployment.
+    for (const absent of [null, undefined, 'nope', 42]) {
+      expect(dispatchState(absent)).toMatchObject({ status: 'skipped' });
+    }
+    expect(dispatchState(null).detail).toMatch(/GH_DISPATCH_TOKEN unset/);
+  });
+
+  it('accepts the three outcomes that mean the channel works', () => {
+    const at = '2026-09-22T01:00:00.000Z';
+    expect(dispatchState({ outcome: 'dispatched', last_ok: at })).toMatchObject({ status: 'ok' });
+    // A throttle only happens inside 30 minutes of an accepted dispatch, and
+    // `unknown` is the partial write where the floor's clock landed and the
+    // record did not — both mean a deploy was asked for.
+    expect(dispatchState({ outcome: 'throttled', last_ok: at })).toMatchObject({ status: 'ok' });
+    expect(dispatchState({ outcome: 'unknown', last_ok: at })).toMatchObject({ status: 'ok' });
+    expect(dispatchState({ last_ok: at }).status).toBe('ok'); // no outcome reads as unknown
+    expect(dispatchState({ outcome: 'dispatched', last_ok: at }).detail).toContain(at);
+  });
+
+  it('degrades a rejection, and names what to look at', () => {
+    // An expired PAT answers 401 on every crawl. Freshness falls back to the
+    // cron, which the `mirror` check already bounds — so this is visible,
+    // not a page.
+    const verdict = dispatchState({ outcome: 'rejected 401', last_ok: null });
+    expect(verdict.status).toBe(DEGRADED);
+    expect(verdict.category).toBe(DISPATCH_FAILING);
+    expect(verdict.detail).toMatch(/GH_DISPATCH_TOKEN/);
+    expect(verdict.detail).toMatch(/never accepted/);
+    expect(dispatchState({ outcome: 'failed', last_ok: '2026-09-20T00:00:00.000Z' })).toMatchObject({
+      status: DEGRADED, category: DISPATCH_FAILING,
+    });
   });
 });
