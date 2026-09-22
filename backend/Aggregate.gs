@@ -62,6 +62,8 @@ function aggregateGroup(def, todayRows, prevRows) {
 
 /**
  * Removes the fields `aggregateGroup` attaches for the guard alone, in place.
+ * Takes the ITEMS, not the board that holds them — a board passed here would
+ * be a silent no-op.
  *
  * Every path that hands cards to a client calls this: the refresh before it
  * stores the board (and so before the mirror copies it), and the live search

@@ -25,9 +25,10 @@
  *
  * @param {Object} next board from `buildBoard`.
  * @param {Object|null} prev the stored board, parsed. Null on first deploy —
- *   then only the BOARD-level rules stop firing, since those are what compare
- *   with it. The item-level rules read the card itself: what it says about
- *   today, and what `aggregateGroup` recorded about the previous trading day.
+ *   then the rules that compare against it stop firing (a's relative bound,
+ *   b, c, d) and the rules that read the card itself still do: a's absolute
+ *   floor, and the item-level e and f, which judge today's numbers against
+ *   what `aggregateGroup` recorded about the previous trading day.
  * @returns {{ok: boolean, reasons: string[], suspects: string[]}} `reasons`
  *   lists EVERY triggered board-level rule in English (it travels to `diag`
  *   and into the failure mail); `suspects` holds item display names.
