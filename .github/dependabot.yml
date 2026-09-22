@@ -14,7 +14,8 @@ updates:
       minor-and-patch:
         update-types: ["minor", "patch"]
     ignore:
-      # TypeScript 7 is held, and not by anything in this repo: typescript-eslint
+      # TypeScript past typescript-eslint's peer bound is held, and not by
+      # anything in this repo: typescript-eslint
       # THROWS on import under it ("typescript-eslint does not support TS 7.0"),
       # so the lint job cannot run at all, and its peer range is still
       # `typescript: >=4.8.4 <6.1.0` on both latest (8.70.1) and canary
@@ -25,8 +26,12 @@ updates:
       # Without this, every TS 7 patch release reopens a PR that cannot merge
       # and burns a CI run proving it. Issue #83 is the reminder to delete this
       # block — check with `npm view typescript-eslint peerDependencies.typescript`.
+      #
+      # The bound mirrors that peer range rather than naming TS 7: a stable 6.0
+      # would be supported and should flow through, while a 6.1 would hit the
+      # same wall one major lower.
       - dependency-name: typescript
-        versions: [">=7.0.0"]
+        versions: [">=6.1.0"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
