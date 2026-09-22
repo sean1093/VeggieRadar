@@ -1,6 +1,6 @@
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { boardItems, useBoard } from './useBoard';
+import { boardItems, useBoard, type BoardStatus } from './useBoard';
 import { fetchBoard, fetchStaticBoard, readCachedBoard, writeCachedBoard } from '../services/api';
 import type * as ApiModule from '../services/api';
 import type { ApiResponse, BoardResponse, ProduceItem } from '../types/produce';
@@ -211,7 +211,7 @@ describe('useBoard', () => {
     const mirror = agedBoard('2026-09-01', 9);
     fetchStaticBoardMock.mockResolvedValueOnce(mirror).mockResolvedValue(null);
     fetchBoardMock.mockResolvedValue(FAILURE);
-    readCachedBoardMock.mockReturnValue(board('2026-09-02')); // newer, and not what was on screen
+    readCachedBoardMock.mockReturnValue(agedBoard('2026-09-02', 30)); // older, so the mirror is what paints
     const { result } = renderHook(() => useBoard());
     await waitFor(() => expect(result.current.status.kind).toBe('degraded'));
 
@@ -222,6 +222,51 @@ describe('useBoard', () => {
     });
     expect(gtag).toHaveBeenCalledWith('event', 'board_fallback', { served: 'static' });
     expect(gtag).not.toHaveBeenCalledWith('event', 'board_fallback', { served: 'cache' });
+  });
+
+  it('degrades a retry back onto the GAS board it was pressed over', async () => {
+    // The third fallback source: not a pipeline incident (`static`) and not a
+    // browser's own copy saving a visit (`cache`), but a retry over prices
+    // GAS itself gave us earlier.
+    const gtag = vi.fn();
+    vi.stubGlobal('gtag', gtag);
+    const live = board('2026-09-03');
+    fetchStaticBoardMock.mockResolvedValue(null);
+    fetchBoardMock.mockResolvedValue(live);
+    readCachedBoardMock.mockReturnValue(null);
+    const { result } = renderHook(() => useBoard());
+    await waitFor(() => expect(result.current.status).toEqual({ kind: 'ready', board: live, source: 'gas' }));
+
+    fetchStaticBoardMock.mockResolvedValue(agedBoard('2026-08-01', 200)); // a mirror far older
+    fetchBoardMock.mockResolvedValue(FAILURE);
+    gtag.mockClear();
+    await act(async () => result.current.reload());
+
+    expect(result.current.status).toEqual({
+      kind: 'degraded', board: live, source: 'gas', reason: UNREACHABLE,
+    });
+    expect(gtag).toHaveBeenCalledWith('event', 'board_fallback', { served: 'gas' });
+  });
+
+  it('holds prices, not a warming placeholder', async () => {
+    // `readBoard` answers a cold backend with a board that has no items. It is
+    // `ready`, and it is nothing to fall back on: the cache has the last real
+    // prices and is what the retry must reach for.
+    const warming = board('2026-09-03', { items: [], count: 0, warming: true, stale: true });
+    const cached = board('2026-09-02');
+    fetchStaticBoardMock.mockResolvedValue(null);
+    fetchBoardMock.mockResolvedValue(warming);
+    readCachedBoardMock.mockReturnValue(null);
+    const { result } = renderHook(() => useBoard());
+    await waitFor(() => expect(result.current.status).toMatchObject({ kind: 'ready', board: warming }));
+
+    readCachedBoardMock.mockReturnValue(cached); // a good board landed in the cache meanwhile
+    fetchBoardMock.mockResolvedValue(FAILURE);
+    await act(async () => result.current.reload());
+
+    expect(result.current.status).toEqual({
+      kind: 'degraded', board: cached, source: 'cache', reason: UNREACHABLE,
+    });
   });
 
   it('never blanks a GAS board either, whatever the cache answers', async () => {
@@ -335,12 +380,103 @@ describe('useBoard', () => {
       expect(result.current.freshness.note).not.toBe(REFRESHING);
     });
 
+    it('lets a newer cached board outrank a mirror that stopped publishing', async () => {
+      // A deploy pipeline that has been stuck for days leaves a mirror far
+      // older than a board this browser loaded an hour ago. Ranking by source
+      // put the older prices on screen and degraded onto them (#79).
+      const mirror = agedBoard('2026-09-01', 72);
+      const cached = agedBoard('2026-09-03', 1);
+      readCachedBoardMock.mockReturnValue(cached);
+      fetchStaticBoardMock.mockResolvedValue(mirror);
+      fetchBoardMock.mockResolvedValue(FAILURE);
+      const gtag = vi.fn();
+      vi.stubGlobal('gtag', gtag);
+
+      const { result } = renderHook(() => useBoard());
+
+      await waitFor(() =>
+        expect(result.current.status).toEqual({
+          kind: 'degraded', board: cached, source: 'cache', reason: UNREACHABLE,
+        }),
+      );
+      // The incident is reported as what it is: this visit was saved by one
+      // browser's own copy, not by the mirror.
+      expect(gtag).toHaveBeenCalledWith('event', 'board_fallback', { served: 'cache' });
+      expect(gtag).not.toHaveBeenCalledWith('event', 'board_fallback', { served: 'static' });
+    });
+
+    it('never lets an undatable board win, in either direction', async () => {
+      // A board whose `generated_at` cannot be read has an unknown age, which
+      // is why `boardAgeMs` counts it stale; it cannot be the newer of two.
+      const mirror = agedBoard('2026-09-01', 72);
+      readCachedBoardMock.mockReturnValue(board('2026-09-03', { generated_at: 'not a date' }));
+      fetchStaticBoardMock.mockResolvedValue(mirror);
+      fetchBoardMock.mockResolvedValue(FAILURE);
+
+      const { result } = renderHook(() => useBoard());
+      await waitFor(() => expect(result.current.status).toEqual({
+        kind: 'degraded', board: mirror, source: 'static', reason: UNREACHABLE,
+      }));
+
+      // …and the same rule the other way round: the datable cache wins over
+      // an undatable mirror, which starts from the cache already on screen and
+      // so has to be asserted after the failure lands.
+      const cached = agedBoard('2026-09-03', 1);
+      readCachedBoardMock.mockReturnValue(cached);
+      fetchStaticBoardMock.mockResolvedValue(board('2026-09-01', { generated_at: undefined }));
+      const second = renderHook(() => useBoard());
+      await waitFor(() => expect(second.result.current.status).toEqual({
+        kind: 'degraded', board: cached, source: 'cache', reason: UNREACHABLE,
+      }));
+    });
+
+    it('keeps the mirror on a tie, which is what a cache written from it is', async () => {
+      // The ordinary state: the cache was written from this very mirror while
+      // it was fresh, so the two carry the same `generated_at` and there is
+      // nothing to choose between them.
+      const mirror = agedBoard('2026-09-01', 9);
+      readCachedBoardMock.mockReturnValue({ ...mirror });
+      fetchStaticBoardMock.mockResolvedValue(mirror);
+      fetchBoardMock.mockResolvedValue(FAILURE);
+
+      const { result } = renderHook(() => useBoard());
+      await waitFor(() => expect(result.current.status).toEqual({
+        kind: 'degraded', board: mirror, source: 'static', reason: UNREACHABLE,
+      }));
+    });
+
+    it('never flashes the older mirror over the newer board on screen', async () => {
+      // The paint, not just the fallback: the loser must never reach the
+      // screen at all, not even for the render between the mirror landing and
+      // GAS answering.
+      const cached = agedBoard('2026-09-03', 1);
+      readCachedBoardMock.mockReturnValue(cached);
+      fetchStaticBoardMock.mockResolvedValue(agedBoard('2026-09-01', 72));
+      const { promise, resolve } = Promise.withResolvers<ApiResponse>();
+      fetchBoardMock.mockReturnValue(promise);
+
+      // Every render, not just the ones that settle: the hook body runs on
+      // each one, so this records what the screen would have shown.
+      const painted: BoardStatus[] = [];
+      renderHook(() => {
+        const board = useBoard();
+        painted.push(board.status);
+        return board;
+      });
+      await act(async () => {});
+      await act(async () => resolve(FAILURE));
+
+      const boards = painted.map((status) => boardItems(status));
+      expect(boards.every((items) => items.length === 0 || items === cached.items)).toBe(true);
+      expect(boards.some((items) => items === cached.items)).toBe(true); // it was on screen throughout
+    });
+
     it('keeps the stale mirror on screen when GAS is down as well', async () => {
       const mirror = agedBoard('2026-09-01', 20);
-      // The browser also has an older localStorage copy; the mirror wins the
-      // fallback because it is what the shopper is already reading, and
-      // swapping in different old prices on a failure explains nothing.
-      readCachedBoardMock.mockReturnValue(board('2026-08-30'));
+      // The browser also has a localStorage copy, crawled before the mirror
+      // was: the mirror is the newer of the two old boards, so it is what the
+      // shopper reads and what the failure degrades onto.
+      readCachedBoardMock.mockReturnValue(agedBoard('2026-08-30', 40));
       fetchStaticBoardMock.mockResolvedValue(mirror);
       fetchBoardMock.mockResolvedValue(FAILURE);
       const gtag = vi.fn();
