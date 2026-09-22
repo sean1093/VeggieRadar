@@ -15,8 +15,10 @@ function aggregateGroup(def, todayRows, prevRows) {
   if (today.volume < MIN_TRADE_VOLUME || today.avg <= 0) return null;
 
   var changePercent = 0;
+  var prevVolume = null;
   if (prevRows && prevRows.length) {
     var prev = weightedAverage(prevRows);
+    prevVolume = Math.round(prev.volume);
     if (prev.avg > 0) {
       changePercent = ((today.avg - prev.avg) / prev.avg) * 100;
     }
@@ -41,6 +43,15 @@ function aggregateGroup(def, todayRows, prevRows) {
     unit: '公斤',
     markets_count: today.markets
   };
+
+  // TRANSIENT, and stripped before the board is stored (`refreshBoardCache`):
+  // `validateBoard`'s collapsed-volume rule is about today against the
+  // previous TRADING DAY, and the stored board is not that — on the second
+  // refresh of a day it is that same day, which is how a flagged item came
+  // back unflagged a few hours later. The comparison is already in hand here,
+  // and carrying it on the card beats re-deriving it or keeping a copy of
+  // yesterday's volumes in the properties store.
+  if (prevVolume !== null) card.prev_volume = prevVolume;
 
   // A blended average can sit far from every stall when varieties diverge
   // (綠竹筍 trades at 2.5× 麻竹筍). The drawer decomposes it when that happens.
