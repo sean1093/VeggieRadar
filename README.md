@@ -464,9 +464,9 @@ mirrored in `src/lib/utils/freshness.ts`): under it, the mirror answers the
 visit outright and is written to localStorage; over it, it is ranked against
 whatever is already on screen — it paints immediately when it is the newer of
 the two (see the table below) — and the read continues to GAS either way.
-**The self-heal chain is therefore unchanged** — a stale mirror sends the client to `/exec`, whose `readBoard`
-queues the rebuild exactly as before. The mirror is a layer in front of GAS,
-never a replacement for it.
+**The self-heal chain is therefore unchanged** — a stale mirror sends the
+client to `/exec`, whose `readBoard` queues the rebuild exactly as before. The
+mirror is a layer in front of GAS, never a replacement for it.
 
 What each failure does, in the order the client meets them:
 
