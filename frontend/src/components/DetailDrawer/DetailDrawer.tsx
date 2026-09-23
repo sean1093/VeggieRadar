@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -114,29 +114,45 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({
   const hasLastYear = lastYear !== null;
   const hasRetail = marketPrice(item) != null;
 
-  // Once per open, and once the board has settled. The cached board painted
+  // Once per open, with what the user saw: when the board settles, or when
+  // the drawer closes first, whichever comes first. The cached board painted
   // while the fresh one loads may lack a baseline or a year-ago price the
-  // fresh one has: reported at once, the open would be counted without them;
-  // reported again when they arrive, it would be counted twice — either way
-  // in exactly the numbers these flags exist to measure.
+  // fresh one has — reported at once, an open that lasted into the fresh
+  // board would be counted without them; reported again, twice; reported only
+  // on settling, an open closed before it would not be counted at all.
   // Keyed by the item, not its root: 青椒 and 甜椒 share one, and moving from
   // one to the other inside the drawer is a second open. An item with no
   // root name has no trend and has never been reported.
   const openKey = isOpen && item.official_name ? item.name : null;
-  const trackedKey = useRef<string | null>(null);
+  // `has_last_year` is how #22 decides whether the comparison earns a place
+  // on the card too: it is shown here only until that is measured.
+  const flags = useMemo(
+    () => ({ has_varieties: hasVarieties, has_baseline: showBaseline, has_last_year: hasLastYear, has_retail: hasRetail }),
+    [hasVarieties, showBaseline, hasLastYear, hasRetail],
+  );
+  const pending = useRef<{ key: string; flags: typeof flags } | null>(null);
+  const reportedKey = useRef<string | null>(null);
   useEffect(() => {
+    const report = () => {
+      if (!pending.current) return;
+      reportedKey.current = pending.current.key;
+      track('drawer_opened', pending.current.flags);
+      pending.current = null;
+    };
     if (!openKey) {
-      trackedKey.current = null;
+      report(); // closed before the board settled: what it showed until then
+      reportedKey.current = null;
       return;
     }
-    if (!boardSettled || trackedKey.current === openKey) return;
-    trackedKey.current = openKey;
-    // `has_last_year` is how #22 decides whether the comparison earns a place
-    // on the card too: it is shown here only until that is measured.
-    track('drawer_opened', {
-      has_varieties: hasVarieties, has_baseline: showBaseline, has_last_year: hasLastYear, has_retail: hasRetail,
-    });
-  }, [openKey, boardSettled, hasVarieties, showBaseline, hasLastYear, hasRetail]);
+    if (reportedKey.current === openKey) return;
+    if (pending.current && pending.current.key !== openKey) report(); // moved to another item
+    pending.current = { key: openKey, flags };
+    if (boardSettled) report();
+  }, [openKey, boardSettled, flags]);
+  // Unmounted while open — App drops the drawer with its item.
+  useEffect(() => () => {
+    if (pending.current) track('drawer_opened', pending.current.flags);
+  }, []);
 
   // Phones hand the sentence to LINE through the native sheet; desktops, which
   // have no sheet, get the link on the clipboard. Only the completed path is

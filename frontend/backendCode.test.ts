@@ -3945,6 +3945,30 @@ describe('same weeks last year (#22 §2)', () => {
     expect(back.props.has('veggie_yoy_skipped_at')).toBe(false);
   });
 
+  it('does not count text in column A that sorts between two dates as a day', () => {
+    const roc = '115.09.21';
+    const back = archived([
+      blend(yearAgo(roc, -2), '高麗菜', 10),
+      [`${yearAgo(roc, -1)} `, '高麗菜', '甘藍', '', 999, 1, 1, ''], // typed with a trailing space
+      blend(yearAgo(roc, -1), '高麗菜', 20),
+      blend(yearAgo(roc, 1), '高麗菜', 30),
+      blend(yearAgo(roc, 2), '高麗菜', 40),
+    ]);
+    expect(back.api.refreshYearAgo(roc)).toEqual({ 高麗菜: 25 });
+  });
+
+  it('says in diag when the last backfill stopped short of the year-ago window', () => {
+    // Finished before its reach took in the week before a year back.
+    const roc = rocDate(0);
+    const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)), plausibleRowsWith({}));
+    back.api.refreshBoardCache();
+    back.props.set('veggie_sheet_backfill', JSON.stringify({
+      id: 'j', status: 'done', updated_at: new Date().toISOString(),
+      sheet: SHEET_ID, from: yearAgo(roc, 0), to: rocIso(rocShift(roc, -1)), cursor: yearAgo(roc, -1),
+    }));
+    expect(back.api.handleDiag().sheet_history.year_ago).toMatchObject({ backfill_short: true });
+  });
+
   it('says in diag whether the board is compared with what is kept, and why not', () => {
     const roc = rocDate(0);
     const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)), plausibleRowsWith({}));
@@ -4215,11 +4239,13 @@ describe('same weeks last year (#22 §2)', () => {
   it('reads under the history lock when the window reaches the board\'s own year', () => {
     // Late in December the window reaches into the current year's tab, where
     // the live path deletes and rewrites its day.
+    // Only that tab: the older one is read without it.
     const roc = '115.12.28';
-    const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)));
+    const back = archived([-2, -1, 1, 2, 5, 6].map((d) => blend(yearAgo(roc, d), '高麗菜', 25))); // 5, 6 are 2026
     back.contendLock();
     expect(back.api.refreshYearAgo(roc)).toBeNull();
-    expect(back.sheetReads).toHaveLength(0);
+    expect(back.sheetReads).toContain('2025');
+    expect(back.sheetReads).not.toContain('2026');
     expect(back.props.has(back.api.YOY_PROP)).toBe(false); // not kept: asked again next refresh
   });
 

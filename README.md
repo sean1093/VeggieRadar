@@ -536,9 +536,9 @@ which is the far half of the year-ago window the comparison reads for today:
 The archive's first reader is 「比去年同期」 (#22 §2). The refresh reads the
 archived blend rows within a week either side of the trading date a year
 back — column A of the year tab (two, across New Year) to find them, then
-only those rows; under the history lock only late in December, when the
-window reaches the current year's tab, where the live path rewrites its day
-— and takes each crop's median, one value per day, over the SAME number of
+only those rows; the current year's tab under the history lock, which only
+late in December is part of the window, since that is where the live path
+rewrites its day — and takes each crop's median, one value per day, over the SAME number of
 days from each side of the day itself (the nearest ones, and the day if
 archived), so a window with more on one side — a backfill that stopped
 part-way, a gap, a closure — cannot lean to that week. With at least two on
@@ -1141,7 +1141,7 @@ wrapper, `src/lib/analytics.ts`. Each event exists to settle a decision:
 | `sort_changed` | `mode` | 划算優先 adoption → 「今日推薦」 (§9) |
 | `filter_changed` | `filter` | Which categories and 關注 get used |
 | `watch_toggled` | `on`, `count_bucket` | Whether a watchlist summary is worth building |
-| `drawer_opened` | `has_varieties`, `has_baseline`, `has_last_year`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen; `has_last_year` is how #22 decides whether 「比去年同期」 earns a place on the card (it is drawer-only until then). Sent once per open, once the board's read has finished (`useBoard().settled`) — not while a cached copy or a stale mirror is painted over a read still in flight, whose flags may be missing what the fresh board brings |
+| `drawer_opened` | `has_varieties`, `has_baseline`, `has_last_year`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen; `has_last_year` is how #22 decides whether 「比去年同期」 earns a place on the card (it is drawer-only until then). Sent once per open, with what the user saw: when the board's read finishes (`useBoard().settled`), or when the drawer closes first — so an open that lasts into the fresh board is not counted with a cached copy's flags, and one closed before it is still counted |
 | `share` | `method` (`web_share` / `clipboard`), `has_retail` | Whether sharing earns the per-item preview pages (§9), and how much of it goes through the native sheet |
 | `trend_result` | `outcome` (`ok` / `empty` / `failed`), `reason` | Whether the trend deadline is right; memo hits are not reported |
 | `chunk_failed` | `chunk` | Cost of the code split |

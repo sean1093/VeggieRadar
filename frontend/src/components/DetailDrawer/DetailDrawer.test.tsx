@@ -256,6 +256,31 @@ describe('DetailDrawer', () => {
       }
     });
 
+    it('reports an open closed before the board settles, with what it showed', () => {
+      // Waiting only for the settle would never count it — and skew toward
+      // fast connections exactly the numbers these flags measure.
+      const gtag = vi.fn();
+      vi.stubGlobal('gtag', gtag);
+      const opens = () => gtag.mock.calls.filter((c) => c[1] === 'drawer_opened');
+      try {
+        const { rerender, unmount } = render(
+          <DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} boardSettled={false} />,
+        );
+        expect(opens()).toHaveLength(0);
+        rerender(
+          <DetailDrawer isOpen={false} onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} boardSettled={false} />,
+        );
+        expect(opens()).toHaveLength(1);
+        expect(opens()[0][2]).toMatchObject({ has_last_year: false });
+
+        rerender(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} boardSettled={false} />);
+        unmount(); // App drops the drawer with its item
+        expect(opens()).toHaveLength(2);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
     it('reports has_baseline only when the baseline sentence shows', () => {
       // A percentage without the price it is measured from renders nothing.
       const gtag = vi.fn();
