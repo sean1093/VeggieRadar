@@ -4492,15 +4492,29 @@ describe('per-variety baselines (#22 §3)', () => {
     expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20, 改良種: 54.5 } });
   });
 
-  it('gives none to a variety listed on under half the item\'s days', () => {
+  it('gives none to a variety listed on under half the item\'s days since it first was', () => {
     // Rows exist only on days the board broke the item down: a crop nearly
     // all one variety has them on its few contested days, not its month.
+    const on = (variety: string, kg: number, back: number[]) =>
+      back.map((d) => varietyRow(dayOf(ROC, -d), '高麗菜', variety, kg));
+    const everyOther = Array.from({ length: 14 }, (_, i) => 28 - 2 * i); // 28, 26, …, 2
     const back = archived([
       ...Array.from({ length: 28 }, (_, i) => blendRow(dayOf(ROC, -1 - i), '高麗菜', 25)),
-      ...days(ROC, '高麗菜', '初秋', 20, 13), // 13 of 28
-      ...days(ROC, '高麗菜', '改良種', 30, 14), // 14 of 28
+      ...on('初秋', 20, everyOther.filter((d) => d !== 14)), // 13 of the 28 since it first was
+      ...on('雪翠', 40, everyOther), // 14 of 28
+      ...on('改良種', 30, Array.from({ length: 12 }, (_, i) => i + 1)), // just in season: 12 of 12
     ].sort((x, y) => String(y[0]).localeCompare(String(x[0]))));
-    expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 改良種: 30 } });
+    expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 雪翠: 40, 改良種: 30 } });
+  });
+
+  it('does not count a blend row without a price as a day the item traded', () => {
+    // Listed on ten days, then twelve with a blend row cleared by hand: those
+    // are no days of trade, and must not make ten of twenty-two.
+    const back = archived([
+      ...Array.from({ length: 12 }, (_, i) => blendRow(dayOf(ROC, -1 - i), '高麗菜', 0)),
+      ...Array.from({ length: 10 }, (_, i) => varietyRow(dayOf(ROC, -13 - i), '高麗菜', '初秋', 20)),
+    ]);
+    expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20 } });
   });
 
   it('puts the percentage on the variety rows of the next build', () => {
