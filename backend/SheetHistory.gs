@@ -270,9 +270,13 @@ function parseSheetWrite(value) {
 //     day — `archiveDay` appends a new date without looking, and a day both
 //     had written would be there twice.
 //   - **A day already in the Sheet is left alone.** Whatever wrote it — the
-//     live path, or an earlier backfill — got there first.
-//   - **It writes under the history lock**, like `archiveDay`: the presence
-//     check and the append have to be one step.
+//     live path, or an earlier backfill — got there first. The check is NOT
+//     under the lock, and needs no lock only because of the rule above and
+//     one chain per job: nothing else writes a date in the job's range. A new
+//     writer of past dates would have to take the check under the lock too.
+//   - **Its append is under the history lock**, like `archiveDay`'s: two
+//     appends computing the same `getLastRow() + 1` would write over each
+//     other.
 //
 // Rows land in the order they were written, not in date order: the live days
 // first, then each window newest-first. Nothing reads the tab in order — the
@@ -295,7 +299,13 @@ function handleSheetBackfill(params) {
   var props = PropertiesService.getScriptProperties();
   var sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
   if (!sheetId) return backfillReply(readSheetBackfill(props), false, '尚未設定 HISTORY_SHEET_ID');
-  if (!params.months && !params.cancel) {
+  var cancel = params.cancel === '1';
+  if (params.months && backfillMonths(params.months) === null) {
+    // Refused, not defaulted: `months=0` reads like "nothing", and answering
+    // it with a year of crawling is the one reading that costs a day's quota.
+    return backfillReply(readSheetBackfill(props), false, 'months 需為 1–' + SHEET_BACKFILL_MAX_MONTHS + ' 的整數');
+  }
+  if (!params.months && !cancel) {
     var job = readSheetBackfill(props);
     var status = backfillReply(job, false, job ? '回填狀態' : '尚未回填');
     status.archive = archiveSummary(sheetId);
@@ -308,7 +318,7 @@ function handleSheetBackfill(params) {
   try {
     return withHistoryLock(function () {
       ran = true;
-      return params.cancel ? cancelSheetBackfill(props) : startSheetBackfill(props, params.months);
+      return cancel ? cancelSheetBackfill(props) : startSheetBackfill(props, params.months);
     });
   } catch (err) {
     if (ran) throw err;
@@ -408,10 +418,12 @@ function newSheetBackfill(boardRoc, months, previous) {
   };
 }
 
-/** The requested reach, clamped; anything unreadable is a year. */
+/** The requested reach — a year when absent, clamped above — or null when unreadable. */
 function backfillMonths(months) {
+  if (months === undefined || months === null || months === '') return SHEET_BACKFILL_DEFAULT_MONTHS;
+  if (!/^\d+$/.test(String(months))) return null;
   var n = parseInt(months, 10);
-  if (!(n >= 1)) return SHEET_BACKFILL_DEFAULT_MONTHS;
+  if (n < 1) return null;
   return n > SHEET_BACKFILL_MAX_MONTHS ? SHEET_BACKFILL_MAX_MONTHS : n;
 }
 
@@ -437,14 +449,25 @@ function monthsBefore(roc, n) {
 }
 
 /**
- * The range a job being replaced has written in full — everything after its
- * cursor — or null.
+ * The range a job being replaced leaves covered: what it wrote itself —
+ * everything after its cursor — joined to the range it was itself told to
+ * skip when the two meet, so coverage carries across any number of jobs
+ * rather than only the last. Null when there is none.
  */
 function coveredBy(job) {
   if (!job || !job.cursor) return null;
   var cursorNext = rocToISO(shiftROC(isoToROC(job.cursor), 1));
   var from = cursorNext > job.from ? cursorNext : job.from;
-  return from <= job.to ? { from: from, to: job.to } : null;
+  var own = from <= job.to ? { from: from, to: job.to } : null;
+  var prior = job.skip || null;
+  if (!own || !prior) return own || prior;
+  var meets = prior.to >= rocToISO(shiftROC(isoToROC(own.from), -1)) &&
+    prior.from <= rocToISO(shiftROC(isoToROC(own.to), 1));
+  if (!meets) return own; // disjoint: keep the newer, which the next job meets first
+  return {
+    from: prior.from < own.from ? prior.from : own.from,
+    to: prior.to > own.to ? prior.to : own.to
+  };
 }
 
 /**
@@ -463,6 +486,12 @@ function sheetBackfillStep() {
     // `months=` request drops it; the job reads as stalled and resumes.
     Logger.log('sheetBackfillStep: properties unavailable: ' + err);
     return null;
+  }
+  if (job && job.status === 'running' && linkInFlight(job)) {
+    // A second link of the same job — a watchdog that fired beside a link
+    // that is alive after all. Touch nothing: the triggers are that link's.
+    Logger.log('sheetBackfillStep: another link of this job is running');
+    return job;
   }
   if (!job || job.status !== 'running' || cancelRequested(props, job)) {
     finishBackfillStep(props, job);
@@ -487,6 +516,7 @@ function sheetBackfillStep() {
     job.link_started_at = job.updated_at;
     job.link_open = true;
     writeSheetBackfill(props, job);
+    armBackfillWatchdog();
     backfillWindow(job, props.getProperty(HISTORY_SHEET_ID_PROP));
   } catch (err) {
     job.last_error = String(err && err.message || err).substring(0, 200);
@@ -550,6 +580,23 @@ function finishBackfillStep(props, job) {
   }
 }
 
+/**
+ * Replaces this link's spent trigger with one that fires once the link could
+ * no longer be running. A link that finishes drops it and queues the next as
+ * usual; one the 6-minute limit kills, whose `finally` never runs, is followed
+ * by the watchdog instead — which finds the failure it counted and retries,
+ * so a window that is always too slow reaches `failed` without anyone asking.
+ */
+function armBackfillWatchdog() {
+  try {
+    dropTriggers(SHEET_BACKFILL_FN);
+    ScriptApp.newTrigger(SHEET_BACKFILL_FN).timeBased().after(SHEET_BACKFILL_LINK_MAX_MS + 60 * 1000).create();
+  } catch (err) {
+    // Without it a killed link stalls the chain, and `months=` resumes it.
+    Logger.log('armBackfillWatchdog: not armed: ' + err);
+  }
+}
+
 function cancelRequested(props, job) {
   try {
     return !!job && props.getProperty(SHEET_BACKFILL_CANCEL_PROP) === job.id;
@@ -584,12 +631,12 @@ function backfillWindow(job, sheetId) {
     throw new Error('MOA did not answer ' + fetched.unanswered.length + ' roots (' +
       fetched.unanswered.slice(0, 3).join('、') + (fetched.unanswered.length > 3 ? '…' : '') + ')');
   }
-  var built = backfillDays(fetched.rows, start, end);
+  var built = backfillDays(fetched.rows, start, end, fetched.dropped[PROBE_ROOT]);
   // MOA answers a closed market with `休市` rows, so a probe root with no rows
   // at all is a crawl that failed, not a window without trading.
   if (built === null) throw new Error('no ' + PROBE_ROOT + ' rows for ' + start + '–' + end);
 
-  var written = writeArchivedDays(sheetId, built.days);
+  var written = writeArchivedDays(sheetId, built.days, job.id);
   job.windows += 1;
   job.days_written += written.days;
   job.days_skipped += written.skipped;
@@ -616,18 +663,31 @@ function moveBackfillCursor(job, roc) {
  * window on it, where the window's own days lie behind it. The newest day is
  * never deferred — the next window would end on it again — and is judged
  * against nothing, as the live path does after a closure past its lookback.
+ *
+ * `probeDropped` are days the probe root truncated on alone, so they are
+ * missing from its rows. More than a thousand rows of it is trading by any
+ * measure, and leaving such a day out of the calendar would make the next
+ * day's "previous trading day" the one before it.
  * @returns {{days: Array<{date: string, rows: Array}>, deferred: ?string}|null}
  *   null when the probe root answered nothing at all — a failed crawl, which
  *   must not pass for a week of closed markets.
  */
-function backfillDays(rowsByRoot, rocStart, rocEnd) {
+function backfillDays(rowsByRoot, rocStart, rocEnd, probeDropped) {
   var probeRows = rowsByRoot[PROBE_ROOT];
-  if (!probeRows || !probeRows.length) return null;
-  var trading = tradingDates(probeRows);
-  var byItem = [];
-  for (var i = 0; i < BOARD_ITEMS.length; i++) {
-    byItem.push(groupByTransDate(selectRows(rowsByRoot[BOARD_ITEMS[i].official], BOARD_ITEMS[i])));
-  }
+  if ((!probeRows || !probeRows.length) && !(probeDropped && probeDropped.length)) return null;
+  var trading = tradingDates(probeRows || []);
+  (probeDropped || []).forEach(function (day) {
+    if (trading.indexOf(day) === -1) trading.push(day);
+  });
+  trading.sort();
+  // One map of root → rows per date, which is the shape `boardCards` takes.
+  var byDay = {};
+  Object.keys(rowsByRoot).forEach(function (root) {
+    var grouped = groupByTransDate(rowsByRoot[root]);
+    Object.keys(grouped).forEach(function (day) {
+      (byDay[day] = byDay[day] || {})[root] = grouped[day];
+    });
+  });
 
   var days = [];
   var deferred = null;
@@ -639,14 +699,7 @@ function backfillDays(rowsByRoot, rocStart, rocEnd) {
       deferred = day;
       continue;
     }
-    var items = [];
-    for (var j = 0; j < BOARD_ITEMS.length; j++) {
-      var todayRows = byItem[j][day];
-      if (!todayRows) continue;
-      var card = aggregateGroup(BOARD_ITEMS[j], todayRows, (prev && byItem[j][prev]) || []);
-      if (card) items.push(card);
-    }
-    var board = { date: rocToISO(day), items: items };
+    var board = { date: rocToISO(day), items: boardCards(byDay[day] || {}, (prev && byDay[prev]) || {}) };
     // Item rules only. The board-level rules judge a crawl against the board
     // users are looking at, and there is no such board for a day in the past.
     markSuspects(board, validateBoard(board, null).suspects);
@@ -668,9 +721,10 @@ function backfillDays(rowsByRoot, rocStart, rocEnd) {
  * write, where reading a year's column under it would hold up the refresh.
  * @returns {{days: number, skipped: number, rows: number}}
  */
-function writeArchivedDays(sheetId, days) {
+function writeArchivedDays(sheetId, days, jobId) {
   var spreadsheet = SpreadsheetApp.openById(sheetId);
   var zone = spreadsheet.getSpreadsheetTimeZone();
+  var cache = CacheService.getScriptCache();
   var written = { days: 0, skipped: 0, rows: 0 };
   var byYear = {};
   for (var i = 0; i < days.length; i++) {
@@ -679,18 +733,19 @@ function writeArchivedDays(sheetId, days) {
   }
   var blocks = [];
   Object.keys(byYear).forEach(function (year) {
-    var tab = spreadsheet.getSheetByName(year);
-    var present = tab ? archivedDates(tab, zone) : {};
+    var present = presentDates(spreadsheet, year, zone, jobId, cache);
     var block = [];
+    var dates = [];
     byYear[year].forEach(function (day) {
       if (present[day.date]) {
         written.skipped += 1;
         return;
       }
       Array.prototype.push.apply(block, day.rows);
+      dates.push(day.date);
       written.days += 1;
     });
-    if (block.length) blocks.push({ year: year, rows: block });
+    if (block.length) blocks.push({ year: year, rows: block, dates: dates, present: present });
   });
   if (!blocks.length) return written;
 
@@ -714,8 +769,42 @@ function writeArchivedDays(sheetId, days) {
     Logger.log('writeArchivedDays: history lock busy, retrying once: ' + err);
     withHistoryLock(append);
   }
-  for (var r = 0; r < blocks.length; r++) written.rows += blocks[r].rows.length;
+  for (var r = 0; r < blocks.length; r++) {
+    written.rows += blocks[r].rows.length;
+    for (var d = 0; d < blocks[r].dates.length; d++) blocks[r].present[blocks[r].dates[d]] = true;
+    rememberPresent(cache, jobId, blocks[r].year, blocks[r].present);
+  }
   return written;
+}
+
+/**
+ * The dates a year tab holds, read once per job and then kept in the cache
+ * with the job's own writes added — a year's column is ~50k cells, and a job
+ * has ~40 links. Safe for the reason the unlocked check is (see the top of
+ * this section): no one else writes a date in the job's range. An evicted
+ * entry is simply read again.
+ */
+function presentDates(spreadsheet, year, zone, jobId, cache) {
+  var key = SHEET_PRESENT_CACHE_PREFIX + jobId + '_' + year;
+  try {
+    var hit = jobId && cache.get(key);
+    if (hit) return JSON.parse(hit);
+  } catch (err) {
+    Logger.log('presentDates: cache unreadable: ' + err);
+  }
+  var tab = spreadsheet.getSheetByName(year);
+  var present = tab ? archivedDates(tab, zone) : {};
+  rememberPresent(cache, jobId, year, present);
+  return present;
+}
+
+function rememberPresent(cache, jobId, year, present) {
+  if (!jobId) return;
+  try {
+    cache.put(SHEET_PRESENT_CACHE_PREFIX + jobId + '_' + year, JSON.stringify(present), SHEET_PRESENT_CACHE_TTL);
+  } catch (err) {
+    Logger.log('rememberPresent: not cached: ' + err); // read again next link
+  }
 }
 
 /** Every date a year tab holds, as a set. Reads column A only. */

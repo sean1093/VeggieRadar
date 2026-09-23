@@ -53,6 +53,8 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   const openedIds: string[] = [];
   const cacheRemovals: { key: string; triggers: string[] }[] = [];
   const formatZones: string[] = [];
+  /** Every `getValues` on a tab, by tab name: what a job costs in reads. */
+  const sheetReads: string[] = [];
   let sheetThrows = false;
   let sheetZone = 'Asia/Taipei';
   let triggerDeleteThrows = false;
@@ -106,7 +108,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
           });
         },
         getValues: () =>
-          rows().slice(row - 1, row - 1 + numRows).map((r) => (r ?? []).slice(col - 1, col - 1 + numCols)),
+          (sheetReads.push(name), rows()).slice(row - 1, row - 1 + numRows).map((r) => (r ?? []).slice(col - 1, col - 1 + numCols)),
         setNumberFormat: (format: string) => {
           if (col === 1 && format === '@') tab().textColumnA = true;
         },
@@ -268,7 +270,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     api,
     logs, props, cache, triggers, fetches, locks, mails, dispatches, tabs, openedIds,
     breakSheet: () => { sheetThrows = true; },
-    formatZones, cacheRemovals,
+    formatZones, cacheRemovals, sheetReads,
     setSheetZone: (zone: string) => { sheetZone = zone; },
     breakTriggerDelete: () => { triggerDeleteThrows = true; },
     breakDispatch: () => { dispatchThrows = true; },
@@ -2134,7 +2136,7 @@ const rocIso = (roc: string): string => {
  * newest rows kept and `Next: true` set. A day answering `null` makes the
  * whole request come back as MOA answers a burst: an empty body.
  */
-function moaRange(daily: (root: string, roc: string) => Row[] | null | 'error', cap = Infinity) {
+function moaRange(daily: (root: string, roc: string) => Row[] | null | 'error' | 'bare', cap = Infinity) {
   const requests: { root: string; from: string; to: string }[] = [];
   const answer = (url: string) => {
     const q = new URL(url).searchParams;
@@ -2145,12 +2147,15 @@ function moaRange(daily: (root: string, roc: string) => Row[] | null | 'error', 
     let rows: Row[] = [];
     let silent = false;
     let error = false;
+    let bare = false;
     for (let d = from; d <= to; d = rocShift(d, 1)) {
       const day = daily(root, d);
       if (day === null) silent = true;
       else if (day === 'error') error = true;
+      else if (day === 'bare') bare = true;
       else rows = rows.concat(day);
     }
+    if (bare) return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ RS: 'OK' }) };
     if (silent) return { getResponseCode: () => 200, getContentText: () => '' };
     if (error) return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ RS: 'ERROR', Message: 'busy' }) };
     const next = rows.length > cap;
@@ -2189,7 +2194,7 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
   const ROWS_A_DAY = 4;
 
   const backfill = (
-    daily: (root: string, roc: string) => Row[] | null | 'error' = market,
+    daily: (root: string, roc: string) => Row[] | null | 'error' | 'bare' = market,
     { cap = Infinity, boardRoc = BOARD_ROC, overrides = {} as Record<string, unknown> } = {},
   ) => {
     const moa = moaRange((root, roc) => daily(root, roc), cap);
@@ -2251,9 +2256,26 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.moa.requests).toHaveLength(0); // the crawl is the trigger's, never the request's
     });
 
-    it('clamps the reach, and reads a missing or garbled one as a year', () => {
+    it('clamps a long reach, and refuses one it cannot read', () => {
+      // `months=0` reads like "nothing"; answering it with a year of crawling
+      // is the one reading that costs a day's trigger quota.
       expect(backfill().api.handleSheetBackfill({ months: '99' }).job.months).toBe(24);
-      expect(backfill().api.handleSheetBackfill({ months: 'soon' }).job.months).toBe(12);
+      for (const months of ['0', 'soon', '-3', '1.5']) {
+        const back = backfill();
+        expect(back.api.handleSheetBackfill({ months }).message).toBe('months 需為 1–24 的整數');
+        expect(back.job()).toBeNull();
+        expect(back.links()).toBe(0);
+      }
+    });
+
+    it('cancels only on cancel=1, and backfills the Sheet only on sheet=1', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.handleSheetBackfill({ cancel: '0' });
+      expect(back.job().status).toBe('running');
+
+      back.props.set(back.api.ADMIN_TOKEN_PROP, 's3cret-token');
+      expect(back.get({ action: 'backfill', sheet: '0', token: 's3cret-token' }).sheet).toBeUndefined();
     });
 
     it('reaches back whole months, even from a month\'s last day', () => {
@@ -2484,6 +2506,62 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.job().last_error).toContain('Requested entity was not found');
     });
 
+    it('arms a watchdog while it works, and swaps it for the next link after', () => {
+      // A link the 6-minute limit kills never reaches its `finally`; the
+      // watchdog is what follows it.
+      let during: string[] = [];
+      const back = backfill((root, roc) => {
+        if (!during.length) during = back.triggers.filter((t) => t.handler === back.api.SHEET_BACKFILL_FN).map((t) => t.kind);
+        return market(root, roc);
+      });
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      expect(during).toEqual(['after:480000']); // the spent trigger gone, the watchdog in its place
+      expect(back.triggers.filter((t) => t.handler === back.api.SHEET_BACKFILL_FN).map((t) => t.kind))
+        .toEqual(['after:1000']);
+    });
+
+    it('retries a window after a killed link, when the watchdog fires', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      // What a killed link leaves: counted, open, started past the limit.
+      back.setJob({ failures: 1, link_open: true, link_started_at: new Date(Date.now() - 8 * 60_000).toISOString() });
+
+      back.api.sheetBackfillStep();
+      expect(back.job()).toMatchObject({ windows: 1, failures: 0, link_open: false });
+    });
+
+    it('leaves a job alone while another of its links is running', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.setJob({ link_open: true, link_started_at: new Date().toISOString() });
+      const before = back.triggers.map((t) => t.kind);
+
+      back.api.sheetBackfillStep();
+      expect(back.moa.requests).toHaveLength(0);
+      expect(back.triggers.map((t) => t.kind)).toEqual(before);
+    });
+
+    it('keeps a day the probe root truncated on in the trading calendar', () => {
+      // More than a thousand rows of 甘藍 is a trading day; dropping it from
+      // the calendar would judge the next day against the one before it.
+      const heavy = (root: string, roc: string): Row[] => {
+        if (root === '甘藍' && roc === '115.09.15') {
+          return Array.from({ length: 6 }, (_, i) => trendRow(roc, '甘藍-初秋', 20, 20000, `市場${i}`));
+        }
+        if (root === '番茄' && roc === '115.09.14') return [trendRow(roc, '番茄-牛番茄', 10, 200000)];
+        return market(root, roc);
+      };
+      const back = backfill(heavy, { cap: 5 });
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      const itemsOn = (date: string) => back.rowsOf('2026').filter((r) => r[0] === date).map((r) => r[1]);
+      expect(itemsOn('2026-09-16')).toContain('番茄'); // judged against 09-15, not the spike on 09-14
+      expect(back.logs.some((l) => l.includes('still truncates on 115.09.15'))).toBe(true);
+    });
+
     it('counts a link before it does the work', () => {
       let failuresDuring = -1;
       const back = backfill((root, roc) => {
@@ -2689,6 +2767,37 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.job()).toMatchObject({ status: 'done', days_skipped: 0 });
     });
 
+    it('carries coverage across jobs, not only from the last one', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '1' }); // A: 08-21 … 09-20
+      runOut(back);
+      back.api.storeBoard({
+        type: 'board', date: '2026-09-26', roc_date: '115.09.26',
+        generated_at: new Date().toISOString(), count: 0, items: [],
+      });
+      back.api.handleSheetBackfill({ months: '1' }); // B: 08-26 … 09-25, skipping A
+      runOut(back);
+      const crawled = back.moa.requests.length;
+
+      back.api.handleSheetBackfill({ months: '2' }); // C: 07-26 … 09-25
+      expect(back.job().skip).toEqual({ from: '2026-08-21', to: '2026-09-25' });
+      runOut(back);
+      for (const r of back.moa.requests.slice(crawled)) expect(r.to < '115.08.21').toBe(true);
+    });
+
+    it('reads a year\'s dates once a job, not once a link', () => {
+      // A year's column is ~50k cells and a job ~40 links.
+      const back = backfill();
+      back.api.appendDailyHistory({
+        type: 'board', date: '2026-09-18', roc_date: '115.09.18', generated_at: new Date().toISOString(),
+        items: [{ name: '高麗菜', official_name: '甘藍', avg_price: 22, trade_volume: 90000, markets_count: 5 }],
+      }); // the tab exists, with a day in it, before the job starts
+      back.api.handleSheetBackfill({ months: '1' });
+      runOut(back);
+      expect(back.job()).toMatchObject({ windows: 4, days_skipped: 1 });
+      expect(back.sheetReads.filter((t) => t === '2026')).toHaveLength(1);
+    });
+
     it('stops a window at the finished part when the board has moved on', () => {
       // Days later the new job's top overlaps the old job's range: its first
       // window must end its crawl where the finished range begins.
@@ -2812,6 +2921,15 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.api.fetchCompleteRows(['甘藍', '番茄'], '115.09.01', '115.09.04').unanswered).toEqual(['番茄']);
     });
 
+    it('takes an OK without rows for "nothing traded"', () => {
+      // How an empty answer is shaped is not on record; `RS: "OK"` is an
+      // answer either way, and failing every window over it would stop a job.
+      const back = backfill((root, roc) => (root === '番茄' ? 'bare' : market(root, roc)));
+      const { rows, unanswered } = back.api.fetchCompleteRows(['甘藍', '番茄'], '115.09.01', '115.09.04');
+      expect(unanswered).toEqual([]);
+      expect(rows['番茄']).toEqual([]);
+    });
+
     it('reports a split that MOA stopped answering part-way', () => {
       const oneADay = (root: string, roc: string) => {
         if (root !== '甘藍') return [];
@@ -2828,12 +2946,21 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
         ? [trendRow(roc, '甘藍-初秋', 20, 60000), trendRow(roc, '甘藍-初秋', 40, 60000, '台中')]
         : [];
 
-    it('keeps the trend\'s oldest point whole', () => {
+    it('leaves the trend\'s cut oldest point out, in one request', () => {
       // A cut response drops the OLDEST rows, and the sparkline's first point
-      // would be the average of whichever market was left.
+      // would be the average of whichever market was left. On the public path
+      // the budget is one request, so that point is left out, not made whole.
       const back = backfill(twoMarkets, { cap: 7 }); // 4 days × 2 rows, one over
       const { trend } = back.api.handleTrend({ cropName: '甘藍', days: '4' });
-      expect(trend).toEqual([30, 30, 30, 30]);
+      expect(trend).toEqual([null, 30, 30, 30]);
+      expect(back.moa.requests).toHaveLength(1);
+    });
+
+    it('asks MOA nothing for a blank trend term', () => {
+      // A blank term matches every crop MOA has.
+      const back = backfill();
+      back.api.handleTrend({ cropName: ' ', days: '14' });
+      expect(back.moa.requests).toHaveLength(0);
     });
 
     it('keeps the rolling backfill\'s oldest day whole', () => {

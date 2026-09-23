@@ -231,6 +231,11 @@ var SHEET_BACKFILL_LINK_MAX_MS = 7 * 60 * 1000;
 // retry inside it and stop the job over something that clears on its own.
 // Kept well under the stall window, which it must not look like.
 var SHEET_BACKFILL_RETRY_MS = 3 * 60 * 1000;
+// The dates a year tab already holds, cached for the length of a job: its
+// range never meets a date the live path writes, so after the first read the
+// only dates that can appear in it are its own, which it adds as it goes.
+var SHEET_PRESENT_CACHE_PREFIX = 'veggie_sheet_present_';
+var SHEET_PRESENT_CACHE_TTL = 6 * 60 * 60; // seconds; the platform maximum
 
 // Plausibility guard (`Validate.gs`). The refresh used to reject exactly one
 // thing — an EMPTY board — so a throttled crawl or a MOA unit change would

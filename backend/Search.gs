@@ -376,10 +376,12 @@ function handleTrend(params) {
 
   var start = new Date(today);
   start.setDate(today.getDate() - (days - 1));
-  // Whole, not as MOA may cut it: 14 days is sized to stay under its row cap,
-  // but a response it does cut drops the OLDEST rows, and the sparkline's
-  // first point would be an average of whichever markets were left.
-  var rows = tradedRows(fetchWhole(term, dateToROC(start), dateToROC(today)) || []).filter(function (r) {
+  // 14 days is sized to stay under MOA's row cap, but a response it does cut
+  // drops the OLDEST rows, and the sparkline's first point would be an average
+  // of whichever markets were left. That point is left out instead of made
+  // whole: this is the public serving path, where one request is the budget.
+  var page = fetchPage(term, dateToROC(start), dateToROC(today));
+  var rows = tradedRows(wholeDaysOf(page)).filter(function (r) {
     return rowRoot(r.CropName) === root;
   });
 

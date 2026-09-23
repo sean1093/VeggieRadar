@@ -13,14 +13,34 @@
  * filter with `selectRows` / `rowRoot`.
  */
 function fetchCrop(cropName, rocStart, rocEnd) {
-  if (!cropName || !rocStart) return [];
+  return fetchPage(cropName, rocStart, rocEnd).rows;
+}
+
+/** Like `fetchCrop`, with the whole `parsePage` verdict rather than the rows. */
+function fetchPage(cropName, rocStart, rocEnd) {
+  if (!cropName || !rocStart) return { rows: [], answered: false, next: false };
   try {
-    var resp = UrlFetchApp.fetch(cropUrl(cropName, rocStart, rocEnd), { muteHttpExceptions: true });
-    return parseRows(resp);
+    return parsePage(UrlFetchApp.fetch(cropUrl(cropName, rocStart, rocEnd), { muteHttpExceptions: true }));
   } catch (err) {
     Logger.log('fetchCrop error (' + cropName + ' ' + rocStart + '): ' + err);
-    return [];
+    return { rows: [], answered: false, next: false };
   }
+}
+
+/**
+ * A page's rows less its oldest date when MOA cut it short — the one date the
+ * cut can have left partial, since MOA drops the oldest rows first. For a
+ * caller that would rather show a day as missing than spend more requests
+ * making it whole: the trend, on the public serving path.
+ */
+function wholeDaysOf(page) {
+  if (!page.next || !page.rows.length) return page.rows;
+  var oldest = null;
+  for (var i = 0; i < page.rows.length; i++) {
+    var day = page.rows[i].TransDate;
+    if (day && (oldest === null || day < oldest)) oldest = day;
+  }
+  return page.rows.filter(function (r) { return r.TransDate !== oldest; });
 }
 
 /** Single-date URL when `rocEnd` is omitted; a closed range otherwise. */
@@ -55,11 +75,14 @@ function parsePage(resp) {
   try {
     if (resp.getResponseCode() !== 200) return none;
     var json = JSON.parse(resp.getContentText());
-    // An answer carries `Data`, even when nothing traded. A JSON object
-    // without it is MOA saying something else — an error, a throttle — and
-    // counting it as "nothing traded" would archive the crop's absence.
-    if (!json || !Array.isArray(json.Data)) return none;
-    return { rows: json.Data, answered: true, next: json.Next === true };
+    // An answer is `RS: "OK"` or carries a `Data` array, even when nothing
+    // traded. Anything else — an error object, a throttle — is MOA saying
+    // something other than "nothing traded", and taking it for that would
+    // archive the crop's absence.
+    if (!json || typeof json !== 'object') return none;
+    var data = Array.isArray(json.Data) ? json.Data : null;
+    if (!data && json.RS !== 'OK') return none;
+    return { rows: data || [], answered: true, next: json.Next === true };
   } catch (err) {
     return none;
   }
@@ -153,57 +176,58 @@ function fetchRootRows(roots, rocStart, rocEnd, meta) {
  *   - A root MOA did not answer, even after `fetchRootRows`' retry, is
  *     REPORTED rather than returned empty, so the caller can retry the window
  *     instead of archiving days without the crop.
- * @returns {{rows: Object, unanswered: string[]}}
+ * @returns {{rows: Object, unanswered: string[], dropped: Object}} `dropped`
+ *   maps a root to the days left out of it because they truncate alone.
  */
 function fetchCompleteRows(roots, rocStart, rocEnd) {
   var meta = { answered: {}, truncated: {}, unanswered: {} };
   var rows = fetchRootRows(roots, rocStart, rocEnd, meta);
+  var dropped = {};
   Object.keys(meta.truncated).forEach(function (root) {
-    var whole = fetchSplit(root, rocStart, rocEnd);
+    var days = [];
+    var whole = fetchSplit(root, rocStart, rocEnd, days);
     if (whole === null) {
       meta.unanswered[root] = true;
     } else {
       rows[root] = whole;
+      if (days.length) dropped[root] = days;
     }
   });
-  return { rows: rows, unanswered: Object.keys(meta.unanswered) };
+  return { rows: rows, unanswered: Object.keys(meta.unanswered), dropped: dropped };
 }
 
 /**
  * Both halves of a truncated window, each fetched until it is whole, or null
- * when MOA stopped answering part-way.
+ * when MOA stopped answering part-way. A day that truncates on its own is
+ * left out, and pushed onto `dropped` when one is given.
  */
-function fetchSplit(root, rocStart, rocEnd) {
+function fetchSplit(root, rocStart, rocEnd, dropped) {
   var from = rocToDate(rocStart);
   var span = Math.round((rocToDate(rocEnd).getTime() - from.getTime()) / 86400000) + 1;
   if (span <= 1) {
     Logger.log('fetchSplit: ' + root + ' still truncates on ' + rocStart + ' alone; left out');
+    if (dropped) dropped.push(rocStart);
     return [];
   }
   var half = Math.ceil(span / 2);
   // Sequential requests right after a truncated one: keep under the per-IP limit.
   Utilities.sleep(120);
-  var older = fetchWhole(root, rocStart, shiftROC(rocStart, half - 1));
+  var older = fetchWhole(root, rocStart, shiftROC(rocStart, half - 1), dropped);
   if (older === null) return null;
   Utilities.sleep(120);
-  var newer = fetchWhole(root, shiftROC(rocStart, half), rocEnd);
+  var newer = fetchWhole(root, shiftROC(rocStart, half), rocEnd, dropped);
   return newer === null ? null : older.concat(newer);
 }
 
 /**
  * One term across a range, split until MOA stops cutting it short — or null
- * when MOA did not answer. One request when nothing is cut.
+ * when MOA did not answer. One request when nothing is cut. Not for the
+ * serving path: a cut response costs sequential requests, as many as it takes.
  */
-function fetchWhole(root, rocStart, rocEnd) {
-  var page;
-  try {
-    page = parsePage(UrlFetchApp.fetch(cropUrl(root, rocStart, rocEnd), { muteHttpExceptions: true }));
-  } catch (err) {
-    Logger.log('fetchWhole error (' + root + ' ' + rocStart + '): ' + err);
-    return null;
-  }
+function fetchWhole(root, rocStart, rocEnd, dropped) {
+  var page = fetchPage(root, rocStart, rocEnd);
   if (!page.answered) return null;
-  return page.next ? fetchSplit(root, rocStart, rocEnd) : page.rows;
+  return page.next ? fetchSplit(root, rocStart, rocEnd, dropped) : page.rows;
 }
 
 /**

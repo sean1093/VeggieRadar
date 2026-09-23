@@ -460,21 +460,27 @@ from MOA's range queries:
 - **It never writes a day the live path can.** The job ends the day before
   the board's trading date, fixed when it starts; the live archive only ever
   writes that date or a later one. A day already in the Sheet — live or from
-  an earlier backfill — is left alone, and the check and the append run under
-  the history lock, so re-running a finished job writes nothing.
+  an earlier backfill — is left alone. That check runs *outside* the history
+  lock, and is safe there only because nothing else writes a date in the
+  job's range; the append runs inside it, since the live archive appends too.
+  The dates a tab holds are read once per job and cached, not once per link.
 - **A truncated MOA response is refetched, not trusted.** Past ~1,000 rows MOA
   keeps the newest and sets `Next: true`; the oldest day left can be missing
   markets, and an average built from it is simply wrong. The window is halved
   until each piece is whole, and a single day that still truncates leaves that
   crop out of that day — missing is honest, wrong would be permanent.
-  (`calibrate` has always done this; the rolling history's backfill and the
-  trend now do too — both used to average an oldest day of whichever markets
-  MOA left in.)
+  If the probe root loses a day that way it still counts as trading, so the
+  next day is not judged against the one before it. (`calibrate` has always
+  refetched; the rolling history's backfill now does too. The trend, on the
+  public path where one request is the budget, leaves a cut oldest point out
+  instead — both used to average whichever markets MOA left in.)
 - **It survives stopping.** The job — reach, cursor, counts, last error — is
   one property. A failed window is retried by the next link, 3 then 6 minutes
   later — a per-IP throttle lasts minutes, and retrying after a second would
-  spend every retry inside it; three in a row stop the chain as `failed`. A link is counted *before* it works, because one
-  the 6-minute limit kills never reaches its `catch` — so a window that is
+  spend every retry inside it; three in a row stop the chain as `failed`. A
+  link is counted *before* it works and arms a watchdog trigger for after the
+  execution limit, because one the 6-minute limit kills never reaches its
+  `catch` or its `finally` — so the watchdog retries it, and a window that is
   always too slow ends as `failed` too, rather than stalling for ever. Asking
   again with the same `months=` resumes a failed job, or a running one that
   has not moved for 15 minutes, from its cursor; a different reach replaces
@@ -482,11 +488,13 @@ from MOA's range queries:
   `cancel=1` stops it after the current window, and is kept in a property of
   its own so the chain's next write cannot undo it. Requests are serialised
   under the history lock, so two at once cannot start two chains.
-- **A new job skips what the last one finished.** Re-running a year would
-  crawl ~40 windows to write nothing; a new `months=` after a finished (or
-  cancelled) job steps over that job's range without a request, so extending
-  12 months to 24 crawls only the new year. To redo a range on purpose —
-  after deleting rows by hand — delete the `veggie_sheet_backfill` property.
+- **A new job skips what earlier ones finished.** Re-running a year would
+  crawl ~40 windows to write nothing; a new `months=` steps over the range
+  the jobs before it covered without a request, so extending 12 months to 24
+  crawls only the new year. `months` must be a whole number (1–24; more is
+  clamped) — `months=0` is refused rather than read as a year. To redo a range
+  on purpose — after deleting rows by hand — delete the `veggie_sheet_backfill`
+  property.
 
 Rows land in the order they were written, not in date order — the live days,
 then each window newest-first. Nothing reads the tab in order (the readers
