@@ -281,7 +281,10 @@ var ARCHIVE_MAX_READS = 20;
 // The year-ago read is the refresh's last step; past this far into the run it
 // is left to the next refresh, well inside the 6-minute execution limit.
 var YOY_START_BY_MS = 4 * 60 * 1000;
-var YOY_SKIPPED_PROP = 'veggie_yoy_skipped_at'; // when a read was last left for time
+// A read left undone — `late`, `failed`, or read and `not kept` — as JSON
+// with its sheet and reason, for `diag` (`noteUnread`); cleared once a read
+// is kept.
+var YOY_SKIPPED_PROP = 'veggie_yoy_skipped_at';
 // The archive's readers wait this long for the history lock, not the 30 s a
 // write does: their read is optional — a busy lock costs a comparison until
 // the next refresh — and two of them run back to back at the end of one.
@@ -296,8 +299,7 @@ var ISO_DAY = /^\d{4}-\d{2}-\d{2}$/; // what a date cell in the archive reads as
 // varieties each is more than one 9 KB property holds.
 var VARIETY_BASE_PREFIX = 'veggie_variety_base_chunk_';
 var VARIETY_BASE_COUNT = 'veggie_variety_base_chunks';
-// A read left undone — for time, or because it failed — as JSON with its
-// sheet, for `diag`; cleared by the next read that happens.
+// The same, for the variety read.
 var VARIETY_BASE_SKIPPED_PROP = 'veggie_variety_base_skipped_at';
 // What the archive holds, as the status request reports it. Counting it reads
 // column A of every year tab, and an operator watching a job polls.

@@ -1482,7 +1482,7 @@ function refreshYearAgo(boardRoc, startedAt) {
     // Not kept: the next refresh asks again, rather than the day going
     // without a comparison because one read failed — and `diag` says so.
     Logger.log('refreshYearAgo failed: ' + err);
-    if (props) noteUnread(props, YOY_SKIPPED_PROP, sheetId, 'failed'); // both set above, or nothing to note
+    noteUnread(props, YOY_SKIPPED_PROP, sheetId, 'failed'); // no sheet id read: nothing to note
     return null;
   }
 }
@@ -1863,7 +1863,7 @@ function refreshVarietyBaselines(boardRoc, startedAt) {
     // The lock busy past its short wait, the Sheet unreachable: not kept, and
     // read again by the next refresh — and said in `diag` meanwhile.
     Logger.log('refreshVarietyBaselines failed: ' + err);
-    if (props) noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'failed');
+    noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'failed');
     return null;
   }
 }
@@ -1872,16 +1872,22 @@ function refreshVarietyBaselines(boardRoc, startedAt) {
  * Records that a read of the archive was left undone, when and why — `late`
  * (the refresh had run too long), `failed` or `not kept` — for `diag`. Never
  * throws: a note that cannot be written must not turn a skipped read into a
- * failed one; and it clears the older note instead, which must not stand
- * for this read.
+ * failed one. It clears the older note instead, which must not stand for
+ * this read, and tries once more in the room that frees.
  */
 function noteUnread(props, key, sheetId, why) {
   if (!sheetId) return;
+  var note = JSON.stringify({ at: new Date().toISOString(), sheet: sheetId, why: why });
   try {
-    props.setProperty(key, JSON.stringify({ at: new Date().toISOString(), sheet: sheetId, why: why }));
+    props.setProperty(key, note);
   } catch (err) {
     Logger.log('noteUnread (' + key + ', ' + why + '): ' + err);
     clearUnread(props, key);
+    try {
+      props.setProperty(key, note);
+    } catch (err2) {
+      Logger.log('noteUnread (' + key + ', ' + why + '), again: ' + err2);
+    }
   }
 }
 

@@ -4002,7 +4002,7 @@ describe('same weeks last year (#22 §2)', () => {
       return original(k, v);
     };
     expect(back.api.refreshYearAgo(roc, Date.now() - 5 * 60_000)).toBeNull();
-    expect(back.props.has('veggie_yoy_skipped_at')).toBe(false); // not 'failed'
+    expect(JSON.parse(back.props.get('veggie_yoy_skipped_at') as string)).toMatchObject({ why: 'late' }); // retried, and not 'failed'
   });
 
   it('does not leave an older note standing for a read it could neither keep nor note', () => {
@@ -4653,7 +4653,7 @@ describe('per-variety baselines (#22 §3)', () => {
     expect(back.props.has('veggie_variety_base_skipped_at')).toBe(false);
   });
 
-  it('notes a read it could not keep as not kept, even when noting that fails', () => {
+  it('returns a read it could not keep, and leaves no older note, when noting that fails too', () => {
     const back = archived(days(ROC, '高麗菜', '初秋', 20, 12));
     back.api.refreshVarietyBaselines(ROC, Date.now() - 5 * 60_000); // an older note: 'late'
     back.breakProp(back.api.VARIETY_BASE_COUNT); // the medians cannot be kept…
