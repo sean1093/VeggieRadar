@@ -4446,10 +4446,21 @@ describe('per-variety baselines (#22 §3)', () => {
   const archived = (rows: unknown[][], responses: Record<string, Row[]> = {}) => {
     const back = loadBackend(responses);
     back.props.set(back.api.HISTORY_SHEET_ID_PROP, SHEET_ID);
-    for (const r of rows) {
+    const push = (r: unknown[]) => {
       const year = String(r[0]).slice(0, 4);
       if (!back.tabs.has(year)) back.tabs.set(year, { rows: [HEADER], maxRows: 100000, textColumnA: true });
       back.tabs.get(year)?.rows.push(r);
+    };
+    // A day's variety rows always come with the item's blend row, as the
+    // archive writes them: added where a fixture leaves it out.
+    const blended = new Set(rows.filter((r) => r[3] === '').map((r) => `${r[0]}|${r[1]}`));
+    for (const r of rows) {
+      const key = `${r[0]}|${r[1]}`;
+      if (!blended.has(key)) {
+        blended.add(key);
+        push(blendRow(String(r[0]), String(r[1]), 1));
+      }
+      push(r);
     }
     return back;
   };
@@ -4470,7 +4481,7 @@ describe('per-variety baselines (#22 §3)', () => {
     const reach = Array.from({ length: 45 }, (_, i) =>
       varietyRow(dayOf(ROC, -1 - i), '高麗菜', '改良種', i < 28 ? 68 - i : 45 - i));
     const back = archived([
-      ...days(ROC, '高麗菜', '初秋', 20, 12),
+      ...days(ROC, '高麗菜', '初秋', 20, 16),
       ...days(ROC, '高麗菜', '雪翠', 30, 9), // nine days: short of ten…
       varietyRow(dayOf(ROC, 0), '高麗菜', '雪翠', 30), // …and today does not make it ten
       ...reach, // only the latest 28
@@ -4479,6 +4490,17 @@ describe('per-variety baselines (#22 §3)', () => {
       ...days(ROC, '已下架', '某品種', 10, 12), // not a board item
     ].sort((x, y) => String(y[0]).localeCompare(String(x[0])))); // a day's rows together, as every writer keeps them
     expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20, 改良種: 54.5 } });
+  });
+
+  it('gives none to a variety listed on under half the item\'s days', () => {
+    // Rows exist only on days the board broke the item down: a crop nearly
+    // all one variety has them on its few contested days, not its month.
+    const back = archived([
+      ...Array.from({ length: 28 }, (_, i) => blendRow(dayOf(ROC, -1 - i), '高麗菜', 25)),
+      ...days(ROC, '高麗菜', '初秋', 20, 13), // 13 of 28
+      ...days(ROC, '高麗菜', '改良種', 30, 14), // 14 of 28
+    ].sort((x, y) => String(y[0]).localeCompare(String(x[0]))));
+    expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 改良種: 30 } });
   });
 
   it('puts the percentage on the variety rows of the next build', () => {

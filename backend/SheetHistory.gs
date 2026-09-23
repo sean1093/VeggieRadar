@@ -1764,7 +1764,7 @@ function noteReaderState(out, blank, sheetId, span, job, skippedRaw) {
 // could say what each costs today but not whether that is cheap FOR THAT
 // VARIETY: the 28-day baseline is the blend's, and 綠竹筍 at twice 麻竹筍 is
 // not "expensive". The archive keeps each variety's own row a day, so each can
-// have its own median — by the same rule as the item's, and read the same way
+// have its own median — over the item's baseline days, and read the same way
 // as the year-ago medians: last in the refresh, kept per trading date, applied
 // by the next build.
 
@@ -1904,18 +1904,29 @@ function clearUnread(props, key) {
 }
 
 /**
- * Each board item's varieties' medians over their most recent
- * `BASELINE_WINDOW` archived days in the span, with `BASELINE_MIN_DAYS` at
- * least — the item baseline's rule, variety by variety. One value per day.
+ * Each board item's varieties' medians over the item's most recent
+ * `BASELINE_WINDOW` archived trading days in the span — the days its own
+ * baseline takes — one value per day.
+ *
+ * A variety's rows are archived only on days the board broke the item down,
+ * which takes two varieties past the share and volume floors
+ * (`varietyBreakdown`). A crop that is nearly all one variety has rows for
+ * it only on its few contested days, and their median is not its month. So a
+ * variety is given one only when it was listed on at least
+ * `VARIETY_MIN_COVERAGE` of those days, and on `BASELINE_MIN_DAYS` at least.
  */
 function varietyMedians(spreadsheet, span, liveYear) {
   var prices = {}; // item → variety → date → 元/公斤
+  var traded = {}; // item → date → true, from the blend row
   var scattered = scanSpan(spreadsheet, span, liveYear, function (cells, date) {
+    var item = String(cells[1]);
     var variety = cells[3];
-    if (variety === '' || variety === null) return; // the blend row
+    if (variety === '' || variety === null) {
+      (traded[item] = traded[item] || {})[date] = true;
+      return;
+    }
     var price = Number(cells[4]);
     if (!(price > 0)) return;
-    var item = String(cells[1]);
     var byVariety = (prices[item] = prices[item] || {});
     (byVariety[variety] = byVariety[variety] || {})[date] = price;
   });
@@ -1926,11 +1937,13 @@ function varietyMedians(spreadsheet, span, liveYear) {
   var out = {};
   Object.keys(prices).forEach(function (item) {
     if (!known[item]) return;
+    var days = Object.keys(traded[item] || {}).sort().slice(-BASELINE_WINDOW);
+    var need = Math.max(BASELINE_MIN_DAYS, Math.ceil(days.length * VARIETY_MIN_COVERAGE));
     Object.keys(prices[item]).forEach(function (variety) {
       var byDate = prices[item][variety];
-      var recent = Object.keys(byDate).sort().slice(-BASELINE_WINDOW);
-      if (recent.length < BASELINE_MIN_DAYS) return;
-      var base = median(recent.map(function (d) { return byDate[d]; }));
+      var listed = days.filter(function (d) { return byDate[d] !== undefined; });
+      if (listed.length < need) return;
+      var base = median(listed.map(function (d) { return byDate[d]; }));
       (out[item] = out[item] || {})[variety] = Math.round(base * 100) / 100;
     });
   });

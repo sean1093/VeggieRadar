@@ -573,8 +573,12 @@ The drawer breaks a blended price into its varieties, and could say what each
 costs today but not whether that is cheap *for that variety*: the 28-day
 baseline is the blend's, and 綠竹筍 at twice 麻竹筍 is not "expensive" (#22 §3).
 The archive keeps each variety's own row a day, so each gets its own median —
-by the item baseline's rule (its most recent 28 archived days within the 45
-before the board's date, ten at least, the day itself left out) — and the
+over the item baseline's days (the item's most recent 28 archived trading days
+within the 45 before the board's date, the day itself left out). A variety's
+row is archived only on days the board broke the item down, which takes two
+varieties past the share and volume floors, so a crop nearly all one variety
+has rows for it only on a few contested days; a variety gets a median only
+when it was listed on at least half those 28 days, and ten at least. The
 row shows 「批發比近月低/高 N%」 as `varieties[].vs_baseline_percent` —
 wholesale, in 元/公斤 as the archive holds it, since the row leads with a
 retail estimate — hidden on a

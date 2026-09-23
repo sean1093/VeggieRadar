@@ -291,14 +291,18 @@ var YOY_SKIPPED_PROP = 'veggie_yoy_skipped_at';
 var READER_LOCK_WAIT_MS = 5 * 1000;
 var ISO_DAY = /^\d{4}-\d{2}-\d{2}$/; // what a date cell in the archive reads as
 
-// Per-variety baselines (#22 §3): each variety's own 28-trading-day median,
-// read from the archive's variety rows the way the item baseline reads the
-// rolling history — `BASELINE_WINDOW` days within `BASELINE_HORIZON_DAYS`
-// (counted back from the board's trading date: see `varietySpan`),
-// `BASELINE_MIN_DAYS` of them at least. Chunked: ~100 items with up to four
+// Per-variety baselines (#22 §3): each variety's own median over the item's
+// baseline days — its `BASELINE_WINDOW` most recent archived trading days
+// within `BASELINE_HORIZON_DAYS` (counted back from the board's trading date:
+// see `varietySpan`) — where it was listed on `BASELINE_MIN_DAYS` and
+// `VARIETY_MIN_COVERAGE` of them at least (`varietyMedians`). Chunked: ~100 items with up to four
 // varieties each is more than one 9 KB property holds.
 var VARIETY_BASE_PREFIX = 'veggie_variety_base_chunk_';
 var VARIETY_BASE_COUNT = 'veggie_variety_base_chunks';
+// The share of the item's baseline days a variety must have been listed on
+// to get a median of its own: rows exist only on days the board broke the
+// item down, and a variety's few contested days are not its month.
+var VARIETY_MIN_COVERAGE = 0.5;
 // The same, for the variety read.
 var VARIETY_BASE_SKIPPED_PROP = 'veggie_variety_base_skipped_at';
 // What the archive holds, as the status request reports it. Counting it reads
