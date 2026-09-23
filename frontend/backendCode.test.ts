@@ -51,6 +51,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   type Tab = { rows: unknown[][]; maxRows: number; textColumnA: boolean };
   const tabs = new Map<string, Tab>();
   const openedIds: string[] = [];
+  const cacheRemovals: { key: string; triggers: string[] }[] = [];
   const formatZones: string[] = [];
   let sheetThrows = false;
   let sheetZone = 'Asia/Taipei';
@@ -140,7 +141,12 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
       getScriptCache: () => ({
         get: (k: string) => cache.get(k) ?? null,
         put: (k: string, v: string) => void cache.set(k, v),
-        remove: (k: string) => void cache.delete(k),
+        remove: (k: string) => {
+          // What the trigger list looked like at that moment, so a test can
+          // pin the ORDER of a cleanup rather than only its outcome.
+          cacheRemovals.push({ key: k, triggers: triggers.map((t) => t.handler) });
+          cache.delete(k);
+        },
       }),
     },
     PropertiesService: {
@@ -258,7 +264,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     api,
     logs, props, cache, triggers, fetches, locks, mails, dispatches, tabs, openedIds,
     breakSheet: () => { sheetThrows = true; },
-    formatZones,
+    formatZones, cacheRemovals,
     setSheetZone: (zone: string) => { sheetZone = zone; },
     breakTriggerDelete: () => { triggerDeleteThrows = true; },
     breakDispatch: () => { dispatchThrows = true; },
@@ -1025,6 +1031,24 @@ describe('backfillHistory — losing the lock', () => {
     expect(() => api.backfillHistoryOnce()).not.toThrow();
     expect(cache.has('veggie_backfill_queued')).toBe(false);
     expect(logs.some((l) => l.includes('trigger not dropped'))).toBe(true);
+  });
+
+  it('drops the trigger before it frees the lock, not after', () => {
+    // The order is the point, not just the outcome. Freeing the lock first
+    // leaves a window where a `handleBackfill` re-locks and installs a fresh
+    // trigger that this `finally` then deletes: it reports "queued", nothing
+    // runs, and plain retries are refused for the rest of the hour. With the
+    // trigger dropped first, the worst interleaving leaves the lock still
+    // held, and the next request simply declines to queue.
+    const { api, cacheRemovals, contendLock } = loadBackend(plausibleRows());
+    api.handleBackfill({});
+    contendLock(); // so the merge fails and the lock is freed
+
+    api.backfillHistoryOnce();
+
+    const freed = cacheRemovals.find((r) => r.key === 'veggie_backfill_queued');
+    expect(freed).toBeDefined();
+    expect(freed?.triggers).not.toContain('backfillHistoryOnce');
   });
 
   it('keeps the queue lock when the merge worked', () => {
@@ -2184,6 +2208,17 @@ describe('alerting under contention and failure', () => {
     expect(() => api.refreshBoardCacheOnce()).not.toThrow();
     expect(cache.has('veggie_refresh_queued')).toBe(false);
     expect(logs.some((l) => l.includes('trigger not dropped'))).toBe(true);
+  });
+
+  it('drops the refresh trigger before it frees its lock too', () => {
+    const { api, cacheRemovals } = loadBackend(plausibleRows());
+    api.scheduleRefresh();
+
+    api.refreshBoardCacheOnce();
+
+    const freed = cacheRemovals.find((r) => r.key === 'veggie_refresh_queued');
+    expect(freed).toBeDefined();
+    expect(freed?.triggers).not.toContain('refreshBoardCacheOnce');
   });
 
   it('keeps the probe limiter durable across cache eviction', () => {
