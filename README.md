@@ -545,7 +545,8 @@ archived), so a window with more on one side — a backfill that stopped
 part-way, a gap, a closure — cannot lean to that week. With at least two on
 each side, a crop gets
 `last_year_price` (元/台斤) and `vs_last_year_percent`, wholesale against
-wholesale like the baseline. A tab sorted by another column is reported as
+wholesale like the baseline. A window spread too thin over the tab to read
+in a few calls — a tab sorted by another column, most likely — is reported as
 `scattered` in `diag` rather than read around.
 
 The read is the refresh's **last** step, after the board is stored and its
@@ -554,7 +555,7 @@ timeout there costs only the comparison. The board is built with the
 medians kept from the last read, which after a new trading date are those of
 a window a day or two older: a ±7-day median barely moves. They are read
 again once a day; every six hours while a backfill that reaches the window
-runs, or after a tab was found out of date order; and as soon as a backfill
+runs, or after a tab was found too spread to read; and as soon as a backfill
 has finished since the last read — and
 nothing is published for a window a running backfill has not finished
 walking through, whose later days alone would pass for 「去年此時」. A

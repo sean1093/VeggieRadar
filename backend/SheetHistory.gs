@@ -1473,12 +1473,7 @@ function refreshYearAgo(boardRoc, startedAt) {
       // Read again by the next refresh — and said in `diag`, or a full
       // property store would have every refresh read with nothing showing why.
       Logger.log('refreshYearAgo: not kept: ' + err);
-      try {
-        noteUnread(props, YOY_SKIPPED_PROP, sheetId, 'not kept');
-      } catch (err2) {
-        Logger.log('refreshYearAgo: not noted: ' + err2);
-        clearUnread(props, YOY_SKIPPED_PROP); // an older note must not stand for this read
-      }
+      noteUnread(props, YOY_SKIPPED_PROP, sheetId, 'not kept');
       return found.items;
     }
     clearUnread(props, YOY_SKIPPED_PROP); // read after all: nothing left undone
@@ -1487,11 +1482,7 @@ function refreshYearAgo(boardRoc, startedAt) {
     // Not kept: the next refresh asks again, rather than the day going
     // without a comparison because one read failed — and `diag` says so.
     Logger.log('refreshYearAgo failed: ' + err);
-    try {
-      if (props) noteUnread(props, YOY_SKIPPED_PROP, sheetId, 'failed'); // both set above, or nothing to note
-    } catch (err2) {
-      Logger.log('refreshYearAgo: not noted: ' + err2);
-    }
+    if (props) noteUnread(props, YOY_SKIPPED_PROP, sheetId, 'failed'); // both set above, or nothing to note
     return null;
   }
 }
@@ -1535,7 +1526,7 @@ function keptApplies(kept, boardRoc) {
 /**
  * Whether what a read of `span` kept for `boardRoc` still stands. A day,
  * normally; six hours while a backfill that reaches the span runs, or after
- * the tab was found out of date order (its fix is a re-sort by hand, which
+ * the tab was found too spread to read (`scattered`: its fix is a re-sort by hand, which
  * nothing else here would notice) — and not a moment longer once such a
  * backfill has FINISHED since the read: an answer read before a backfill must
  * not outlive it by a day. (A running one bumps its clock every link, so
@@ -1623,7 +1614,7 @@ function yearAgoMedians(spreadsheet, span, liveYear) {
  * lock, and only it: the live path deletes and rewrites its day there, which
  * would move rows between the two reads; older tabs are only ever appended
  * to. The one way the archive's readers walk it.
- * @returns {boolean} true when a tab is out of date order, and was not read.
+ * @returns {boolean} true when a tab is too spread to read (`scanTab`), and was not.
  */
 function scanSpan(spreadsheet, span, liveYear, onRow) {
   var zone = spreadsheet.getSpreadsheetTimeZone();
@@ -1635,7 +1626,7 @@ function scanSpan(spreadsheet, span, liveYear, onRow) {
     if (!sheet) continue;
     var read = scanTab.bind(null, sheet, span, zone, onRow);
     if (years[y] === liveYear ? withHistoryLock(read, READER_LOCK_WAIT_MS) : read()) {
-      Logger.log('scanSpan: ' + years[y] + ' is not in date order; not read');
+      Logger.log('scanSpan: ' + years[y] + ' holds the span too spread to read (sorted by another column?); not read');
       return true;
     }
   }
@@ -1663,7 +1654,7 @@ function mergeRuns(runs) {
 
 /**
  * One year tab's rows in the span, handed to `onRow`.
- * @returns {boolean} true when the tab is out of date order and was not read.
+ * @returns {boolean} true when the span would take more than `ARCHIVE_MAX_READS` reads, and was not read.
  */
 function scanTab(sheet, span, zone, onRow) {
   // Order is not what matters here — every row's date is checked on the second
@@ -1725,7 +1716,8 @@ function publicYearAgo(raw, sheetId, skippedAt, boardRoc, jobRaw) {
     // Whether the board is being compared with these at all: kept medians too
     // far from its date are not applied (`keptYearAgo`).
     out.applied = !!boardRoc && keptApplies(kept, boardRoc);
-    // The tab was sorted by another column, and the week could not be found.
+    // The window lay too spread over the tab to read (`ARCHIVE_MAX_READS`):
+    // sorted by another column, most likely — a re-sort by date mends it.
     if (kept.scattered) out.scattered = true;
   }
   var job = parseSheetBackfill(jobRaw);
@@ -1862,13 +1854,7 @@ function refreshVarietyBaselines(boardRoc, startedAt) {
     if (!stored) {
       // Read, and not kept — a full property store, most likely. Said in
       // `diag`, or every refresh would read again with nothing showing why.
-      try {
-        noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'not kept');
-      } catch (err2) {
-        // Not a failed read — and an older note must not stand for this one.
-        Logger.log('refreshVarietyBaselines: not noted: ' + err2);
-        clearUnread(props, VARIETY_BASE_SKIPPED_PROP);
-      }
+      noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'not kept');
       return found.items;
     }
     clearUnread(props, VARIETY_BASE_SKIPPED_PROP);
@@ -1877,28 +1863,31 @@ function refreshVarietyBaselines(boardRoc, startedAt) {
     // The lock busy past its short wait, the Sheet unreachable: not kept, and
     // read again by the next refresh — and said in `diag` meanwhile.
     Logger.log('refreshVarietyBaselines failed: ' + err);
-    try {
-      if (props) noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'failed');
-    } catch (err2) {
-      Logger.log('refreshVarietyBaselines: not noted: ' + err2);
-    }
+    if (props) noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'failed');
     return null;
   }
 }
 
 /**
  * Records that a read of the archive was left undone, when and why — `late`
- * (the refresh had run too long), `failed` or `not kept` — for `diag`.
+ * (the refresh had run too long), `failed` or `not kept` — for `diag`. Never
+ * throws: a note that cannot be written must not turn a skipped read into a
+ * failed one; and it clears the older note instead, which must not stand
+ * for this read.
  */
 function noteUnread(props, key, sheetId, why) {
   if (!sheetId) return;
-  props.setProperty(key, JSON.stringify({ at: new Date().toISOString(), sheet: sheetId, why: why }));
+  try {
+    props.setProperty(key, JSON.stringify({ at: new Date().toISOString(), sheet: sheetId, why: why }));
+  } catch (err) {
+    Logger.log('noteUnread (' + key + ', ' + why + '): ' + err);
+    clearUnread(props, key);
+  }
 }
 
 /**
- * …and clears it once a read is kept. Never throws: the read and its keep
- * have happened, and a failure here must not be noted as theirs — the stale
- * note is older than what is kept, and `diag` shows neither.
+ * …and clears it: once a read is kept, or when a newer note could not be
+ * written. Never throws, so a failure here is never noted as the read's.
  */
 function clearUnread(props, key) {
   try {

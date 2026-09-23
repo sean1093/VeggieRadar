@@ -3992,6 +3992,19 @@ describe('same weeks last year (#22 §2)', () => {
     expect(back.api.handleDiag().sheet_history.year_ago).not.toHaveProperty('skipped');
   });
 
+  it('never turns a read left for time into a failed one when the note will not write', () => {
+    const roc = rocDate(0);
+    const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)), plausibleRowsWith({}));
+    const original = back.props.set.bind(back.props);
+    let refusals = 1; // a blip: the next write goes through
+    back.props.set = (k: string, v: string) => {
+      if (k === 'veggie_yoy_skipped_at' && refusals-- > 0) throw new Error('blip');
+      return original(k, v);
+    };
+    expect(back.api.refreshYearAgo(roc, Date.now() - 5 * 60_000)).toBeNull();
+    expect(back.props.has('veggie_yoy_skipped_at')).toBe(false); // not 'failed'
+  });
+
   it('does not leave an older note standing for a read it could neither keep nor note', () => {
     const roc = rocDate(0);
     const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)), plausibleRowsWith({}));
@@ -4625,6 +4638,19 @@ describe('per-variety baselines (#22 §3)', () => {
     const back = archived(rows);
     expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20 } });
     expect(back.sheetReads).toHaveLength(1 + 6); // column A, then each pair
+  });
+
+  it('does not leave an older note standing for a failed read it could not note', () => {
+    const back = archived(days(ROC, '高麗菜', '初秋', 20, 12));
+    back.api.refreshVarietyBaselines(ROC, Date.now() - 5 * 60_000); // 'late'
+    back.contendLock();
+    const original = back.props.set.bind(back.props);
+    back.props.set = (k: string, v: string) => {
+      if (k === 'veggie_variety_base_skipped_at') throw new Error('full');
+      return original(k, v);
+    };
+    expect(back.api.refreshVarietyBaselines(ROC)).toBeNull();
+    expect(back.props.has('veggie_variety_base_skipped_at')).toBe(false);
   });
 
   it('notes a read it could not keep as not kept, even when noting that fails', () => {
