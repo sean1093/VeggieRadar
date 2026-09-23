@@ -118,7 +118,7 @@ function archiveDay(board) {
       if (existing.count) sheet.deleteRows(existing.first, existing.count);
       replacing = true;
     }
-    var from = sheet.getLastRow() + 1;
+    var from = appendRow(sheet);
     // `setValues` writes into the grid that exists — it does not grow it, and
     // a default tab is 1000 rows, which ~200 rows a trading day fills in a
     // week. Without this the archive would die on about day five with an
@@ -169,11 +169,28 @@ function historyRowsFor(board) {
  * range — and keeps any single tab far from the 10 M cell ceiling.
  */
 function yearSheet(spreadsheet, year) {
-  var sheet = spreadsheet.getSheetByName(year) || spreadsheet.insertSheet(year);
-  // An empty tab gets its header and its text column even when it already
-  // existed: a write that failed right after `insertSheet` leaves one behind,
-  // and every reader here takes row 1 to be the header.
-  if (sheet.getLastRow() > 0) return sheet;
+  var sheet = spreadsheet.getSheetByName(year);
+  if (sheet) return sheet;
+  sheet = spreadsheet.insertSheet(year);
+  writeHeader(sheet);
+  return sheet;
+}
+
+/**
+ * The row an append starts at. An empty tab gets its header first, even one
+ * that already existed: a write that failed right after `insertSheet` leaves
+ * one behind, and every reader here takes row 1 to be the header. Checked
+ * here, where the row count is read anyway, so the live path pays no extra
+ * Sheets call for it.
+ */
+function appendRow(sheet) {
+  var last = sheet.getLastRow();
+  if (last > 0) return last + 1;
+  writeHeader(sheet);
+  return 2;
+}
+
+function writeHeader(sheet) {
   sheet.getRange(1, 1, 1, SHEET_HEADER.length).setValues([SHEET_HEADER]);
   // The date column is written and read as text. Left as a date, Sheets parses
   // `2026-09-21` into a value it hands back as a `Date`, and `readDay` — which
@@ -349,13 +366,14 @@ function cancelSheetBackfill(props) {
 }
 
 function startSheetBackfill(props, months) {
+  var sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
   var job = readSheetBackfill(props);
   if (job && job.status === 'running' && !backfillStalled(job)) return backfillReply(job, false, '回填進行中');
 
   // The same reach resumes; a different one replaces the job, so a failed
   // job is never a dead end.
   var resuming = !!job && (job.status === 'running' || job.status === 'failed') &&
-    job.months === backfillMonths(months);
+    job.months === backfillMonths(months) && job.sheet === sheetId;
   if (!resuming && job && linkInFlight(job)) {
     // Its last link could still finish and write that job back over this one.
     return backfillReply(job, false, '上一批次仍在執行，請數分鐘後再試');
@@ -369,7 +387,7 @@ function startSheetBackfill(props, months) {
   } else {
     var board = parseStoredBoard(readDurableBoard());
     if (!board || !board.roc_date) return backfillReply(job, false, '尚無看板，無法決定回填終點');
-    job = newSheetBackfill(board.roc_date, months, job, props.getProperty(HISTORY_SHEET_ID_PROP));
+    job = newSheetBackfill(board.roc_date, months, job, sheetId);
   }
   job.status = 'running';
   job.updated_at = new Date().toISOString();
@@ -422,7 +440,9 @@ function newSheetBackfill(boardRoc, months, previous, sheetId) {
     failures: 0,
     last_error: null,
     rejected: [], // the last few days the guard refused, with its reasons
-    gaps: [] // windows MOA kept answering with nothing at all
+    gaps: [], // windows MOA kept answering with nothing at all
+    partial: [], // windows written without a crop MOA kept refusing
+    verdict: null // how MOA has answered the window at the cursor, and how often
   };
 }
 
@@ -485,46 +505,45 @@ function coveredBy(job) {
  */
 function sheetBackfillStep() {
   var props;
-  var job;
   try {
     props = PropertiesService.getScriptProperties();
-    job = readSheetBackfill(props);
   } catch (err) {
     // Nothing to record it in. The trigger stays, spent, until the next
     // `months=` request drops it; the job reads as stalled and resumes.
     Logger.log('sheetBackfillStep: properties unavailable: ' + err);
     return null;
   }
-  if (job && job.status === 'running' && linkInFlight(job)) {
-    // A second link of the same job — a watchdog that fired beside a link
-    // that is alive after all. Touch nothing: the triggers are that link's.
-    Logger.log('sheetBackfillStep: another link of this job is running');
-    return job;
+  // Whether this link runs is decided under the lock. Two links deciding at
+  // once — a late trigger beside a resume — could each find the job free and
+  // write the same window twice, since which days are present is read
+  // outside the lock (`writeArchivedDays`).
+  var begun;
+  var ran = false;
+  try {
+    begun = withHistoryLock(function () {
+      ran = true;
+      return beginBackfillLink(props);
+    });
+  } catch (err) {
+    Logger.log('sheetBackfillStep: not begun: ' + err);
+    if (!ran) {
+      // Busy. A spare link in a minute is harmless: whichever begins second
+      // finds the other in flight and leaves.
+      try {
+        ScriptApp.newTrigger(SHEET_BACKFILL_FN).timeBased().after(60 * 1000).create();
+      } catch (err2) {
+        Logger.log('sheetBackfillStep: not requeued: ' + err2);
+      }
+    }
+    return null;
   }
-  if (!job || job.status !== 'running' || cancelRequested(props, job)) {
-    finishBackfillStep(props, job);
-    return job;
-  }
-  if ((job.failures || 0) >= SHEET_BACKFILL_MAX_FAILURES) {
-    // The previous links were counted and never reported back: killed by the
-    // execution limit, most likely, which no `catch` survives.
-    job.status = 'failed';
-    job.last_error = job.last_error || 'the last ' + job.failures + ' links did not finish';
+  var job = begun.job;
+  if (begun.action === 'leave') return job;
+  if (begun.action === 'finish') {
     finishBackfillStep(props, job);
     return job;
   }
   try {
-    // Counted BEFORE the work, and cleared by a window that succeeds: a link
-    // the 6-minute limit kills never reaches its `catch` or its `finally`.
-    job.failures = (job.failures || 0) + 1;
-    // Also the heartbeat: a link in flight must not look like a stalled chain
-    // to a `months=` request, which would queue a second one beside it, nor
-    // be replaced by a new job it could then write back over.
-    job.updated_at = new Date().toISOString();
-    job.link_started_at = job.updated_at;
-    job.link_open = true;
-    writeSheetBackfill(props, job);
-    armBackfillWatchdog();
     backfillWindow(job, props.getProperty(HISTORY_SHEET_ID_PROP));
   } catch (err) {
     job.last_error = String(err && err.message || err).substring(0, 200);
@@ -534,6 +553,41 @@ function sheetBackfillStep() {
     finishBackfillStep(props, job);
   }
   return job;
+}
+
+/**
+ * The start of a link, under the lock: whether it runs, and if it does, the
+ * job marked as having a link in flight.
+ * @returns {{action: string, job: Object}} `leave` — another link of this job
+ *   is running, touch nothing; `finish` — nothing to do but tidy up; `work`.
+ */
+function beginBackfillLink(props) {
+  var job = readSheetBackfill(props);
+  if (job && job.status === 'running' && linkInFlight(job)) {
+    // A watchdog that fired beside a link that is alive after all. The
+    // triggers are that link's.
+    Logger.log('sheetBackfillStep: another link of this job is running');
+    return { action: 'leave', job: job };
+  }
+  if (!job || job.status !== 'running' || cancelRequested(props, job)) return { action: 'finish', job: job };
+  if ((job.failures || 0) >= SHEET_BACKFILL_MAX_FAILURES) {
+    // The previous links were counted and never reported back: killed by the
+    // execution limit, most likely, which no `catch` survives.
+    job.status = 'failed';
+    job.last_error = job.last_error || 'the last ' + job.failures + ' links did not finish';
+    return { action: 'finish', job: job };
+  }
+  // Counted BEFORE the work, and cleared by a window that succeeds: a link
+  // the 6-minute limit kills never reaches its `catch` or its `finally`.
+  job.failures = (job.failures || 0) + 1;
+  // Also the heartbeat: a link in flight must not look like a stalled chain
+  // to a `months=` request, nor be replaced by a job it could write back over.
+  job.updated_at = new Date().toISOString();
+  job.link_started_at = job.updated_at;
+  job.link_open = true;
+  writeSheetBackfill(props, job);
+  armBackfillWatchdog();
+  return { action: 'work', job: job };
 }
 
 /**
@@ -642,21 +696,32 @@ function backfillWindow(job, sheetId) {
   if (skip && end > skip.to && start <= skip.to) start = shiftROC(skip.to, 1);
 
   var fetched = fetchCompleteRows(boardRoots(), shiftROC(start, -SHEET_BACKFILL_CONTEXT_DAYS), end);
-  if (fetched.unanswered.length) {
-    throw new Error('MOA did not answer ' + fetched.unanswered.length + ' roots (' +
-      fetched.unanswered.slice(0, 3).join('、') + (fetched.unanswered.length > 3 ? '…' : '') + ')');
+  var span = rocToISO(start) + '…' + rocToISO(end);
+  var refused = fetched.unanswered;
+  if (refused.length) {
+    var why = 'MOA did not answer ' + refused.length + ' roots (' +
+      refused.slice(0, 3).join('、') + (refused.length > 3 ? '…' : '') + ')';
+    // The same few crops refused every time, the probe answering throughout,
+    // is MOA refusing those crops: write the window without them, on record.
+    // Anything else — the probe refused, or a batch-sized hole — is a
+    // throttle or an outage, and fails the window until it clears.
+    var few = refused.length <= SHEET_BACKFILL_MAX_REFUSED && refused.indexOf(PROBE_ROOT) === -1;
+    if (!few || sameVerdict(job, 'refused ' + refused.join('、')) < SHEET_BACKFILL_MAX_FAILURES) {
+      throw new Error(why);
+    }
+    job.partial = recent(job.partial, span + ' without ' + refused.join('、'));
   }
   var built = backfillDays(fetched.rows, start, end, fetched.dropped);
   if (built === null) {
     // MOA answered — a throttle is an empty body, and fails above as
-    // unanswered — yet has no probe rows at all, where even a closed market
-    // gets `休市` rows. Retried like any failure first; if it says the same
-    // after every retry, it is a hole in MOA's own data, and stepping past it
-    // on record is the only way the rest of the reach gets done.
-    if (job.failures < SHEET_BACKFILL_MAX_FAILURES) {
+    // unanswered — yet has no probe rows for the window, where even a closed
+    // market gets `休市` rows. Retried first; said the same way every time,
+    // it is a hole in MOA's own data, and stepping past it on record is the
+    // only way the rest of the reach gets done.
+    if (sameVerdict(job, 'empty') < SHEET_BACKFILL_MAX_FAILURES) {
       throw new Error('no ' + PROBE_ROOT + ' rows for ' + start + '–' + end);
     }
-    job.gaps = recent(job.gaps, rocToISO(start) + '…' + rocToISO(end));
+    job.gaps = recent(job.gaps, span);
     job.windows += 1;
     job.failures = 0;
     job.last_error = null;
@@ -676,6 +741,21 @@ function backfillWindow(job, sheetId) {
   moveBackfillCursor(job, built.deferred || shiftROC(start, -1));
 }
 
+/**
+ * How many times MOA has now answered the window at the cursor this same way.
+ * Counted per answer, not per failure: a link killed by the limit, or a Sheet
+ * that would not open, says nothing about what MOA has for these days.
+ */
+function sameVerdict(job, kind) {
+  var v = job.verdict;
+  if (v && v.cursor === job.cursor && v.kind === kind) {
+    v.count += 1;
+  } else {
+    v = job.verdict = { cursor: job.cursor, kind: kind, count: 1 };
+  }
+  return v.count;
+}
+
 /** `list` with `entry` appended, keeping the last few: it lives in a property. */
 function recent(list, entry) {
   return (list || []).concat([entry]).slice(-10);
@@ -683,6 +763,7 @@ function recent(list, entry) {
 
 function moveBackfillCursor(job, roc) {
   job.cursor = rocToISO(roc);
+  job.verdict = null;
   if (roc < isoToROC(job.from)) job.status = 'done';
 }
 
@@ -712,14 +793,19 @@ function moveBackfillCursor(job, roc) {
  * before. For any root, the day after has nothing to judge that crop against,
  * so the crop is withheld from it rather than written unjudged.
  * @returns {{days: Array<{date: string, rows: Array}>, deferred: ?string,
- *   rejected: string[]}|null} null when the probe root has nothing at all.
+ *   rejected: string[]}|null} null when the probe root has no rows at all
+ *   dated inside the window — not even `休市` ones.
  */
 function backfillDays(rowsByRoot, rocStart, rocEnd, dropped) {
   dropped = dropped || {};
-  var probeRows = rowsByRoot[PROBE_ROOT];
+  var probeRows = rowsByRoot[PROBE_ROOT] || [];
   var probeDropped = dropped[PROBE_ROOT] || [];
-  if ((!probeRows || !probeRows.length) && !probeDropped.length) return null;
-  var trading = tradingDates(probeRows || []);
+  var inRange = function (day) { return day >= rocStart && day <= rocEnd; };
+  // The window's OWN days: probe rows only in the context days before it
+  // would otherwise pass for nine days of nothing, and be stepped past.
+  var seen = probeDropped.some(inRange) || probeRows.some(function (r) { return inRange(r.TransDate); });
+  if (!seen) return null;
+  var trading = tradingDates(probeRows);
   probeDropped.forEach(function (day) {
     if (trading.indexOf(day) === -1) trading.push(day);
   });
@@ -824,7 +910,7 @@ function writeArchivedDays(sheetId, days, jobId) {
     ran = true;
     for (var b = 0; b < blocks.length; b++) {
       var sheet = yearSheet(spreadsheet, blocks[b].year);
-      var from = sheet.getLastRow() + 1;
+      var from = appendRow(sheet);
       growFor(sheet, from + blocks[b].rows.length - 1);
       sheet.getRange(from, 1, blocks[b].rows.length, SHEET_HEADER.length).setValues(blocks[b].rows);
     }
@@ -993,6 +1079,7 @@ function publicBackfill(job) {
     days_written: job.days_written,
     days_rejected: job.days_rejected || 0,
     gaps: (job.gaps || []).length,
+    partial: (job.partial || []).length,
     rows_written: job.rows_written,
     failures: job.failures,
     updated_at: job.updated_at

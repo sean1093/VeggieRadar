@@ -52,11 +52,6 @@ function cropUrl(cropName, rocStart, rocEnd) {
   ].join('&');
 }
 
-/** Parses MOA rows from a single HTTPResponse. */
-function parseRows(resp) {
-  return parsePage(resp).rows;
-}
-
 /**
  * A response's rows, whether MOA answered at all, and whether it cut the rows
  * short.

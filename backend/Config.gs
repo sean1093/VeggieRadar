@@ -231,6 +231,12 @@ var SHEET_BACKFILL_LINK_MAX_MS = 7 * 60 * 1000;
 // retry inside it and stop the job over something that clears on its own.
 // Kept well under the stall window, which it must not look like.
 var SHEET_BACKFILL_RETRY_MS = 3 * 60 * 1000;
+// A window MOA keeps answering the same way is not retried for ever. Up to
+// this many roots refused every time — the probe never among them — is a
+// refusal of those crops, and the window is written without them, on record.
+// More is a throttle, which drops a whole batch and clears on its own, and
+// keeps failing the window instead.
+var SHEET_BACKFILL_MAX_REFUSED = 2;
 // The dates a year tab already holds, cached for the length of a job: its
 // range never meets a date the live path writes, so after the first read the
 // only dates that can appear in it are its own, which it adds as it goes.

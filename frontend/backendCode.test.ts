@@ -2574,6 +2574,69 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.logs.some((l) => l.includes('still truncates on 115.09.15'))).toBe(true);
     });
 
+    it('writes a window without a crop MOA keeps refusing, on record', () => {
+      // One crop refused every time, the probe answering throughout: a
+      // refusal of that crop, and the rest of the window is worth having.
+      const back = backfill((root, roc) => (root === '番茄' ? null : market(root, roc)));
+      back.api.handleSheetBackfill({ months: '12' });
+      for (let i = 0; i < back.api.SHEET_BACKFILL_MAX_FAILURES; i++) back.api.sheetBackfillStep();
+
+      expect(back.job()).toMatchObject({ status: 'running', cursor: '2026-09-11', failures: 0 });
+      expect(back.job().partial).toEqual(['2026-09-12…2026-09-20 without 番茄']);
+      expect(back.rowsOf('2026').some((r) => r[1] === '番茄')).toBe(false);
+      expect(back.rowsOf('2026').some((r) => r[1] === '高麗菜')).toBe(true);
+    });
+
+    it('keeps failing a window a throttle holds, rather than write it thin', () => {
+      // A throttle drops a whole batch, and at the same place in every burst.
+      // Writing the window without a batch of crops would make that permanent.
+      const many = new Set(Object.keys(FILLER).slice(0, 13));
+      const back = backfill((root, roc) => (many.has(root) ? null : market(root, roc)));
+      back.api.handleSheetBackfill({ months: '12' });
+      for (let i = 0; i < back.api.SHEET_BACKFILL_MAX_FAILURES; i++) back.api.sheetBackfillStep();
+
+      expect(back.job()).toMatchObject({ status: 'failed', cursor: '2026-09-20' });
+      expect(back.tabs.size).toBe(0);
+    });
+
+    it('counts how MOA answered, not how often a link failed', () => {
+      // Two links killed, then one odd empty answer, is not "the same answer
+      // three times": the window is retried, not written off.
+      let empty = false;
+      const back = backfill((root, roc) => (empty ? [] : market(root, roc)));
+      back.api.handleSheetBackfill({ months: '12' });
+      back.setJob({ failures: 2 }); // two links the execution limit killed
+      empty = true;
+      back.api.sheetBackfillStep();
+
+      expect(back.job().gaps).toEqual([]);
+      expect(back.job().cursor).toBe('2026-09-20');
+    });
+
+    it('does not take probe rows in the context days for the window\'s own', () => {
+      // MOA with nothing for the window's nine days but the three before it
+      // would otherwise pass for nine days of nothing, silently stepped past.
+      const hole = (root: string, roc: string): Row[] => (roc >= '115.09.12' ? [] : market(root, roc));
+      const back = backfill(hole);
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      expect(back.job()).toMatchObject({ cursor: '2026-09-20', failures: 1 });
+      expect(back.job().last_error).toContain('no 甘藍 rows');
+    });
+
+    it('waits for the lock to begin, and tries again in a minute when it cannot', () => {
+      // Whether a link runs is decided under the lock, so two links cannot
+      // both find the job free and write the same window twice.
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.contendLock();
+
+      back.api.sheetBackfillStep();
+      expect(back.moa.requests).toHaveLength(0);
+      expect(back.triggers.map((t) => t.kind)).toContain('after:60000');
+    });
+
     it('writes no day the guard would have refused', () => {
       // "The day the board would have shown": a day of a handful of items is
       // a crawl that failed on the live path, and the board keeps yesterday's.
@@ -2739,7 +2802,8 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
         getScriptLock: () => ({
           waitLock: () => {
             waits += 1;
-            if (waits === 2) throw new Error('Could not obtain lock'); // the link's first try
+            // 1 is the request, 2 the link's begin, 3 its write's first try.
+            if (waits === 3) throw new Error('Could not obtain lock');
           },
           tryLock: () => true,
           releaseLock: () => {},
@@ -2901,6 +2965,20 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       for (const r of again) expect(r.to < '115.08.21').toBe(true);
       expect(back.datesOf('2026')[0]).toBe('2026-07-21');
       expect(back.job()).toMatchObject({ status: 'done', days_skipped: 0 });
+    });
+
+    it('does not resume a job onto a different spreadsheet', () => {
+      // Its cursor says where it got to in the OLD one.
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+      back.setJob({ status: 'failed' });
+      const old = back.job();
+      back.props.set(back.api.HISTORY_SHEET_ID_PROP, 'another-sheet');
+
+      back.api.handleSheetBackfill({ months: '12' });
+      expect(back.job().id).not.toBe(old.id);
+      expect(back.job()).toMatchObject({ cursor: '2026-09-20', sheet: 'another-sheet', skip: null });
     });
 
     it('skips nothing on a different spreadsheet', () => {
@@ -3126,10 +3204,16 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.moa.requests).toHaveLength(0);
     });
 
-    it('keeps the rolling backfill\'s oldest day whole', () => {
+    it('drops the rolling backfill\'s cut oldest day, without refetching', () => {
+      // That seed crawls every window in one execution; sequential refetches
+      // could push it past the 6-minute limit and lose the lot.
       const back = backfill(twoMarkets, { cap: 23 }); // 12 days × 2 rows, one over
       back.api.backfillHistory();
-      for (const [, price] of back.api.readHistory().items['高麗菜']) expect(price).toBe(30);
+      const series = back.api.readHistory().items['高麗菜'];
+      expect(series.length).toBeGreaterThan(10);
+      for (const [, price] of series) expect(price).toBe(30);
+      const cabbage = back.moa.requests.filter((r) => r.root === '甘藍');
+      expect(cabbage).toHaveLength(2); // one per window: nothing refetched
     });
 
     it('costs nothing extra when nothing is cut', () => {

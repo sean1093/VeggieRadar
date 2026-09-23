@@ -459,16 +459,22 @@ from MOA's range queries:
   after it is written, so a hole would be permanent. MOA answers a burst with
   an *empty body* — not an empty `Data` — so a root it did not answer, even
   after the retry, is told apart from one that did not trade, and fails the
-  window; the next link tries again. A window MOA *answers* with no probe rows
-  at all, after every retry, is a hole in MOA's own data: it is stepped past
-  and listed under the job's `gaps`, or nothing older could ever be reached.
+  window; the next link tries again. Two cases are stepped past once MOA has
+  answered the window the same way three times, or nothing older could ever
+  be reached: no probe rows dated inside the window at all (a hole in MOA's
+  own data; listed under `gaps`), and one or two crops refused while the
+  probe answered (written without them; listed under `partial`). A refused
+  probe, or a batch-sized hole, is a throttle — it hits the same place in
+  every burst — and keeps failing the window instead.
 - **It never writes a day the live path can.** The job ends the day before
   the board's trading date, fixed when it starts; the live archive only ever
   writes that date or a later one. A day already in the Sheet — live or from
   an earlier backfill — is left alone. That check runs *outside* the history
   lock, and is safe there only because nothing else writes a date in the
-  job's range; the append runs inside it, since the live archive appends too.
-  The dates a tab holds are read once per job and cached, not once per link.
+  job's range and one link runs at a time — a link decides whether it runs
+  under the lock, so a late trigger beside a resume cannot run twice. The
+  append runs inside it, since the live archive appends too. The dates a tab
+  holds are read once per job and cached, not once per link.
 - **A truncated MOA response is refetched, not trusted.** Past ~1,000 rows MOA
   keeps the newest and sets `Next: true`; the oldest day left can be missing
   markets, and an average built from it is simply wrong. The window is halved
@@ -476,10 +482,12 @@ from MOA's range queries:
   crop out of that day — missing is honest, wrong would be permanent.
   If the probe root loses a day that way it still counts as trading, so the
   next day is not judged against the one before it; any crop left out of a
-  day is withheld from the next one too, which has nothing to judge it by. (`calibrate` has always
-  refetched; the rolling history's backfill now does too. The trend, on the
-  public path where one request is the budget, leaves a cut oldest point out
-  instead — both used to average whichever markets MOA left in.)
+  day is withheld from the next one too, which has nothing to judge it by.
+  (`calibrate` has always refetched. The rolling history's seed crawls every
+  window in one execution, where refetches could push it past the limit, and
+  the trend runs on the public path, where one request is the budget: both
+  now drop a cut oldest day instead — they used to average whichever markets
+  MOA left in.)
 - **It survives stopping.** The job — reach, cursor, counts, last error — is
   one property. A failed window is retried by the next link, 3 then 6 minutes
   later — a per-IP throttle lasts minutes, and retrying after a second would
