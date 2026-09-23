@@ -169,6 +169,9 @@ function historySummary() {
  * never run inside the Web App response window. `force=1` jumps the lock.
  */
 function handleBackfill(params) {
+  // The long-term archive's backfill (#22 §4) is a different job with its own
+  // state; it shares the action and the admin gate, nothing else.
+  if (params && params.sheet) return handleSheetBackfill(params);
   var cache = CacheService.getScriptCache();
   if (params && params.force) cache.remove(BACKFILL_LOCK_KEY);
   if (cache.get(BACKFILL_LOCK_KEY)) {

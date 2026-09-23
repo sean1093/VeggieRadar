@@ -34,12 +34,22 @@ function cropUrl(cropName, rocStart, rocEnd) {
 
 /** Parses MOA rows from a single HTTPResponse. */
 function parseRows(resp) {
+  return parsePage(resp).rows;
+}
+
+/**
+ * A response's rows, and whether MOA cut them short. Past roughly 1,000 rows
+ * MOA keeps the NEWEST and drops the oldest, and says so with `Next: true` —
+ * so the oldest date left in a truncated response can be missing markets, and
+ * its average is then simply wrong rather than missing.
+ */
+function parsePage(resp) {
   try {
-    if (resp.getResponseCode() !== 200) return [];
+    if (resp.getResponseCode() !== 200) return { rows: [], next: false };
     var json = JSON.parse(resp.getContentText());
-    return (json && json.Data) ? json.Data : [];
+    return { rows: (json && json.Data) ? json.Data : [], next: !!(json && json.Next === true) };
   } catch (err) {
-    return [];
+    return { rows: [], next: false };
   }
 }
 
@@ -48,9 +58,10 @@ function parseRows(resp) {
  * date, or across a closed range when `rocEnd` is given (backfill). A single
  * 70+ request burst trips MOA's per-IP limit and comes back empty, so
  * concurrency is capped and each batch pauses briefly.
+ * @param {Object=} truncated optional; every root MOA cut short is set true.
  * @returns {Object} map of root → rows[]
  */
-function fetchAllRows(cropNames, rocStart, rocEnd) {
+function fetchAllRows(cropNames, rocStart, rocEnd, truncated) {
   var out = {};
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
@@ -60,7 +71,9 @@ function fetchAllRows(cropNames, rocStart, rocEnd) {
     try {
       var responses = UrlFetchApp.fetchAll(requests);
       for (var i = 0; i < responses.length; i++) {
-        out[slice[i]] = parseRows(responses[i]);
+        var page = parsePage(responses[i]);
+        out[slice[i]] = page.rows;
+        if (truncated && page.next) truncated[slice[i]] = true;
       }
     } catch (err) {
       Logger.log('fetchAllRows batch error (' + rocStart + '): ' + err);
@@ -76,18 +89,60 @@ function fetchAllRows(cropNames, rocStart, rocEnd) {
  * genuinely out-of-season roots just stay empty. Accepts an optional range
  * end for the backfill path.
  */
-function fetchRootRows(roots, rocStart, rocEnd) {
-  var out = fetchAllRows(roots, rocStart, rocEnd);
+function fetchRootRows(roots, rocStart, rocEnd, truncated) {
+  var out = fetchAllRows(roots, rocStart, rocEnd, truncated);
   var misses = roots.filter(function (r) { return !out[r] || !out[r].length; });
   if (!misses.length) return out;
 
   Utilities.sleep(1500);
-  var retry = fetchAllRows(misses, rocStart, rocEnd);
+  var retry = fetchAllRows(misses, rocStart, rocEnd, truncated);
   for (var i = 0; i < misses.length; i++) {
     var root = misses[i];
     if (retry[root] && retry[root].length) out[root] = retry[root];
   }
   return out;
+}
+
+/**
+ * Like `fetchRootRows` across a range, but never hands back a root MOA cut
+ * short: a truncated root is refetched in halves until every piece is whole.
+ *
+ * For the long-term archive, where a wrong number is worse than a missing one
+ * — a day written from a truncated response keeps its missing markets for as
+ * long as the archive exists. A single day that still truncates cannot be made
+ * whole by splitting, so that root is left out of that day.
+ */
+function fetchCompleteRows(roots, rocStart, rocEnd) {
+  var truncated = {};
+  var out = fetchRootRows(roots, rocStart, rocEnd, truncated);
+  Object.keys(truncated).forEach(function (root) {
+    out[root] = fetchSplit(root, rocStart, rocEnd);
+  });
+  return out;
+}
+
+/** Both halves of a truncated window, each fetched until it is whole. */
+function fetchSplit(root, rocStart, rocEnd) {
+  var from = rocToDate(rocStart);
+  var span = Math.round((rocToDate(rocEnd).getTime() - from.getTime()) / 86400000) + 1;
+  if (span <= 1) {
+    Logger.log('fetchSplit: ' + root + ' still truncates on ' + rocStart + ' alone; left out');
+    return [];
+  }
+  var half = Math.ceil(span / 2);
+  return fetchWhole(root, rocStart, shiftROC(rocStart, half - 1))
+    .concat(fetchWhole(root, shiftROC(rocStart, half), rocEnd));
+}
+
+function fetchWhole(root, rocStart, rocEnd) {
+  var page;
+  try {
+    page = parsePage(UrlFetchApp.fetch(cropUrl(root, rocStart, rocEnd), { muteHttpExceptions: true }));
+  } catch (err) {
+    Logger.log('fetchWhole error (' + root + ' ' + rocStart + '): ' + err);
+    return [];
+  }
+  return page.next ? fetchSplit(root, rocStart, rocEnd) : page.rows;
 }
 
 /**
@@ -104,7 +159,7 @@ function resolveTradeDates(fresh) {
     if (hit) return JSON.parse(hit);
   }
 
-  var probe = '甘藍'; // cabbage: year-round, all markets, high volume — the most reliable probe
+  var probe = PROBE_ROOT;
   var today = new Date();
   var latest = null;
   var prev = null;
@@ -216,4 +271,16 @@ function rocToISO(roc) {
   var p = roc.split('.');
   var y = parseInt(p[0], 10) + 1911;
   return y + '-' + p[1] + '-' + p[2];
+}
+
+function isoToROC(iso) {
+  var p = iso.split('-');
+  return (parseInt(p[0], 10) - 1911) + '.' + p[1] + '.' + p[2];
+}
+
+/** The ROC date `days` calendar days after `roc` (before, when negative). */
+function shiftROC(roc, days) {
+  var d = rocToDate(roc);
+  d.setDate(d.getDate() + days);
+  return dateToROC(d);
 }

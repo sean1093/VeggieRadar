@@ -17,7 +17,8 @@
  *   - `doGet?action=getTrend&cropName=<name>&days=7` returns a price trend,
  *     served from a shared cache and crawled with ONE range query.
  *   - `doGet?action=warm` queues a rebuild and returns immediately.
- *   - `doGet?action=backfill` queues a one-time history seed for baselines.
+ *   - `doGet?action=backfill` queues a one-time history seed for baselines;
+ *     `&sheet=1&months=N` backfills the long-term archive instead.
  *   - `doGet?action=diag` reports board freshness and trigger state.
  *
  * Data source: Taiwan MOA wholesale market transactions (open data, no key required).
@@ -174,6 +175,9 @@ function handleDiag(full, props) {
     sheet_history: {
       configured: !!props[HISTORY_SHEET_ID_PROP],
       last_write: parseSheetWrite(props[SHEET_LAST_WRITE_PROP]),
+      // The MOA backfill (§4), as progress: where it has got to, not why it
+      // last failed.
+      backfill: publicBackfill(props[SHEET_BACKFILL_PROP]),
     },
     // Whether the mirror is being republished by the crawl or left to the
     // fallback cron: an expired PAT would 401 on every refresh and nothing

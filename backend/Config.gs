@@ -27,6 +27,7 @@ var ADMIN_TOKEN_PROP = 'ADMIN_TOKEN';
 
 var MIN_TRADE_VOLUME = 200;      // kg; filters out sparse trades for one item
 var PROBE_MIN_VOLUME = 50000;    // kg; a real island-wide trading day for the probe crop
+var PROBE_ROOT = '甘藍';         // cabbage: year-round, all markets, high volume — the most reliable probe
 // Variety breakdown shown in the item drawer. Only varieties that matter are
 // published: at least two of them, each holding a meaningful slice of the
 // item's traded volume — otherwise the blended average already tells the story.
@@ -189,6 +190,30 @@ var SHEET_LAST_WRITE_PROP = 'veggie_sheet_last_write';
 // a later crawl can carry better numbers; inside this window it is the
 // 4-hourly refresh revisiting the same day, and is skipped without a read.
 var SHEET_CORRECTION_MS = 6 * 60 * 60 * 1000;
+
+// Backfilling the archive from MOA (#22 §4). A year is ~40 range windows and
+// one Apps Script execution stops at 6 minutes, so the backfill is a chain of
+// one-off triggers, one window each, walking backwards from the day before the
+// board's trading date. The job — its reach, where it has got to and what it
+// wrote — lives in one property, which is what lets a chain that died (a
+// quota, a deploy, a trigger that never fired) be resumed rather than redone.
+var SHEET_BACKFILL_FN = 'sheetBackfillStep';
+var SHEET_BACKFILL_PROP = 'veggie_sheet_backfill';
+// Leading days fetched only to be the PREVIOUS trading day of the first day
+// written: `validateBoard`'s rule (e) judges a day against the one before it,
+// and without them the first day of every window would go unjudged. Taken out
+// of the same `BACKFILL_WINDOW_DAYS` request, which is what keeps it under
+// MOA's row cap: each link writes the other 9.
+var SHEET_BACKFILL_CONTEXT_DAYS = 3;
+var SHEET_BACKFILL_DEFAULT_MONTHS = 12;
+var SHEET_BACKFILL_MAX_MONTHS = 24;
+// Consecutive failed windows before the chain stops itself. A window that
+// failed is retried by the next link, but one that keeps failing — a revoked
+// share, a spent quota — must not loop a crawl every few seconds for ever.
+var SHEET_BACKFILL_MAX_FAILURES = 3;
+// A running job that has not moved for this long has no chain behind it: one
+// link runs for at most 6 minutes and queues the next a second later.
+var SHEET_BACKFILL_STALL_MS = 15 * 60 * 1000;
 
 // Plausibility guard (`Validate.gs`). The refresh used to reject exactly one
 // thing — an EMPTY board — so a throttled crawl or a MOA unit change would

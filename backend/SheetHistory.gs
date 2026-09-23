@@ -244,3 +244,423 @@ function parseSheetWrite(value) {
   var parts = String(value).split(' ');
   return { date: parts[0] || '', generated_at: parts[1] || '' };
 }
+
+
+// --- Backfill from MOA (#22 §4) ---
+//
+// The archive starts empty on the day it is configured, and both of its
+// readers need what came before: 「比去年同期」 a year of it, a per-variety
+// baseline the last 45 days. This fills that in from MOA's range queries, as a
+// chain of one-off triggers — one window a link, newest first, so the recent
+// weeks a variety baseline needs land in the first minutes and the year-old
+// days last.
+//
+// A backfilled day is built by the SAME code as a crawled one — the board
+// item definitions, `aggregateGroup`, the plausibility guard's item rules and
+// `historyRowsFor` — so the two cannot drift into different archives. Three
+// rules keep it from disturbing the live path:
+//
+//   - **It stops the day before the board's trading date**, fixed when the job
+//     starts. The live archive only ever writes that date or a later one (the
+//     guard refuses a date going backwards), so the two never write the same
+//     day — `archiveDay` appends a new date without looking, and a day both
+//     had written would be there twice.
+//   - **A day already in the Sheet is left alone.** Whatever wrote it — the
+//     live path, or an earlier backfill — got there first.
+//   - **It writes under the history lock**, like `archiveDay`: the presence
+//     check and the append have to be one step.
+//
+// Rows land in the order they were written, not in date order: the live days
+// first, then each window newest-first. Nothing reads the tab in order — the
+// readers group by date — so sorting column A in the Sheets UI is safe at any
+// time; it keeps every day's rows together, which is all `readDay` relies on.
+
+/**
+ * `?action=backfill&sheet=1` — behind the admin token, like the rolling
+ * backfill (`doGet` gates the action):
+ *
+ *   - no `months`  → status: the job, and what the Sheet holds. Nothing is
+ *                    crawled or queued, so asking is free.
+ *   - `months=N`   → starts a job reaching N months back (1–24, default 12);
+ *                    resumes one that failed or stalled, keeping its reach;
+ *                    reports one that is running.
+ *   - `cancel=1`   → stops a running job after the window it is on.
+ */
+function handleSheetBackfill(params) {
+  var props = PropertiesService.getScriptProperties();
+  var sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
+  var job = readSheetBackfill(props);
+  var reply = function (queued, message) {
+    return { type: 'backfill', sheet: true, queued: queued, message: message, job: job };
+  };
+  if (!sheetId) return reply(false, '尚未設定 HISTORY_SHEET_ID');
+
+  if (params.cancel) {
+    if (!job || job.status !== 'running') return reply(false, '沒有進行中的回填');
+    job.status = 'cancelled';
+    job.updated_at = new Date().toISOString();
+    writeSheetBackfill(props, job);
+    try {
+      dropTriggers(SHEET_BACKFILL_FN);
+    } catch (err) {
+      Logger.log('handleSheetBackfill: trigger not dropped: ' + err);
+    }
+    return reply(false, '已停止回填');
+  }
+
+  if (!params.months) {
+    var status = reply(false, job ? '回填狀態' : '尚未回填');
+    status.archive = archiveSummary(sheetId);
+    return status;
+  }
+
+  if (job && job.status === 'running' && !backfillStalled(job)) return reply(false, '回填進行中');
+
+  var resuming = !!job && (job.status === 'running' || job.status === 'failed');
+  if (!resuming) {
+    var board = parseStoredBoard(readDurableBoard());
+    if (!board || !board.roc_date) return reply(false, '尚無看板，無法決定回填終點');
+    job = newSheetBackfill(board.roc_date, params.months);
+  }
+  job.status = 'running';
+  job.failures = 0;
+  job.updated_at = new Date().toISOString();
+  // Written before the trigger exists, so the first link cannot read the job
+  // this replaces.
+  writeSheetBackfill(props, job);
+  try {
+    dropTriggers(SHEET_BACKFILL_FN);
+    ScriptApp.newTrigger(SHEET_BACKFILL_FN).timeBased().after(1000).create();
+  } catch (err) {
+    Logger.log('handleSheetBackfill: not queued: ' + err);
+    job.status = 'failed';
+    job.last_error = 'not queued: ' + String(err && err.message || err);
+    writeSheetBackfill(props, job);
+    return reply(false, job.last_error);
+  }
+  return reply(true, resuming ? '已從 ' + job.cursor + ' 繼續回填' : '已排入背景回填');
+}
+
+/** A fresh job reaching `months` back from the day before `boardRoc`. */
+function newSheetBackfill(boardRoc, months) {
+  var n = parseInt(months, 10);
+  if (!(n >= 1)) n = SHEET_BACKFILL_DEFAULT_MONTHS;
+  if (n > SHEET_BACKFILL_MAX_MONTHS) n = SHEET_BACKFILL_MAX_MONTHS;
+  var reach = rocToDate(boardRoc);
+  reach.setMonth(reach.getMonth() - n);
+  var last = rocToISO(shiftROC(boardRoc, -1));
+  var now = new Date().toISOString();
+  return {
+    id: now, // tells a link its job from one that replaced it while it ran
+    status: 'running',
+    months: n,
+    from: rocToISO(dateToROC(reach)),
+    to: last,
+    cursor: last, // the newest day not yet done; the next window ends here
+    started_at: now,
+    updated_at: now,
+    windows: 0,
+    days_written: 0,
+    days_skipped: 0,
+    rows_written: 0,
+    failures: 0,
+    last_error: null
+  };
+}
+
+/**
+ * One link of the chain: one window crawled and written, then the next link
+ * queued. Never throws — a trigger that throws is just a stopped chain with
+ * nothing recorded about why.
+ */
+function sheetBackfillStep() {
+  var props;
+  var job;
+  try {
+    props = PropertiesService.getScriptProperties();
+    job = readSheetBackfill(props);
+  } catch (err) {
+    // Nothing to record it in. The trigger stays, spent, until the next
+    // `months=` request drops it; the job reads as stalled and resumes.
+    Logger.log('sheetBackfillStep: properties unavailable: ' + err);
+    return null;
+  }
+  if (!job || job.status !== 'running') {
+    finishBackfillStep(props, null);
+    return job;
+  }
+  try {
+    // A heartbeat: a link in flight must not look like a stalled chain to a
+    // `months=` request, which would queue a second one beside it.
+    job.updated_at = new Date().toISOString();
+    writeSheetBackfill(props, job);
+    backfillWindow(job, props.getProperty(HISTORY_SHEET_ID_PROP));
+  } catch (err) {
+    job.failures = (job.failures || 0) + 1;
+    job.last_error = String(err && err.message || err).substring(0, 200);
+    Logger.log('sheetBackfillStep failed (' + job.failures + '): ' + err);
+    if (job.failures >= SHEET_BACKFILL_MAX_FAILURES) job.status = 'failed';
+  } finally {
+    finishBackfillStep(props, job);
+  }
+  return job;
+}
+
+/**
+ * Records the link and queues the next — unless the job was cancelled or
+ * replaced while this link ran, in which case what is stored now is someone
+ * else's decision and this link's result is dropped with it.
+ */
+function finishBackfillStep(props, job) {
+  var stored = null;
+  try {
+    stored = readSheetBackfill(props);
+  } catch (err) {
+    Logger.log('finishBackfillStep: job unreadable: ' + err);
+  }
+  var mine = !!job && !!stored && stored.id === job.id && stored.status === 'running';
+  // Another job's link is queued: its trigger has this handler's name, so
+  // dropping ours would drop that one too.
+  var other = !!stored && (!job || stored.id !== job.id) && stored.status === 'running';
+  if (mine) {
+    job.updated_at = new Date().toISOString();
+    try {
+      writeSheetBackfill(props, job);
+    } catch (err) {
+      Logger.log('finishBackfillStep: job not recorded: ' + err);
+    }
+  }
+  if (!other) {
+    try {
+      dropTriggers(SHEET_BACKFILL_FN);
+    } catch (err) {
+      Logger.log('finishBackfillStep: trigger not dropped: ' + err);
+    }
+  }
+  if (mine && job.status === 'running') {
+    try {
+      ScriptApp.newTrigger(SHEET_BACKFILL_FN).timeBased().after(1000).create();
+    } catch (err) {
+      // The chain stops here, and `months=` resumes it once it reads as
+      // stalled. Nothing is lost: the cursor already says where it got to.
+      Logger.log('finishBackfillStep: next link not queued: ' + err);
+    }
+  }
+}
+
+/**
+ * Crawls and writes the window ending at `job.cursor`, then moves the cursor
+ * past it. Throws on anything that should be retried: a failed crawl, an
+ * unset or unreachable Sheet.
+ */
+function backfillWindow(job, sheetId) {
+  if (!sheetId) throw new Error('HISTORY_SHEET_ID is not set');
+  var from = isoToROC(job.from);
+  var end = isoToROC(job.cursor);
+  var start = shiftROC(end, -(BACKFILL_WINDOW_DAYS - SHEET_BACKFILL_CONTEXT_DAYS - 1));
+  if (start < from) start = from;
+
+  var rows = fetchCompleteRows(boardRoots(), shiftROC(start, -SHEET_BACKFILL_CONTEXT_DAYS), end);
+  var days = backfillDays(rows, start, end);
+  // MOA answers a closed market with `休市` rows, so a probe root with no rows
+  // at all is a crawl that failed, not a window without trading.
+  if (days === null) throw new Error('no ' + PROBE_ROOT + ' rows for ' + start + '–' + end);
+
+  var written = writeArchivedDays(sheetId, days);
+  job.windows += 1;
+  job.days_written += written.days;
+  job.days_skipped += written.skipped;
+  job.rows_written += written.rows;
+  job.failures = 0;
+  job.last_error = null;
+  job.cursor = rocToISO(shiftROC(start, -1));
+  if (start <= from) job.status = 'done';
+}
+
+/**
+ * The archive rows for each trading day in [rocStart, rocEnd], built from one
+ * range crawl exactly as the live path builds a day: `aggregateGroup` against
+ * the previous trading day, the guard's item rules, then `historyRowsFor`.
+ * Rows dated before `rocStart` are only ever that previous day. Pure.
+ * @returns {Array<{date: string, rows: Array}>|null} null when the probe root
+ *   answered nothing at all — a failed crawl, which must not pass for a week
+ *   of closed markets.
+ */
+function backfillDays(rowsByRoot, rocStart, rocEnd) {
+  var probeRows = rowsByRoot[PROBE_ROOT];
+  if (!probeRows || !probeRows.length) return null;
+  var trading = tradingDates(probeRows);
+  var byItem = [];
+  for (var i = 0; i < BOARD_ITEMS.length; i++) {
+    byItem.push(byTransDate(selectRows(rowsByRoot[BOARD_ITEMS[i].official], BOARD_ITEMS[i])));
+  }
+
+  var days = [];
+  for (var t = 0; t < trading.length; t++) {
+    var day = trading[t];
+    if (day < rocStart || day > rocEnd) continue;
+    var prev = t > 0 ? trading[t - 1] : null;
+    var items = [];
+    for (var j = 0; j < BOARD_ITEMS.length; j++) {
+      var todayRows = byItem[j][day];
+      if (!todayRows) continue;
+      var card = aggregateGroup(BOARD_ITEMS[j], todayRows, (prev && byItem[j][prev]) || []);
+      if (card) items.push(card);
+    }
+    var board = { date: rocToISO(day), items: items };
+    // Item rules only. The board-level rules judge a crawl against the board
+    // users are looking at, and there is no such board for a day in the past.
+    markSuspects(board, validateBoard(board, null).suspects);
+    var rows = historyRowsFor(board);
+    if (rows.length) days.push({ date: board.date, rows: rows });
+  }
+  return days;
+}
+
+/**
+ * The dates the probe root really traded on, oldest first — the same test as
+ * `isTradingDate`, applied to rows already in hand.
+ */
+function tradingDates(probeRows) {
+  var volume = {};
+  var traded = tradedRows(probeRows);
+  for (var i = 0; i < traded.length; i++) {
+    var day = traded[i].TransDate;
+    if (!day) continue;
+    volume[day] = (volume[day] || 0) + parseFloat(traded[i].Trans_Quantity || 0);
+  }
+  return Object.keys(volume).filter(function (d) { return volume[d] >= PROBE_MIN_VOLUME; }).sort();
+}
+
+function byTransDate(rows) {
+  var out = {};
+  for (var i = 0; i < rows.length; i++) {
+    var day = rows[i].TransDate;
+    if (day) (out[day] = out[day] || []).push(rows[i]);
+  }
+  return out;
+}
+
+/**
+ * Appends every day not already in the Sheet, one block per year tab, under
+ * the history lock. Each day's rows stay together, which `readDay` relies on.
+ * @returns {{days: number, skipped: number, rows: number}}
+ */
+function writeArchivedDays(sheetId, days) {
+  return withHistoryLock(function () {
+    var spreadsheet = SpreadsheetApp.openById(sheetId);
+    var zone = spreadsheet.getSpreadsheetTimeZone();
+    var written = { days: 0, skipped: 0, rows: 0 };
+    var byYear = {};
+    for (var i = 0; i < days.length; i++) {
+      var year = days[i].date.substring(0, 4);
+      (byYear[year] = byYear[year] || []).push(days[i]);
+    }
+    Object.keys(byYear).forEach(function (year) {
+      var sheet = yearSheet(spreadsheet, year);
+      var present = archivedDates(sheet, zone);
+      var block = [];
+      byYear[year].forEach(function (day) {
+        if (present[day.date]) {
+          written.skipped += 1;
+          return;
+        }
+        Array.prototype.push.apply(block, day.rows);
+        written.days += 1;
+      });
+      if (!block.length) return;
+      var from = sheet.getLastRow() + 1;
+      growFor(sheet, from + block.length - 1);
+      sheet.getRange(from, 1, block.length, SHEET_HEADER.length).setValues(block);
+      written.rows += block.length;
+    });
+    return written;
+  });
+}
+
+/** Every date a year tab holds, as a set. Reads column A only. */
+function archivedDates(sheet, zone) {
+  var present = {};
+  var last = sheet.getLastRow();
+  if (last < 2) return present;
+  var cells = sheet.getRange(2, 1, last - 1, 1).getValues();
+  for (var i = 0; i < cells.length; i++) present[cellDate(cells[i][0], zone)] = true;
+  return present;
+}
+
+/**
+ * What the archive holds: rows, trading days, and the first and last date.
+ * Reads the Sheet, so it is behind the admin token — `diag` is public and
+ * reports the job from the properties alone.
+ */
+function archiveSummary(sheetId) {
+  try {
+    var spreadsheet = SpreadsheetApp.openById(sheetId);
+    var zone = spreadsheet.getSpreadsheetTimeZone();
+    var rows = 0;
+    var dates = {};
+    var tabs = spreadsheet.getSheets();
+    for (var i = 0; i < tabs.length; i++) {
+      if (!/^\d{4}$/.test(tabs[i].getName())) continue;
+      var last = tabs[i].getLastRow();
+      if (last < 2) continue;
+      rows += last - 1;
+      var present = archivedDates(tabs[i], zone);
+      for (var d in present) dates[d] = true;
+    }
+    var sorted = Object.keys(dates).sort();
+    return {
+      rows: rows,
+      days: sorted.length,
+      first_date: sorted[0] || null,
+      last_date: sorted[sorted.length - 1] || null
+    };
+  } catch (err) {
+    Logger.log('archiveSummary failed: ' + err);
+    return { error: String(err && err.message || err) };
+  }
+}
+
+function backfillStalled(job) {
+  var at = Date.parse(job.updated_at || '');
+  return isNaN(at) || Date.now() - at > SHEET_BACKFILL_STALL_MS;
+}
+
+function readSheetBackfill(props) {
+  var raw = props.getProperty(SHEET_BACKFILL_PROP);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    Logger.log('readSheetBackfill: unreadable job: ' + err);
+    return null;
+  }
+}
+
+function writeSheetBackfill(props, job) {
+  props.setProperty(SHEET_BACKFILL_PROP, JSON.stringify(job));
+}
+
+/**
+ * The job as `diag` publishes it: progress only. `last_error` stays behind the
+ * token — it is the platform's text, and can quote whatever Sheets or MOA said.
+ */
+function publicBackfill(raw) {
+  if (!raw) return null;
+  try {
+    var job = JSON.parse(raw);
+    return {
+      status: job.status,
+      from: job.from,
+      to: job.to,
+      cursor: job.cursor,
+      windows: job.windows,
+      days_written: job.days_written,
+      rows_written: job.rows_written,
+      failures: job.failures,
+      updated_at: job.updated_at
+    };
+  } catch (err) {
+    return null;
+  }
+}

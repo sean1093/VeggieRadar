@@ -82,6 +82,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     const tab = () => tabs.get(name) as Tab;
     const rows = () => tab().rows;
     return {
+      getName: () => name,
       getLastRow: () => rows().length,
       // A real tab is a fixed grid: `setValues` past `getMaxRows()` throws
       // rather than growing it, which is what killed the first version of the
@@ -124,6 +125,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
           // not the script's.
           getSpreadsheetTimeZone: () => sheetZone,
           getSheetByName: (name: string) => (tabs.has(name) ? tabApi(name) : null),
+          getSheets: () => [...tabs.keys()].map((name) => tabApi(name)),
           insertSheet: (name: string) => {
             // Sheets' own default for a new tab, which is the whole point of
             // `growFor`.
@@ -243,6 +245,8 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'requestMirrorDeploy', 'GH_DISPATCH_TOKEN_PROP', 'GH_DISPATCH_EVENT', 'GH_DISPATCH_URL',
     'appendDailyHistory', 'historyRowsFor', 'SHEET_HEADER', 'HISTORY_SHEET_ID_PROP',
     'SHEET_LAST_WRITE_PROP', 'SHEET_CORRECTION_MS',
+    'handleSheetBackfill', 'sheetBackfillStep', 'backfillDays', 'fetchCompleteRows', 'archiveSummary',
+    'SHEET_BACKFILL_PROP', 'SHEET_BACKFILL_FN', 'SHEET_BACKFILL_MAX_FAILURES', 'SHEET_BACKFILL_STALL_MS',
     'GH_DISPATCH_MIN_INTERVAL_MS', 'GH_DISPATCH_FAIL_BACKOFF_MS', 'GH_DISPATCH_PROP', 'GH_DISPATCH_OK_PROP',
     'validateBoard', 'markSuspects', 'readChunkedProp',
     'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
@@ -1878,7 +1882,7 @@ describe('long-term history in a Sheet', () => {
       expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('unconfigured');
       expect(openedIds).toEqual([]);
       expect(tabs.size).toBe(0);
-      expect(api.handleDiag().sheet_history).toEqual({ configured: false, last_write: null });
+      expect(api.handleDiag().sheet_history).toEqual({ configured: false, last_write: null, backfill: null });
     });
 
     it('creates the year tab with its header and appends the day', () => {
@@ -2108,6 +2112,430 @@ describe('long-term history in a Sheet', () => {
       // deployment's Sheets quota.
       expect(openedIds).toHaveLength(opens);
       expect(JSON.stringify(diag)).not.toContain(SHEET_ID);
+    });
+  });
+});
+
+/** ROC date arithmetic, for the suites below that work on fixed dates. */
+const rocShift = (roc: string, days: number): string => {
+  const [y, m, d] = roc.split('.').map(Number);
+  const at = new Date(Date.UTC(y + 1911, m - 1, d + days));
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${at.getUTCFullYear() - 1911}.${pad(at.getUTCMonth() + 1)}.${pad(at.getUTCDate())}`;
+};
+const rocIso = (roc: string): string => {
+  const [y, m, d] = roc.split('.');
+  return `${Number(y) + 1911}-${m}-${d}`;
+};
+
+/**
+ * MOA's range endpoint over a day-by-day world: `daily(root, roc)` says what
+ * traded, and a response past `cap` rows is cut the way MOA cuts one — the
+ * newest rows kept and `Next: true` set.
+ */
+function moaRange(daily: (root: string, roc: string) => Row[], cap = Infinity) {
+  const requests: { root: string; from: string; to: string }[] = [];
+  const answer = (url: string) => {
+    const q = new URL(url).searchParams;
+    const root = q.get('CropName') ?? '';
+    const from = q.get('Start_time') ?? '';
+    const to = q.get('End_time') ?? from;
+    requests.push({ root, from, to });
+    let rows: Row[] = [];
+    for (let d = from; d <= to; d = rocShift(d, 1)) rows = rows.concat(daily(root, d));
+    const next = rows.length > cap;
+    if (next) rows = [...rows].sort((a, b) => (b.TransDate ?? '').localeCompare(a.TransDate ?? '')).slice(0, cap);
+    return {
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify({ RS: 'OK', Data: rows, Next: next }),
+    };
+  };
+  return {
+    requests,
+    UrlFetchApp: {
+      fetch: (url: string) => answer(url),
+      fetchAll: (reqs: { url: string }[]) => reqs.map((r) => answer(r.url)),
+    },
+  };
+}
+
+describe('backfilling the archive from MOA (#22 §4)', () => {
+  const SHEET_ID = '1AbCdEfGh_stub';
+  const BOARD_ROC = '115.09.21';
+  const CLOSED = new Set(['115.09.13']);
+
+  /**
+   * Two items trading every open day: 高麗菜 in two varieties (a blend row and
+   * two variety rows) and 番茄 in one (a blend row) — four rows a day.
+   */
+  const market = (root: string, roc: string): Row[] => {
+    if (CLOSED.has(roc)) return root === '甘藍' ? [trendRow(roc, '休市', 0, 0)] : [];
+    if (root === '甘藍') {
+      return [trendRow(roc, '甘藍-初秋', 20, 60000), trendRow(roc, '甘藍-雪翠', 30, 40000, '台中')];
+    }
+    if (root === '番茄') return [trendRow(roc, '番茄-牛番茄', 40, 12000)];
+    return [];
+  };
+  const ROWS_A_DAY = 4;
+
+  const backfill = (daily = market, { cap = Infinity, boardRoc = BOARD_ROC } = {}) => {
+    const moa = moaRange((root, roc) => daily(root, roc), cap);
+    const back = loadBackend({}, { UrlFetchApp: moa.UrlFetchApp });
+    back.props.set(back.api.HISTORY_SHEET_ID_PROP, SHEET_ID);
+    back.api.storeBoard({
+      type: 'board', date: rocIso(boardRoc), roc_date: boardRoc,
+      generated_at: new Date().toISOString(), count: 0, items: [],
+    });
+    const job = () => JSON.parse(back.props.get(back.api.SHEET_BACKFILL_PROP) ?? 'null');
+    const setJob = (patch: Record<string, unknown>) =>
+      back.props.set(back.api.SHEET_BACKFILL_PROP, JSON.stringify({ ...job(), ...patch }));
+    const rowsOf = (year: string) => (back.tabs.get(year)?.rows ?? []).slice(1);
+    const datesOf = (year: string) => [...new Set(rowsOf(year).map((r) => r[0]))].sort();
+    const links = () => back.triggers.filter((t) => t.handler === back.api.SHEET_BACKFILL_FN).length;
+    return { ...back, moa, job, setJob, rowsOf, datesOf, links };
+  };
+
+  describe('the request', () => {
+    it('refuses until a sheet is configured', () => {
+      const back = backfill();
+      back.props.delete(back.api.HISTORY_SHEET_ID_PROP);
+      const reply = back.api.handleSheetBackfill({ months: '12' });
+      expect(reply).toMatchObject({ sheet: true, queued: false, message: '尚未設定 HISTORY_SHEET_ID' });
+      expect(back.job()).toBeNull();
+      expect(back.links()).toBe(0);
+    });
+
+    it('stays behind the admin token, like the rolling backfill', () => {
+      const back = backfill();
+      expect(back.get({ action: 'backfill', sheet: '1', months: '12' }).error).toBe('unauthorized');
+      expect(back.job()).toBeNull();
+
+      back.props.set(back.api.ADMIN_TOKEN_PROP, 's3cret-token');
+      expect(back.get({ action: 'backfill', sheet: '1', months: '12', token: 's3cret-token' }).queued).toBe(true);
+    });
+
+    it('answers a status request without crawling or queueing anything', () => {
+      const back = backfill();
+      const reply = back.api.handleSheetBackfill({});
+      expect(reply).toMatchObject({ queued: false, job: null });
+      expect(reply.archive).toEqual({ rows: 0, days: 0, first_date: null, last_date: null });
+      expect(back.moa.requests).toHaveLength(0);
+      expect(back.links()).toBe(0);
+    });
+
+    it('queues a job that stops the day before the board\'s trading date', () => {
+      // The live archive only ever writes the board's date or a later one, and
+      // it appends a new date without looking. A day both had written would be
+      // in the Sheet twice.
+      const back = backfill();
+      const reply = back.api.handleSheetBackfill({ months: '12' });
+
+      expect(reply.queued).toBe(true);
+      expect(back.job()).toMatchObject({
+        status: 'running', months: 12, from: '2025-09-21', to: '2026-09-20', cursor: '2026-09-20',
+      });
+      expect(back.links()).toBe(1);
+      expect(back.moa.requests).toHaveLength(0); // the crawl is the trigger's, never the request's
+    });
+
+    it('clamps the reach, and reads a missing or garbled one as a year', () => {
+      expect(backfill().api.handleSheetBackfill({ months: '99' }).job.months).toBe(24);
+      expect(backfill().api.handleSheetBackfill({ months: 'soon' }).job.months).toBe(12);
+    });
+
+    it('will not start without a board to measure the end from', () => {
+      const back = backfill();
+      back.props.clear();
+      back.props.set(back.api.HISTORY_SHEET_ID_PROP, SHEET_ID);
+      expect(back.api.handleSheetBackfill({ months: '12' }).message).toBe('尚無看板，無法決定回填終點');
+      expect(back.links()).toBe(0);
+    });
+
+    it('reports a running job instead of starting a second one', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      const first = back.job();
+
+      const again = back.api.handleSheetBackfill({ months: '3' });
+      expect(again).toMatchObject({ queued: false, message: '回填進行中' });
+      expect(back.job()).toEqual(first);
+      expect(back.links()).toBe(1);
+    });
+
+    it('resumes a job whose chain stopped, from where it got to', () => {
+      // One link runs for at most six minutes and queues the next a second
+      // later, so a running job this quiet has nothing behind it.
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+      back.triggers.length = 0; // the next link never fired
+      back.setJob({ updated_at: new Date(Date.now() - back.api.SHEET_BACKFILL_STALL_MS - 60_000).toISOString() });
+
+      const reply = back.api.handleSheetBackfill({ months: '3' });
+      expect(reply.queued).toBe(true);
+      expect(reply.message).toBe('已從 2026-09-11 繼續回填');
+      expect(back.job()).toMatchObject({ months: 12, cursor: '2026-09-11', windows: 1 }); // its own reach, kept
+      expect(back.links()).toBe(1);
+    });
+
+    it('cancels a running job and its queued link', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      expect(back.api.handleSheetBackfill({ cancel: '1' }).message).toBe('已停止回填');
+      expect(back.job().status).toBe('cancelled');
+      expect(back.links()).toBe(0);
+
+      back.api.sheetBackfillStep(); // a link already in flight does nothing
+      expect(back.moa.requests).toHaveLength(0);
+    });
+  });
+
+  describe('one link', () => {
+    it('crawls one window per root and writes its trading days', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      // One request per root, twelve days long: nine written, three before
+      // them fetched only to be the previous trading day.
+      const cabbage = back.moa.requests.filter((r) => r.root === '甘藍');
+      expect(cabbage).toEqual([{ root: '甘藍', from: '115.09.09', to: '115.09.20' }]);
+
+      expect(back.datesOf('2026')).toEqual([
+        '2026-09-12', '2026-09-14', '2026-09-15', '2026-09-16',
+        '2026-09-17', '2026-09-18', '2026-09-19', '2026-09-20',
+      ]); // 09-13 was closed; 09-09 to 09-11 are the next window's
+      expect(back.rowsOf('2026')).toHaveLength(8 * ROWS_A_DAY);
+      expect(back.job()).toMatchObject({
+        status: 'running', cursor: '2026-09-11', windows: 1,
+        days_written: 8, days_skipped: 0, rows_written: 8 * ROWS_A_DAY, failures: 0,
+      });
+      expect(back.links()).toBe(1); // the next one
+    });
+
+    it('builds a day the way the live archive does', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      const day = back.rowsOf('2026').filter((r) => r[0] === '2026-09-20');
+      expect(day).toEqual([
+        ['2026-09-20', '高麗菜', '甘藍', '', 24, 100000, 2, ''],
+        ['2026-09-20', '高麗菜', '甘藍', '初秋', 20, '', '', 60],
+        ['2026-09-20', '高麗菜', '甘藍', '雪翠', 30, '', '', 40],
+        ['2026-09-20', '番茄', '番茄', '', 40, 12000, 1, ''],
+      ]);
+    });
+
+    it('judges the first day of a window against the day before it', () => {
+      // The three leading days are why: rule (e) compares a day with the
+      // previous TRADING day, and without them the first day of every window
+      // would go into the archive unjudged.
+      const spiked = (root: string, roc: string): Row[] => {
+        if (root === '番茄' && roc === '115.09.11') return [trendRow(roc, '番茄-牛番茄', 10, 200000)];
+        return market(root, roc); // …then 4× the price on a sixteenth of the volume
+      };
+      const back = backfill(spiked);
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      const itemsOn = (date: string) => back.rowsOf('2026').filter((r) => r[0] === date).map((r) => r[1]);
+      expect(itemsOn('2026-09-12')).not.toContain('番茄'); // flagged, and skipped like the live path skips it
+      expect(itemsOn('2026-09-12')).toContain('高麗菜');
+      expect(itemsOn('2026-09-14')).toContain('番茄'); // judged against 09-12, which it matches
+    });
+
+    it('leaves a day already in the Sheet alone', () => {
+      const back = backfill();
+      const live = {
+        type: 'board', date: '2026-09-18', roc_date: '115.09.18', generated_at: new Date().toISOString(),
+        items: [{ name: '高麗菜', official_name: '甘藍', avg_price: 22, trade_volume: 90000, markets_count: 5 }],
+      };
+      expect(back.api.appendDailyHistory(live)).toBe('appended');
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      const day = back.rowsOf('2026').filter((r) => r[0] === '2026-09-18');
+      expect(day).toEqual([['2026-09-18', '高麗菜', '甘藍', '', 22, 90000, 5, '']]); // the live row, alone
+      expect(back.job()).toMatchObject({ days_written: 7, days_skipped: 1 });
+    });
+
+    it('writes each year into its own tab', () => {
+      const back = backfill(market, { boardRoc: '115.01.05' });
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      expect(back.datesOf('2026')).toEqual(['2026-01-01', '2026-01-02', '2026-01-03', '2026-01-04']);
+      expect(back.datesOf('2025')).toEqual([
+        '2025-12-27', '2025-12-28', '2025-12-29', '2025-12-30', '2025-12-31',
+      ]);
+      expect(back.tabs.get('2025')?.rows[0]).toEqual(back.api.SHEET_HEADER);
+    });
+
+    it('retries a failed crawl, and stops the chain once it keeps failing', () => {
+      // A probe root with no rows at all is a crawl that failed — MOA answers
+      // a closed market with 休市 rows — and must not pass for a closed week.
+      const back = backfill(() => []);
+      back.api.handleSheetBackfill({ months: '12' });
+
+      back.api.sheetBackfillStep();
+      expect(back.job()).toMatchObject({ status: 'running', failures: 1, cursor: '2026-09-20' });
+      expect(back.job().last_error).toContain('甘藍');
+      expect(back.links()).toBe(1);
+
+      for (let i = 1; i < back.api.SHEET_BACKFILL_MAX_FAILURES; i++) back.api.sheetBackfillStep();
+      expect(back.job()).toMatchObject({ status: 'failed', failures: back.api.SHEET_BACKFILL_MAX_FAILURES });
+      expect(back.links()).toBe(0);
+      expect(back.tabs.size).toBe(0);
+
+      // …and asking again picks it up where it stopped.
+      const reply = back.api.handleSheetBackfill({ months: '12' });
+      expect(reply.message).toBe('已從 2026-09-20 繼續回填');
+      expect(back.job()).toMatchObject({ status: 'running', failures: 0 });
+    });
+
+    it('records a sheet it cannot open as a failed link, never a thrown trigger', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.breakSheet();
+
+      expect(() => back.api.sheetBackfillStep()).not.toThrow();
+      expect(back.job()).toMatchObject({ status: 'running', failures: 1, cursor: '2026-09-20' });
+      expect(back.job().last_error).toContain('Requested entity was not found');
+    });
+
+    it('drops its result when the job is cancelled while it runs', () => {
+      let during = () => {};
+      const back = backfill((root, roc) => (during(), market(root, roc)));
+      back.api.handleSheetBackfill({ months: '12' });
+      during = () => {
+        if (back.job().status === 'running') back.setJob({ status: 'cancelled' });
+      };
+
+      back.api.sheetBackfillStep();
+      expect(back.job()).toMatchObject({ status: 'cancelled', cursor: '2026-09-20', windows: 0 });
+      expect(back.links()).toBe(0);
+    });
+
+    it('leaves the link of a job that replaced it while it ran', () => {
+      // Every link has the same handler name, so dropping "ours" by name would
+      // drop the new job's too, and it would never start.
+      let during = () => {};
+      const back = backfill((root, roc) => (during(), market(root, roc)));
+      back.api.handleSheetBackfill({ months: '12' });
+      during = () => {
+        if (back.job().id === 'replacement') return;
+        back.setJob({ id: 'replacement', status: 'running' });
+        back.triggers.push({ handler: back.api.SHEET_BACKFILL_FN, kind: 'after:1000' });
+      };
+
+      back.api.sheetBackfillStep();
+      expect(back.job()).toMatchObject({ id: 'replacement', windows: 0 });
+      expect(back.links()).toBeGreaterThan(0);
+    });
+  });
+
+  describe('a whole job', () => {
+    const runOut = (back: ReturnType<typeof backfill>) => {
+      for (let i = 0; i < 20 && back.job().status === 'running'; i++) back.api.sheetBackfillStep();
+    };
+
+    it('walks back to its reach, writes every trading day once, and stops', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '1' });
+      runOut(back);
+
+      expect(back.job()).toMatchObject({ status: 'done', from: '2026-08-21', windows: 4 });
+      expect(back.links()).toBe(0);
+      const dates = back.datesOf('2026');
+      expect(dates[0]).toBe('2026-08-21');
+      expect(dates[dates.length - 1]).toBe('2026-09-20');
+      expect(dates).toHaveLength(31 - 1); // 08-21 … 09-20, less the closed day
+      for (const date of dates) {
+        expect(back.rowsOf('2026').filter((r) => r[0] === date)).toHaveLength(ROWS_A_DAY);
+      }
+    });
+
+    it('writes nothing the second time over the same reach', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '1' });
+      runOut(back);
+      const before = back.rowsOf('2026').length;
+
+      back.api.handleSheetBackfill({ months: '1' });
+      runOut(back);
+      expect(back.rowsOf('2026')).toHaveLength(before);
+      expect(back.job()).toMatchObject({ status: 'done', days_written: 0, days_skipped: 30 });
+    });
+
+    it('reports what the Sheet holds, behind the token', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '1' });
+      runOut(back);
+      expect(back.api.handleSheetBackfill({}).archive).toEqual({
+        rows: 30 * ROWS_A_DAY, days: 30, first_date: '2026-08-21', last_date: '2026-09-20',
+      });
+    });
+
+    it('counts only the year tabs', () => {
+      // A new spreadsheet comes with a default tab, and an owner may keep
+      // notes in one; neither is the archive.
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '1' });
+      runOut(back);
+      back.tabs.set('工作表1', { rows: [['notes'], ['2026-01-01', 'x']], maxRows: 1000, textColumnA: true });
+
+      expect(back.api.handleSheetBackfill({}).archive).toMatchObject({ rows: 30 * ROWS_A_DAY, first_date: '2026-08-21' });
+    });
+
+    it('publishes its progress in diag, and not its errors', () => {
+      // `diag` is public; the last error is platform text and stays behind
+      // the token with the rest of the job.
+      const back = backfill(() => []);
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      const published = back.api.handleDiag().sheet_history.backfill;
+      expect(published).toMatchObject({ status: 'running', cursor: '2026-09-20', failures: 1 });
+      expect(published).not.toHaveProperty('last_error');
+      expect(published).not.toHaveProperty('id');
+      expect(back.api.handleSheetBackfill({}).job.last_error).toContain('甘藍');
+    });
+  });
+
+  describe('fetchCompleteRows — what MOA cuts short', () => {
+    const daysOf = (rows: Row[]) => [...new Set(rows.map((r) => r.TransDate))].sort();
+
+    it('refetches a truncated window in halves until every piece is whole', () => {
+      // MOA keeps the NEWEST rows, so a truncated range quietly loses its
+      // oldest days — or worse, part of one, whose average is then wrong.
+      const oneADay = (root: string, roc: string) => (root === '甘藍' ? [trendRow(roc, '甘藍-初秋', 20, 60000)] : []);
+      const back = backfill(oneADay, { cap: 3 });
+      const rows = back.api.fetchCompleteRows(['甘藍'], '115.09.01', '115.09.04');
+
+      expect(daysOf(rows['甘藍'])).toEqual(['115.09.01', '115.09.02', '115.09.03', '115.09.04']);
+      expect(back.moa.requests.map((r) => `${r.from}–${r.to}`)).toEqual([
+        '115.09.01–115.09.04', '115.09.01–115.09.02', '115.09.03–115.09.04',
+      ]);
+    });
+
+    it('leaves out a single day that is too big to fetch whole', () => {
+      const heavy = (root: string, roc: string) => {
+        if (root !== '甘藍') return [];
+        const n = roc === '115.09.03' ? 4 : 1;
+        return Array.from({ length: n }, (_, i) => trendRow(roc, '甘藍-初秋', 20, 60000, `市場${i}`));
+      };
+      const back = backfill(heavy, { cap: 3 });
+      const rows = back.api.fetchCompleteRows(['甘藍'], '115.09.01', '115.09.04');
+
+      expect(daysOf(rows['甘藍'])).toEqual(['115.09.01', '115.09.02', '115.09.04']);
+      expect(back.logs.some((l) => l.includes('still truncates on 115.09.03'))).toBe(true);
+    });
+
+    it('costs nothing extra when nothing is cut', () => {
+      const back = backfill();
+      back.api.fetchCompleteRows(['甘藍'], '115.09.01', '115.09.04');
+      expect(back.moa.requests).toHaveLength(1);
     });
   });
 });

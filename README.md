@@ -430,6 +430,49 @@ Enabling it needs the `spreadsheets` OAuth scope, which is now in
 re-consent before the Web App serves again**. §8 has the canary procedure;
 this is the same step the `script.send_mail` scope needed.
 
+#### Backfilling it from MOA
+
+The archive starts empty on the day it is configured, and both of its readers
+need what came before — 「比去年同期」 a year of it, a per-variety baseline the
+last 45 days. `?action=backfill&sheet=1&months=12` (admin token) fills that in
+from MOA's range queries:
+
+- **A chain of one-off triggers, one window a link.** A year is ~40 windows
+  and one Apps Script execution stops at 6 minutes, so each link crawls one
+  12-day window, writes it and queues the next a second later. It walks
+  **newest first**: the weeks a variety baseline needs land in the first
+  minutes, the year-old days last. A year costs ~40 links of about a minute
+  each — mind the consumer account's 90 minutes of trigger runtime a day,
+  which the 4-hourly refresh also draws on.
+- **A day is built by the same code as a crawled one** — the item
+  definitions, `aggregateGroup`, the guard's item rules, `historyRowsFor` — so
+  the two cannot drift into different archives. Each window fetches three
+  extra leading days that are never written: they are the *previous trading
+  day* rule (e) judges the first day against, and without them one day in
+  every nine would go into the archive unjudged.
+- **It never writes a day the live path can.** The job ends the day before
+  the board's trading date, fixed when it starts; the live archive only ever
+  writes that date or a later one. A day already in the Sheet — live or from
+  an earlier backfill — is left alone, and the check and the append run under
+  the history lock, so re-running a finished job writes nothing.
+- **A truncated MOA response is refetched, not trusted.** Past ~1,000 rows MOA
+  keeps the newest and sets `Next: true`; the oldest day left can be missing
+  markets, and an average built from it is simply wrong. The window is halved
+  until each piece is whole, and a single day that still truncates leaves that
+  crop out of that day — missing is honest, wrong would be permanent.
+  (`calibrate` has always done this; the rolling history's backfill and the
+  trend still read a truncated response as whole.)
+- **It survives stopping.** The job — reach, cursor, counts, last error — is
+  one property. A failed window is retried by the next link; three in a row
+  stop the chain as `failed`. Asking again with any `months=` resumes a failed
+  job, or a running one that has not moved for 15 minutes, from its cursor and
+  with its original reach; `cancel=1` stops it after the current window.
+
+Rows land in the order they were written, not in date order — the live days,
+then each window newest-first. Nothing reads the tab in order (the readers
+group by date), so sorting column A in the Sheets UI is safe at any time: it
+keeps each day's rows together, which is all the correction path relies on.
+
 
 ### Static board mirror
 
@@ -741,6 +784,15 @@ GET {WEB_APP_URL}/exec?action=backfill&token=…[&force=1]
      "history": { "items": 97, "min_days": 1, "max_days": 24 } }
 → { "type": "backfill", "error": "unauthorized", "message": "此操作需要 token 參數" }   # wrong or missing token
 
+GET {WEB_APP_URL}/exec?action=backfill&sheet=1&token=…[&months=12 | &cancel=1]
+→ { "type": "backfill", "sheet": true, "queued": true, "message": "已排入背景回填",
+     "job": { "status": "running", "months": 12, "from": "2025-09-21", "to": "2026-09-20",
+              "cursor": "2026-09-20", "windows": 0, "days_written": 0, "days_skipped": 0,
+              "rows_written": 0, "failures": 0, "last_error": null, ... } }
+→ without `months` — status only, nothing crawled or queued, plus what the Sheet holds:
+   { ..., "queued": false, "archive": { "rows": 61234, "days": 249,
+                                        "first_date": "2025-09-22", "last_date": "2026-09-22" } }
+
 GET {WEB_APP_URL}/exec?action=diag[&token=…]
 → { "type": "diag", "board": { "generated_at": ..., "stale": false },
      "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null,
@@ -748,7 +800,8 @@ GET {WEB_APP_URL}/exec?action=diag[&token=…]
      "history": { "items": 97, "min_days": 1, "max_days": 24 },
      "mirror_dispatch": { "at": "2026-09-21T16:04:11.201Z", "outcome": "dispatched",
                           "last_ok": "2026-09-21T16:04:11.201Z" },
-     "sheet_history": { "configured": false, "last_write": null },
+     "sheet_history": { "configured": true, "last_write": { "date": "2026-09-22", "generated_at": "…" },
+                        "backfill": { "status": "running", "cursor": "2026-06-14", "windows": 11, ... } },
      "alert": { "failure_streak": 0, "incident_open": false, "last_attempt": null, "recipient_configured": true,
                 "last_send_failure": null } }
 
@@ -757,7 +810,9 @@ GET {WEB_APP_URL}/exec?action=alerttest&token=…
 ```
 `warm` and `backfill` both queue their crawl in a one-off trigger and answer at
 once — the crawls take minutes and would blow the Web App response window.
-`backfill` is idempotent per trading date, so re-running only fills gaps. `diag`
+`backfill` is idempotent per trading date, so re-running only fills gaps; with
+`sheet=1` it backfills the long-term archive instead (§2), and `diag` publishes
+that job's progress but never its `last_error`, which is platform text. `diag`
 is how you tell "markets closed" from "refresh pipeline dead" without the GAS
 console, and how you confirm history coverage after a backfill.
 
@@ -1130,7 +1185,9 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
      whether or not you set this**, so the next deploy asks you to re-consent
      either way — verify it on a canary deployment first, as with the mail
      scope. `diag.sheet_history` says whether it is configured and what was
-     last written, from the properties alone.
+     last written, from the properties alone. Once a refresh has stored a
+     board, `?action=backfill&sheet=1&months=12&token=…` fills in the past
+     year (§2); `diag.sheet_history.backfill` shows it walking back.
 3. Run `installDailyTrigger()` once in the editor — it installs the refresh
    trigger on `REFRESH_INTERVAL_HOURS` and warms the board so the first visitor
    never hits a cold crawl. Confirm with `?action=diag`: `triggers` must list
