@@ -185,8 +185,7 @@ function handleDiag(full, props) {
         (board || {}).roc_date, props[SHEET_BACKFILL_PROP]),
       // Each variety's own 28-day median (§3): for which trading date, and
       // how many items and varieties it covers.
-      variety_baseline: publicVarietyBaselines(props[HISTORY_SHEET_ID_PROP], (board || {}).roc_date,
-        props[VARIETY_BASE_SKIPPED_PROP]),
+      variety_baseline: publicVarietyBaselines(props, (board || {}).roc_date),
     },
     // Whether the mirror is being republished by the crawl or left to the
     // fallback cron: an expired PAT would 401 on every refresh and nothing

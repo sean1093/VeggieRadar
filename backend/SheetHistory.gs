@@ -252,7 +252,7 @@ function findRuns(sheet, from, to, zone) {
     var day = cellDate(cells[i][0], zone);
     // Text that sorts between two dates (one typed with a trailing space) is
     // let into a run on purpose: dropping it would split the run around it,
-    // and the second read checks every row's date anyway (`readYearAgoTab`);
+    // and the second read checks every row's date anyway (`scanTab`);
     // `readDay` matches one exact date, which such text never is.
     if (day < from || day > to) continue;
     var row = i + 2; // past the header
@@ -1459,7 +1459,7 @@ function refreshYearAgo(boardRoc, startedAt) {
       // `diag`, or refreshes that are always this slow would leave the
       // comparison off with nothing to show why.
       Logger.log('refreshYearAgo: skipped, the refresh has run ' + Math.round((Date.now() - startedAt) / 1000) + ' s');
-      props.setProperty(YOY_SKIPPED_PROP, JSON.stringify({ at: new Date().toISOString(), sheet: sheetId }));
+      noteUnread(props, YOY_SKIPPED_PROP, sheetId, 'late');
       return null;
     }
     // The board's own year is the one tab read under the history lock — late
@@ -1477,8 +1477,14 @@ function refreshYearAgo(boardRoc, startedAt) {
     return found.items;
   } catch (err) {
     // Not kept: the next refresh asks again, rather than the day going
-    // without a comparison because one read failed.
+    // without a comparison because one read failed — and `diag` says so.
     Logger.log('refreshYearAgo failed: ' + err);
+    try {
+      noteUnread(PropertiesService.getScriptProperties(), YOY_SKIPPED_PROP,
+        PropertiesService.getScriptProperties().getProperty(HISTORY_SHEET_ID_PROP), 'failed');
+    } catch (err2) {
+      Logger.log('refreshYearAgo: not noted: ' + err2);
+    }
     return null;
   }
 }
@@ -1530,12 +1536,12 @@ function keptStillFresh(kept, boardRoc, sheetId, job, span) {
 }
 
 /**
- * A backfill job of this spreadsheet whose reach takes in the year-ago span:
- * the only kind that can change what a read of it finds. One filling the last
- * month for the variety baseline cannot.
+ * A backfill job of this spreadsheet whose range overlaps `span`: the only
+ * kind that can change what a read of it finds. One filling the last month
+ * cannot reach a year back, nor one filling 2023 the last month.
  */
 function backfillReaches(job, sheetId, span) {
-  return !!job && job.sheet === sheetId && job.from <= span.to;
+  return !!job && job.sheet === sheetId && job.from <= span.to && job.to >= span.from;
 }
 
 /** …and running: its links still writing, not stalled. */
@@ -1570,29 +1576,15 @@ function parseJson(raw) {
 
 /**
  * The medians themselves: the blend rows (variety empty) of the archived days
- * in the window, per item. Suspect days never reached the archive, so there
- * is nothing to filter here.
- *
- * Column A of each year tab the window touches is read to find the window's
- * rows, and then only those rows — in the runs they sit in, since the
- * backfill writes days in its own order. A year tab is ~50k rows. Past
- * `YOY_MAX_RUNS` the tab has been sorted by another column, which scatters
- * the week into hundreds of runs: that is reported as `scattered`, as
- * `readDay` does, rather than read around with a read of the whole tab.
- *
- * The caller holds the history lock only when the span reaches the board's
- * own year (see `refreshYearAgo`); everywhere else the tab is only appended
- * to. Dates are checked again on the second read all the same, for a sort by
- * hand in between — and anything that writes or deletes here would need the
- * lock taken for every span.
+ * in the window, per item — walked by `scanSpan`, which says which tab is read
+ * under the lock and which tabs are reported `scattered`. Suspect days never
+ * reached the archive, so there is nothing to filter here.
  *
  * An item needs `YOY_MIN_SIDE_DAYS` archived days on EACH side of the day a
  * year back, and its median is taken over the SAME number from each side —
- * the nearest ones — plus the day itself if archived. A window with more on
- * one side (a backfill that stopped part-way, a gap in MOA's data, a closure)
- * would otherwise lean to that week; it is not 「去年此時」. Only board
- * items are kept, rounded to the hundredth: the property holding them has a
- * size limit, and `diag` counts what the board can apply.
+ * the nearest ones — plus the day itself if archived (`yearAgoFromPrices`).
+ * Only board items are kept, rounded to the hundredth: the property holding
+ * them has a size limit, and `diag` counts what the board can apply.
  */
 function yearAgoMedians(spreadsheet, span, liveYear) {
   var prices = {};
@@ -1626,7 +1618,7 @@ function scanSpan(spreadsheet, span, liveYear, onRow) {
     var sheet = spreadsheet.getSheetByName(years[y]);
     if (!sheet) continue;
     var read = scanTab.bind(null, sheet, span, zone, onRow);
-    if (years[y] === liveYear ? withHistoryLock(read) : read()) {
+    if (years[y] === liveYear ? withHistoryLock(read, READER_LOCK_WAIT_MS) : read()) {
       Logger.log('scanSpan: ' + years[y] + ' is not in date order; not read');
       return true;
     }
@@ -1727,6 +1719,7 @@ function publicYearAgo(raw, sheetId, skippedAt, boardRoc, jobRaw) {
   if (skipped && skipped.sheet === sheetId && (!out || !out.at || skipped.at > out.at)) {
     out = out || { date: null, at: null, items: 0, applied: false };
     out.skipped_at = skipped.at;
+    out.skipped = skipped.why || 'late';
   }
   return out;
 }
@@ -1757,10 +1750,11 @@ function applyVarietyBaselines(items, medians) {
     for (var v = 0; v < varieties.length; v++) {
       var base = bases[varieties[v].name];
       if (!(base > 0)) continue;
-      // The same formula as `attachComparison`, in the row's own unit: its
-      // price is 元/台斤, the archive's 元/公斤.
-      var catty = base * CATTY_PER_KG;
-      varieties[v].vs_baseline_percent = round1(((varieties[v].catty_price - catty) / catty) * 100);
+      // In 元/公斤, and from exactly the value the archive holds for today's
+      // row (`historyRowsFor`): comparing the rounded 元/台斤 with an unrounded
+      // median would show a variety that has not moved as 「低 1%」.
+      var today = round1(varieties[v].catty_price / CATTY_PER_KG);
+      varieties[v].vs_baseline_percent = round1(((today - base) / base) * 100);
     }
   }
 }
@@ -1811,20 +1805,43 @@ function refreshVarietyBaselines(boardRoc, startedAt) {
       // As for the year-ago read: the execution limit would end the run before
       // its caller's cleanup. Said in `diag`, and read by the next refresh.
       Logger.log('refreshVarietyBaselines: skipped, the refresh has run ' + Math.round((Date.now() - startedAt) / 1000) + ' s');
-      props.setProperty(VARIETY_BASE_SKIPPED_PROP, JSON.stringify({ at: new Date().toISOString(), sheet: sheetId }));
+      noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'late');
       return null;
     }
     var found = varietyMedians(SpreadsheetApp.openById(sheetId), span, rocToISO(boardRoc).substring(0, 4));
-    writeChunkedProp(VARIETY_BASE_PREFIX, VARIETY_BASE_COUNT, JSON.stringify({
+    var kept = writeChunkedProp(VARIETY_BASE_PREFIX, VARIETY_BASE_COUNT, JSON.stringify({
       date: boardRoc, sheet: sheetId, at: new Date().toISOString(),
       items: found.items, scattered: found.scattered || undefined
     }));
+    if (!kept) {
+      // Read, and not kept — a full property store, most likely. Said in
+      // `diag`, or every refresh would read again with nothing showing why.
+      noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'not kept');
+      return found.items;
+    }
     props.deleteProperty(VARIETY_BASE_SKIPPED_PROP);
     return found.items;
   } catch (err) {
+    // The lock busy past its short wait, the Sheet unreachable: not kept, and
+    // read again by the next refresh — and said in `diag` meanwhile.
     Logger.log('refreshVarietyBaselines failed: ' + err);
+    try {
+      noteUnread(PropertiesService.getScriptProperties(), VARIETY_BASE_SKIPPED_PROP,
+        PropertiesService.getScriptProperties().getProperty(HISTORY_SHEET_ID_PROP), 'failed');
+    } catch (err2) {
+      Logger.log('refreshVarietyBaselines: not noted: ' + err2);
+    }
     return null;
   }
+}
+
+/**
+ * Records that a read of the archive was left undone, when and why — `late`
+ * (the refresh had run too long), `failed` or `not kept` — for `diag`.
+ */
+function noteUnread(props, key, sheetId, why) {
+  if (!sheetId) return;
+  props.setProperty(key, JSON.stringify({ at: new Date().toISOString(), sheet: sheetId, why: why }));
 }
 
 /**
@@ -1861,10 +1878,15 @@ function varietyMedians(spreadsheet, span, liveYear) {
   return { items: out };
 }
 
-/** The kept variety medians as `diag` publishes them: when, and how many. */
-function publicVarietyBaselines(sheetId, boardRoc, skippedAt) {
+/**
+ * The kept variety medians as `diag` publishes them: when, and how many —
+ * from the property map `diag` already read.
+ */
+function publicVarietyBaselines(props, boardRoc) {
+  var sheetId = props[HISTORY_SHEET_ID_PROP];
   if (!sheetId) return null;
-  var kept = parseJson(readChunkedProp(VARIETY_BASE_PREFIX, VARIETY_BASE_COUNT));
+  var skippedAt = props[VARIETY_BASE_SKIPPED_PROP];
+  var kept = parseJson(chunkedFrom(props, VARIETY_BASE_PREFIX, VARIETY_BASE_COUNT));
   var out = null;
   if (kept && kept.items && kept.sheet === sheetId) {
     var varieties = 0;
@@ -1882,6 +1904,7 @@ function publicVarietyBaselines(sheetId, boardRoc, skippedAt) {
   if (skipped && skipped.sheet === sheetId && (!out || !out.at || skipped.at > out.at)) {
     out = out || { date: null, at: null, items: 0, varieties: 0, applied: false };
     out.skipped_at = skipped.at;
+    out.skipped = skipped.why || 'late';
   }
   return out;
 }

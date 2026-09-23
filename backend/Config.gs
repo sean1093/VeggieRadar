@@ -267,17 +267,7 @@ var YOY_PROP = 'veggie_yoy';
 // trading date for days, so this, not the date, is what makes it read again.
 // Six hours while a backfill is running, which may be adding to the window.
 var YOY_KEEP_MS = 24 * 60 * 60 * 1000;
-var YOY_SOON_MS = 6 * 60 * 60 * 1000;
-var ISO_DAY = /^\d{4}-\d{2}-\d{2}$/; // what a date cell in the archive reads as
-
-// Per-variety baselines (#22 §3): each variety's own 28-trading-day median,
-// read from the archive's variety rows the way the item baseline reads the
-// rolling history — `BASELINE_WINDOW` days within `BASELINE_HORIZON_DAYS`,
-// `BASELINE_MIN_DAYS` of them at least. Chunked: ~100 items with up to four
-// varieties each is more than one 9 KB property holds.
-var VARIETY_BASE_PREFIX = 'veggie_variety_base_chunk_';
-var VARIETY_BASE_COUNT = 'veggie_variety_base_chunks';
-var VARIETY_BASE_SKIPPED_PROP = 'veggie_variety_base_skipped_at'; // …while a backfill may add to the window, or the tab needs re-sorting
+var YOY_SOON_MS = 6 * 60 * 60 * 1000; // …while a backfill may add to the window, or the tab needs re-sorting
 // Kept medians older than this many days are not applied at all: the window
 // they describe has moved too far from the board's date.
 var YOY_KEPT_MAX_DAYS = 7;
@@ -290,6 +280,22 @@ var YOY_MERGE_SLACK_ROWS = 400;
 // is left to the next refresh, well inside the 6-minute execution limit.
 var YOY_START_BY_MS = 4 * 60 * 1000;
 var YOY_SKIPPED_PROP = 'veggie_yoy_skipped_at'; // when a read was last left for time
+// The archive's readers wait this long for the history lock, not the 30 s a
+// write does: their read is optional — a busy lock costs a comparison until
+// the next refresh — and two of them run back to back at the end of one.
+var READER_LOCK_WAIT_MS = 5 * 1000;
+var ISO_DAY = /^\d{4}-\d{2}-\d{2}$/; // what a date cell in the archive reads as
+
+// Per-variety baselines (#22 §3): each variety's own 28-trading-day median,
+// read from the archive's variety rows the way the item baseline reads the
+// rolling history — `BASELINE_WINDOW` days within `BASELINE_HORIZON_DAYS`,
+// `BASELINE_MIN_DAYS` of them at least. Chunked: ~100 items with up to four
+// varieties each is more than one 9 KB property holds.
+var VARIETY_BASE_PREFIX = 'veggie_variety_base_chunk_';
+var VARIETY_BASE_COUNT = 'veggie_variety_base_chunks';
+// A read left undone — for time, or because it failed — as JSON with its
+// sheet, for `diag`; cleared by the next read that happens.
+var VARIETY_BASE_SKIPPED_PROP = 'veggie_variety_base_skipped_at';
 // What the archive holds, as the status request reports it. Counting it reads
 // column A of every year tab, and an operator watching a job polls.
 var SHEET_SUMMARY_CACHE_KEY = 'veggie_sheet_summary';

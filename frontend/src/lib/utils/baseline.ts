@@ -19,8 +19,15 @@ import type { ProduceItem, ProduceVariety } from '../../types/produce';
  * them is the same duplication one step further along.
  */
 export function trustedBaseline(item: ProduceItem): number | null {
+  return trustedPercent(item, item.vs_baseline_percent);
+}
+
+/**
+ * The one trust rule for a comparison of today with another day: a finite
+ * number, on an item the guard did not flag.
+ */
+function trustedPercent(item: ProduceItem, vs: number | undefined): number | null {
   if (item.suspect === true) return null;
-  const vs = item.vs_baseline_percent;
   return typeof vs === 'number' && Number.isFinite(vs) ? vs : null;
 }
 
@@ -30,9 +37,7 @@ export function trustedBaseline(item: ProduceItem): number | null {
  * trusted on a day the guard flagged.
  */
 export function trustedVarietyBaseline(item: ProduceItem, variety: ProduceVariety): number | null {
-  if (item.suspect === true) return null;
-  const vs = variety.vs_baseline_percent;
-  return typeof vs === 'number' && Number.isFinite(vs) ? vs : null;
+  return trustedPercent(item, variety.vs_baseline_percent);
 }
 
 /**

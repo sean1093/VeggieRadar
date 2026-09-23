@@ -558,7 +558,9 @@ has finished since the last read — and
 nothing is published for a window a running backfill has not finished
 walking through, whose later days alone would pass for 「去年此時」. A
 refresh that has already run four minutes leaves the read to the next one,
-and `diag.sheet_history.year_ago.skipped_at` says so. It is shown as one line in the drawer and on no
+and `diag.sheet_history.year_ago.skipped_at` says so, with `skipped` saying
+why: `late`, or `failed` (the Sheet unreachable, or the history lock busy past
+the readers' five-second wait). It is shown as one line in the drawer and on no
 card: `drawer_opened` carries `has_last_year`, and whether it earns a badge
 is for those numbers to say. `diag.sheet_history.year_ago` reports which
 trading date it compares and how many crops it covers.
@@ -571,12 +573,16 @@ baseline is the blend's, and 綠竹筍 at twice 麻竹筍 is not "expensive" (#2
 The archive keeps each variety's own row a day, so each gets its own median —
 by the item baseline's rule (its most recent 28 archived days within the 45
 before the board's date, ten at least, the day itself left out) — and the
-row shows 「比近月低/高 N%」 as `varieties[].vs_baseline_percent`, hidden on a
+row shows 「批發比近月低/高 N%」 as `varieties[].vs_baseline_percent` —
+wholesale, in 元/公斤 as the archive holds it, since the row leads with a
+retail estimate — hidden on a
 suspect day like everything that compares days. It is read exactly as the
 year-ago medians are: the refresh's last step, kept per trading date (chunked
 — a hundred items' varieties are more than one property holds), applied by
 the next build, read again on the same terms, the live year's tab under the
-lock. `diag.sheet_history.variety_baseline` reports what it covers.
+lock. `diag.sheet_history.variety_baseline` reports what it covers, and a
+read left undone the same way — `skipped` also `not kept` when the property
+store would not take the result.
 
 Rows land in the order they were written, not in date order — the live days,
 then each window newest-first. Nothing reads the tab in order (the readers

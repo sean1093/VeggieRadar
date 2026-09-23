@@ -168,28 +168,34 @@ function writeChunkedProp(prefix, countKey, json) {
       var idx = parseInt(key.substring(prefix.length), 10);
       if (!isNaN(idx) && idx >= chunks) props.deleteProperty(key);
     }
+    return true;
   } catch (err) {
     Logger.log('writeChunkedProp error (' + prefix + '): ' + err);
+    return false;
   }
 }
 
 /** Reads a chunked JSON string back, or null when absent or torn. */
 function readChunkedProp(prefix, countKey) {
   try {
-    var all = PropertiesService.getScriptProperties().getProperties();
-    var chunks = parseInt(all[countKey] || '0', 10);
-    if (!chunks) return null;
-    var parts = [];
-    for (var i = 0; i < chunks; i++) {
-      var part = all[prefix + i];
-      if (part == null) return null; // torn write — treat as missing
-      parts.push(part);
-    }
-    return parts.join('');
+    return chunkedFrom(PropertiesService.getScriptProperties().getProperties(), prefix, countKey);
   } catch (err) {
     Logger.log('readChunkedProp error (' + prefix + '): ' + err);
     return null;
   }
+}
+
+/** The same, from a property map the caller already read. */
+function chunkedFrom(all, prefix, countKey) {
+  var chunks = parseInt(all[countKey] || '0', 10);
+  if (!chunks) return null;
+  var parts = [];
+  for (var i = 0; i < chunks; i++) {
+    var part = all[prefix + i];
+    if (part == null) return null; // torn write — treat as missing
+    parts.push(part);
+  }
+  return parts.join('');
 }
 
 /**

@@ -35,9 +35,9 @@ function writeHistory(history) {
  * backfill can genuinely overlap; without the lock, whichever writes last
  * silently discards the other's observations.
  */
-function withHistoryLock(fn) {
+function withHistoryLock(fn, waitMs) {
   var lock = LockService.getScriptLock();
-  lock.waitLock(HISTORY_LOCK_WAIT_MS);
+  lock.waitLock(waitMs || HISTORY_LOCK_WAIT_MS);
   try {
     return fn();
   } finally {

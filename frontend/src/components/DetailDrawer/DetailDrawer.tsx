@@ -338,7 +338,10 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({
               <div className="space-y-1">
                 {varieties.map((v, i) => {
                   // Against this variety's own month (#22 §3), not the
-                  // blend's: 綠竹筍 at twice 麻竹筍 is not "expensive".
+                  // blend's: 綠竹筍 at twice 麻竹筍 is not "expensive". Said
+                  // as WHOLESALE, as the item's baseline sentence is: the row
+                  // leads with a retail estimate, and the markup added to
+                  // both makes the stall's change smaller than this one.
                   const vsOwn = trustedVarietyBaseline(item, v);
                   return (
                   <div key={v.name} className="flex items-baseline justify-between gap-3 text-sm">
@@ -348,7 +351,7 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({
                           most likely has today. */}
                       {i === 0 && <span className="ml-1 text-xs text-stone">主流</span>}
                       {vsOwn !== null && (
-                        <span className="block text-xs text-stone">比近月{relativePhrase(vsOwn)}</span>
+                        <span className="block text-xs text-stone">批發比近月{relativePhrase(vsOwn)}</span>
                       )}
                     </span>
                     <span className="shrink-0 whitespace-nowrap text-right">

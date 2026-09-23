@@ -325,13 +325,13 @@ describe('DetailDrawer', () => {
 
     it('says how each variety compares with its own month, where known', () => {
       render(<DetailDrawer isOpen onClose={() => {}} item={bamboo} allProduceItems={mockAllProduceItems} />);
-      expect(screen.getByText('比近月低 12%')).toBeInTheDocument();
-      expect(screen.getAllByText(/^比近月/)).toHaveLength(1); // 麻竹筍 has none
+      expect(screen.getByText('批發比近月低 12%')).toBeInTheDocument();
+      expect(screen.getAllByText(/^批發比近月/)).toHaveLength(1); // 麻竹筍 has none
     });
 
     it('says nothing of it on a day the guard flagged', () => {
       render(<DetailDrawer isOpen onClose={() => {}} item={{ ...bamboo, suspect: true }} allProduceItems={mockAllProduceItems} />);
-      expect(screen.queryByText(/^比近月/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/^批發比近月/)).not.toBeInTheDocument();
     });
   });
   describe('variety breakdown', () => {
