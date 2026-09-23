@@ -447,11 +447,14 @@ from MOA's range queries:
 - **A day is built by the same code as a crawled one, and judged by the
   same guard** — `boardCards`, `validateBoard`, `historyRowsFor`. The guard's
   board-level rules compare a day with another, and the live path has the
-  board it stored; the past has no such anchor, so a day is judged against
-  **both of its neighbours** and refused only when it disagrees with each —
-  a broken day disagrees with both, a good day beside one agrees with the
-  other. A refused day (too few items, a board-wide price shift) is not
-  written, and is listed under the job's `rejected`. Each window fetches three
+  board it stored; the past has no such anchor. A chain of "the last day let
+  through" starts every window from a day judged against nothing, and a vote
+  of the two neighbours lets a broken stretch vouch for itself — so a day is
+  judged against **the rest of the 12-day span**, each item at its median
+  price across the other days. A broken day, or a short run of them, is
+  outvoted, and every day has a reference, the first and the newest alike. A
+  refused day (too few items, a board-wide price shift) is not written, and
+  is listed under the job's `rejected`. Each window fetches three
   extra leading days that are never written: they are the *previous trading
   day* rule (e) judges the first day against, and without them one day in
   every nine would go into the archive unjudged. After a longer closure
@@ -508,8 +511,9 @@ from MOA's range queries:
   its own so the chain's next write cannot undo it. Requests are serialised
   under the history lock, so two at once cannot start two chains.
 - **A new job skips what earlier ones finished** — but not what they moved
-  past without writing whole (refused days, gaps, partial windows: the job's
-  `holes`), which a later job crawls again; and only on the same spreadsheet;
+  past without writing (refused days and gaps: the job's `holes`), which a
+  later job crawls again; a job with more holes than it can keep (40) claims
+  no coverage of its own rather than forget one; and only on the same spreadsheet;
   pointed at a new one, nothing is skipped, and a running job whose
   `HISTORY_SHEET_ID` changes under it ends itself as `failed` rather than
   carry its cursor into another sheet (`cancel=1` works with the id cleared). Re-running a year would crawl ~40
@@ -522,8 +526,11 @@ from MOA's range queries:
 
 Rows land in the order they were written, not in date order — the live days,
 then each window newest-first. Nothing reads the tab in order (the readers
-group by date), so sorting column A in the Sheets UI is safe at any time: it
-keeps each day's rows together, which is all the correction path relies on.
+group by date), so sorting column A in the Sheets UI is safe at any time: the
+header row is frozen, so it stays on row 1, and a sort by date keeps each
+day's rows together, which is all the correction path relies on. (Sort by any
+other column and a later correction reports the day `scattered` and leaves
+it alone.)
 
 
 ### Static board mirror

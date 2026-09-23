@@ -406,6 +406,11 @@ function isoToROC(iso) {
   return (parseInt(p[0], 10) - 1911) + '.' + p[1] + '.' + p[2];
 }
 
+/** The ISO date `days` calendar days after `iso` (before, when negative). */
+function shiftISO(iso, days) {
+  return rocToISO(shiftROC(isoToROC(iso), days));
+}
+
 /** The ROC date `days` calendar days after `roc` (before, when negative). */
 function shiftROC(roc, days) {
   var d = rocToDate(roc);

@@ -237,6 +237,9 @@ var SHEET_BACKFILL_RETRY_MS = 3 * 60 * 1000;
 // More is a throttle, which drops a whole batch and clears on its own, and
 // keeps failing the window instead.
 var SHEET_BACKFILL_MAX_REFUSED = 2;
+// Days a job moved past without writing, kept so coverage can leave them out.
+// Past this the job stops claiming coverage (`addHoles`), rather than forget.
+var SHEET_BACKFILL_MAX_HOLES = 40;
 // The dates a year tab already holds, cached for the length of a job: its
 // range never meets a date the live path writes, so after the first read the
 // only dates that can appear in it are its own, which it adds as it goes.

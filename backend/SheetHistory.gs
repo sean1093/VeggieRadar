@@ -199,6 +199,10 @@ function appendRow(sheet) {
 
 function writeHeader(sheet) {
   sheet.getRange(1, 1, 1, SHEET_HEADER.length).setValues([SHEET_HEADER]);
+  // Frozen, so sorting the tab in the Sheets UI — which the README says is
+  // safe — sorts the data and leaves the header on row 1, where every reader
+  // here expects it.
+  sheet.setFrozenRows(1);
   // The date column is written and read as text. Left as a date, Sheets parses
   // `2026-09-21` into a value it hands back as a `Date`, and `readDay` — which
   // compares dates as strings — would match nothing and duplicate the day it
@@ -335,6 +339,11 @@ function parseSheetWrite(value) {
 function handleSheetBackfill(params) {
   var props = PropertiesService.getScriptProperties();
   var sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
+  if (params.cancel && params.cancel !== '1') {
+    // Strict both ways: `cancel=true` must neither cancel by accident nor be
+    // read as "no cancel" and resume the job it was meant to stop.
+    return backfillReply(readSheetBackfill(props), false, 'cancel 參數只接受 1');
+  }
   var cancel = params.cancel === '1';
   // A cancel needs no sheet: clearing the property is a natural way to stop
   // archiving, and the job it leaves running must still be stoppable. Nor
@@ -507,8 +516,9 @@ function monthsBefore(roc, n) {
  */
 function coveredBy(job) {
   if (!job || !job.cursor) return [];
+  if (job.holes_overflow) return mergeRanges(job.skip || [], 20); // see `addHoles`
   var ranges = (job.skip || []).slice();
-  var cursorNext = rocToISO(shiftROC(isoToROC(job.cursor), 1));
+  var cursorNext = shiftISO(job.cursor, 1);
   var from = cursorNext > job.from ? cursorNext : job.from;
   if (from <= job.to) ranges.push({ from: from, to: job.to });
   return mergeRanges(subtractRanges(mergeRanges(ranges, 1000), job.holes || []), 20);
@@ -526,8 +536,8 @@ function subtractRanges(ranges, holes) {
         next.push(range);
         continue;
       }
-      if (hole.from > range.from) next.push({ from: range.from, to: rocToISO(shiftROC(isoToROC(hole.from), -1)) });
-      if (hole.to < range.to) next.push({ from: rocToISO(shiftROC(isoToROC(hole.to), 1)), to: range.to });
+      if (hole.from > range.from) next.push({ from: range.from, to: shiftISO(hole.from, -1) });
+      if (hole.to < range.to) next.push({ from: shiftISO(hole.to, 1), to: range.to });
     }
     out = next;
   }
@@ -544,7 +554,7 @@ function mergeRanges(ranges, keep) {
   var out = [];
   for (var i = 0; i < sorted.length; i++) {
     var last = out[out.length - 1];
-    if (last && sorted[i].from <= rocToISO(shiftROC(isoToROC(last.to), 1))) {
+    if (last && sorted[i].from <= shiftISO(last.to, 1)) {
       if (sorted[i].to > last.to) last.to = sorted[i].to;
     } else {
       out.push({ from: sorted[i].from, to: sorted[i].to });
@@ -583,9 +593,13 @@ function sheetBackfillStep() {
     Logger.log('sheetBackfillStep: not begun: ' + err);
     if (!ran) {
       // Busy. A spare link in a minute is harmless: whichever begins second
-      // finds the other in flight and leaves.
+      // finds the other in flight and leaves. Capped, so a lock held busy for
+      // a while cannot pile triggers up toward the project's limit of 20.
       try {
-        ScriptApp.newTrigger(SHEET_BACKFILL_FN).timeBased().after(60 * 1000).create();
+        var pending = ScriptApp.getProjectTriggers().filter(function (t) {
+          return t.getHandlerFunction() === SHEET_BACKFILL_FN;
+        }).length;
+        if (pending < 3) ScriptApp.newTrigger(SHEET_BACKFILL_FN).timeBased().after(60 * 1000).create();
       } catch (err2) {
         Logger.log('sheetBackfillStep: not requeued: ' + err2);
       }
@@ -763,44 +777,52 @@ function backfillWindow(job, sheetId) {
       return;
     }
   }
+  // The span fetched is always the full request, whatever the written window
+  // is clamped to below: the days before the window are context — the
+  // previous trading day, and the rest of the reference a day is judged
+  // against — and clamping them too would leave the first day after a long
+  // closure with nothing behind it, window after window.
+  var fetchFrom = shiftROC(end, -(BACKFILL_WINDOW_DAYS - 1));
   var start = shiftROC(end, -(BACKFILL_WINDOW_DAYS - SHEET_BACKFILL_CONTEXT_DAYS - 1));
   if (start < from) start = from;
   for (var m = 0; m < skips.length; m++) {
     if (end > skips[m].to && start <= skips[m].to) start = shiftROC(skips[m].to, 1);
   }
 
-  var fetched = fetchCompleteRows(boardRoots(), shiftROC(start, -SHEET_BACKFILL_CONTEXT_DAYS), end);
+  var fetched = fetchCompleteRows(boardRoots(), fetchFrom, end);
   var span = rocToISO(start) + '…' + rocToISO(end);
-  var holes = [];
-  var partial = null;
   // Sorted, so the same set of refused crops is recognised as the same answer
   // however each came to be unanswered.
   var refused = fetched.unanswered.slice().sort();
-  if (refused.length) {
-    // The probe named first when it is among them: that is the one that
-    // says the window cannot be judged at all.
-    var named = refused.indexOf(PROBE_ROOT) === -1 ? refused
-      : [PROBE_ROOT].concat(refused.filter(function (r) { return r !== PROBE_ROOT; }));
-    var why = 'MOA did not answer ' + refused.length + ' roots (' +
-      named.slice(0, 3).join('、') + (refused.length > 3 ? '…' : '') + ')';
-    // The same few crops refused every time, the probe answering throughout,
-    // is MOA refusing those crops: write the window without them, on record.
-    // Anything else — the probe refused, or a batch-sized hole — is a
-    // throttle or an outage, and fails the window until it clears.
-    var few = refused.length <= SHEET_BACKFILL_MAX_REFUSED && refused.indexOf(PROBE_ROOT) === -1;
-    if (!few || !settledAnswer(job, 'refused ' + refused.join('、'))) throw new Error(why);
-    partial = span + ' without ' + refused.join('、'); // recorded once the window is written
-  }
+  // The probe named first when it is among them: that is the one that says
+  // the window cannot be judged at all.
+  var named = refused.indexOf(PROBE_ROOT) === -1 ? refused
+    : [PROBE_ROOT].concat(refused.filter(function (r) { return r !== PROBE_ROOT; }));
+  var why = 'MOA did not answer ' + refused.length + ' roots (' +
+    named.slice(0, 3).join('、') + (refused.length > 3 ? '…' : '') + ')';
+  // The same few crops refused every time, the probe answering throughout,
+  // is MOA refusing those crops. Anything else — the probe refused, or a
+  // batch-sized hole — is a throttle or an outage, and fails the window
+  // until it clears.
+  if (refused.length > SHEET_BACKFILL_MAX_REFUSED || refused.indexOf(PROBE_ROOT) !== -1) throw new Error(why);
+
   var built = backfillDays(fetched.rows, start, end, fetched.dropped);
-  if (built === null) {
-    // MOA answered — a throttle is an empty body, and fails above as
-    // unanswered — yet has no probe rows for the window, where even a closed
-    // market gets `休市` rows. Retried first; said the same way every time,
-    // it is a hole in MOA's own data, and stepping past it on record is the
-    // only way the rest of the reach gets done.
-    if (!settledAnswer(job, 'empty')) throw new Error('no ' + PROBE_ROOT + ' rows for ' + start + '–' + end);
+  // MOA answered — a throttle is an empty body, and fails above as unanswered
+  // — yet has no probe rows for the window, where even a closed market gets
+  // `休市` rows: a hole in MOA's own data, once it has said so every time.
+  var empty = built === null;
+  if (refused.length || empty) {
+    // ONE answer for the window, both halves of it: judged separately, a
+    // window with both would reset each count on the other and never settle.
+    var answer = [refused.length ? 'refused ' + refused.join('、') : '', empty ? 'empty' : '']
+      .filter(function (part) { return part; }).join(' + ');
+    if (!settledAnswer(job, answer)) {
+      throw new Error(empty ? 'no ' + PROBE_ROOT + ' rows for ' + start + '–' + end : why);
+    }
+  }
+  if (empty) {
     job.gaps = recent(job.gaps, span);
-    job.holes = addHoles(job.holes, [{ from: rocToISO(start), to: rocToISO(end) }]);
+    job.holes = addHoles(job, [{ from: rocToISO(start), to: rocToISO(end) }]);
     job.windows += 1;
     job.failures = 0;
     job.last_error = null;
@@ -819,16 +841,16 @@ function backfillWindow(job, sheetId) {
   job.days_written += written.days;
   job.days_skipped += written.skipped;
   job.days_rejected = (job.days_rejected || 0) + built.rejected.length;
+  var holes = [];
   for (var r = 0; r < built.rejected.length; r++) {
     var no = built.rejected[r];
     job.rejected = recent(job.rejected, (no.date + ': ' + no.reasons.join('; ')).substring(0, 160));
     holes.push({ from: no.date, to: no.date });
   }
-  if (partial) {
-    job.partial = recent(job.partial, partial);
-    holes.push({ from: rocToISO(start), to: rocToISO(end) });
-  }
-  if (holes.length) job.holes = addHoles(job.holes, holes);
+  if (holes.length) job.holes = addHoles(job, holes);
+  // Written, so not a hole: its days are in the Sheet, and a later job would
+  // skip them by date anyway. Filling in the crop means deleting those rows.
+  if (refused.length) job.partial = recent(job.partial, span + ' without ' + refused.join('、'));
   job.rows_written += written.rows;
   job.failures = 0;
   job.last_error = null;
@@ -862,14 +884,18 @@ function settledAnswer(job, kind) {
 }
 
 /**
- * Days a job moved past without writing them whole — refused by the guard, a
- * gap in MOA's data, a window written without a crop. Kept apart from the
- * cursor so coverage can leave them out: a later job crawls them again, and
- * writes what MOA or the guard lets through by then. (A partial window's days
- * are written; filling in the missing crop means deleting those rows first.)
+ * Days a job moved past without writing — refused by the guard, or a gap in
+ * MOA's data. Kept apart from the cursor so coverage can leave them out: a
+ * later job crawls them again, and writes what MOA or the guard lets through
+ * by then. The list lives in a property and is capped; past the cap the job
+ * is marked as having lost track, and claims no coverage of its own at all
+ * (`coveredBy`) — a later job then re-crawls its range, which costs quota,
+ * where forgetting a hole would cost the days in it for good.
  */
-function addHoles(holes, more) {
-  return mergeRanges((holes || []).concat(more), 40);
+function addHoles(job, more) {
+  var merged = mergeRanges((job.holes || []).concat(more), 1000);
+  if (merged.length > SHEET_BACKFILL_MAX_HOLES) job.holes_overflow = true;
+  return merged.slice(-SHEET_BACKFILL_MAX_HOLES);
 }
 
 /** `list` with `entry` appended, keeping the last few: it lives in a property. */
@@ -889,14 +915,9 @@ function moveBackfillCursor(job, roc) {
  * previous trading day, the plausibility guard, then `historyRowsFor`. Rows
  * dated before `rocStart` are only ever context. Pure.
  *
- * The guard's board-level rules compare a day with another, and the live path
- * has one to hand: the board it stored. The past has no such anchor — a chain
- * of "the last day let through" starts every window from a day judged against
- * nothing, and one broken day there would refuse every good day after it. So
- * a day is judged against BOTH of its neighbours and refused only when it
- * disagrees with each one it has (`judgeDay`): a broken day disagrees with
- * both, a good day beside one agrees with the other. A refused day is not
- * written. Its item rules mark suspects, which `historyRowsFor` leaves out.
+ * The guard's board-level rules compare a day with another; here that other
+ * is the rest of the span fetched (`judgeDay`). A refused day is not written.
+ * Its item rules mark suspects, which `historyRowsFor` leaves out.
  *
  * The oldest day in the window has no previous trading day in hand when a
  * closure longer than the context days sits right before it. It is not
@@ -959,7 +980,7 @@ function backfillDays(rowsByRoot, rocStart, rocEnd, dropped) {
       continue;
     }
     var board = boards[t];
-    var verdict = judgeDay(board, t > 0 ? boards[t - 1] : null, t + 1 < boards.length ? boards[t + 1] : null);
+    var verdict = judgeDay(boards, t);
     if (!verdict.ok) {
       rejected.push({ date: board.date, reasons: verdict.reasons });
       continue;
@@ -976,17 +997,29 @@ function backfillDays(rowsByRoot, rocStart, rocEnd, dropped) {
 }
 
 /**
- * The guard on a day in the past: against the day before it, and — when that
- * refuses it — against the day after. Refused only if each neighbour it has
- * refuses it. The item rules do not depend on the neighbour, and come from
- * the first verdict either way. The day after is passed without dates, since
- * rule (d) exists to refuse a board older than the one before it.
+ * The guard on a day in the past. The live path judges a crawl against the
+ * board it stored; the past has no such anchor, and a chain of "the last day
+ * let through" starts every window from a day judged against nothing, while
+ * a vote of the two neighbours lets a broken stretch vouch for itself. So the
+ * reference is the rest of the span: each item at its median price across the
+ * other days fetched. A broken day, or a short run of them, is outvoted by the
+ * days around it, and every day — the first and the newest alike — has one.
+ * Dates are left off both, since rule (d) exists to refuse a board older than
+ * the one before it, and the reference has no date.
  */
-function judgeDay(board, before, after) {
-  var back = validateBoard(board, before);
-  if (back.ok || !after) return back;
-  var forward = validateBoard({ items: board.items }, { items: after.items });
-  return forward.ok ? { ok: true, reasons: [], suspects: back.suspects } : back;
+function judgeDay(boards, t) {
+  var prices = {};
+  for (var u = 0; u < boards.length; u++) {
+    if (u === t) continue;
+    for (var i = 0; i < boards[u].items.length; i++) {
+      var it = boards[u].items[i];
+      if (it.catty_price > 0) (prices[it.name] = prices[it.name] || []).push(it.catty_price);
+    }
+  }
+  var reference = Object.keys(prices).map(function (name) {
+    return { name: name, catty_price: median(prices[name]) };
+  });
+  return validateBoard({ items: boards[t].items }, reference.length ? { items: reference } : null);
 }
 
 /**
