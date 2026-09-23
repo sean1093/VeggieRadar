@@ -272,6 +272,11 @@ var YOY_EMPTY_RETRY_MS = 6 * 60 * 60 * 1000;
 // Kept medians older than this many days are not applied at all: the window
 // they describe has moved too far from the board's date.
 var YOY_KEPT_MAX_DAYS = 7;
+// Separate reads of the window's runs of rows before it is read in one span.
+var YOY_MAX_RUNS = 20;
+// The year-ago read is the refresh's last step; past this far into the run it
+// is left to the next refresh, well inside the 6-minute execution limit.
+var YOY_START_BY_MS = 4 * 60 * 1000;
 // What the archive holds, as the status request reports it. Counting it reads
 // column A of every year tab, and an operator watching a job polls.
 var SHEET_SUMMARY_CACHE_KEY = 'veggie_sheet_summary';

@@ -3792,7 +3792,11 @@ describe('same weeks last year (#22 §2)', () => {
   it('reads again within the day while a backfill may be filling the window', () => {
     const roc = '115.09.21';
     const back = archived([0, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)));
-    back.props.set('veggie_sheet_backfill', JSON.stringify({ id: 'j', status: 'running' }));
+    // Running, and past this window already: it may still add to the archive.
+    back.props.set('veggie_sheet_backfill', JSON.stringify({
+      id: 'j', status: 'running', updated_at: new Date().toISOString(),
+      sheet: SHEET_ID, from: '2025-01-01', cursor: '2025-03-01',
+    }));
     back.api.refreshYearAgo(roc);
     const age = (hours: number) => {
       const kept = JSON.parse(back.props.get(back.api.YOY_PROP) as string);
@@ -3803,6 +3807,78 @@ describe('same weeks last year (#22 §2)', () => {
     age(7);
     back.api.refreshYearAgo(roc);
     expect(back.sheetReads.length).toBeGreaterThan(reads); // partial may have grown
+  });
+
+  it('publishes nothing for a window a backfill is still walking through', () => {
+    // Newest first: only the window's later days exist yet, and their median
+    // would be published as 「去年此時」.
+    const roc = '115.09.21';
+    const back = archived([3, 4, 5].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)));
+    back.props.set('veggie_sheet_backfill', JSON.stringify({
+      id: 'j', status: 'running', updated_at: new Date().toISOString(),
+      sheet: SHEET_ID, from: '2025-01-01', cursor: yearAgo(roc, 2),
+    }));
+    expect(back.api.refreshYearAgo(roc)).toEqual({});
+  });
+
+  it('takes a stalled backfill for what it is: not filling anything', () => {
+    const roc = '115.09.21';
+    const back = archived([0, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)));
+    back.props.set('veggie_sheet_backfill', JSON.stringify({
+      id: 'j', status: 'running', updated_at: new Date(Date.now() - 3_600_000).toISOString(),
+      sheet: SHEET_ID, from: '2025-01-01', cursor: yearAgo(roc, 3),
+    }));
+    expect(back.api.refreshYearAgo(roc)).toEqual({ 高麗菜: 25 }); // not held back for a dead chain
+    const kept = JSON.parse(back.props.get(back.api.YOY_PROP) as string);
+    kept.at = new Date(Date.now() - 7 * 3_600_000).toISOString();
+    back.props.set(back.api.YOY_PROP, JSON.stringify(kept));
+    const reads = back.sheetReads.length;
+    back.api.refreshYearAgo(roc);
+    expect(back.sheetReads).toHaveLength(reads); // a day's keep, not six hours'
+  });
+
+  it('leaves the read to the next refresh when this one has run long', () => {
+    // The execution limit would end the run before its caller's cleanup.
+    const back = archived([0, 1, 2].map((d) => blend(yearAgo('115.09.21', d), '高麗菜', 25)));
+    expect(back.api.refreshYearAgo('115.09.21', Date.now() - 5 * 60_000)).toBeNull();
+    expect(back.sheetReads).toHaveLength(0);
+  });
+
+  it('reads a scattered week in one span rather than one call a row', () => {
+    const roc = '115.09.21';
+    const rows: unknown[][] = [];
+    for (let i = 0; i < 40; i++) {
+      rows.push(blend(yearAgo(roc, (i % 5) - 2), `品項${i}`, 20));
+      rows.push(blend('2025-03-01', '番茄', 1));
+    }
+    const back = archived(rows);
+    back.api.refreshYearAgo(roc);
+    expect(back.sheetReads.filter((t) => t === '2025')).toHaveLength(2); // column A, then one span
+  });
+
+  it('never throws out of the refresh\'s last step', () => {
+    const back = archived([]);
+    back.breakRead(back.api.YOY_PROP);
+    expect(() => back.api.refreshYearAgo('115.09.21')).not.toThrow();
+  });
+
+  it('keeps the row written last for a day written twice', () => {
+    const roc = '115.09.21';
+    const back = archived([
+      blend(yearAgo(roc, 0), '高麗菜', 10),
+      blend(yearAgo(roc, 0), '高麗菜', 50), // the later write
+      blend(yearAgo(roc, 1), '高麗菜', 30),
+      blend(yearAgo(roc, 2), '高麗菜', 40),
+    ]);
+    expect(back.api.refreshYearAgo(roc)).toEqual({ 高麗菜: 40 });
+  });
+
+  it('reports nothing in diag for medians kept for another spreadsheet', () => {
+    const roc = '115.09.21';
+    const back = archived([0, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)));
+    back.api.refreshYearAgo(roc);
+    back.props.set(back.api.HISTORY_SHEET_ID_PROP, 'another');
+    expect(back.api.handleDiag().sheet_history.year_ago).toBeNull();
   });
 
   it('reads again after a day even when the trading date has not moved', () => {

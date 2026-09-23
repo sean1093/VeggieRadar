@@ -545,7 +545,10 @@ timeout there costs only the comparison. The board is built with the
 medians kept from the last read, which after a new trading date are those of
 a window a day or two older: a ±7-day median barely moves. They are read
 again once a day, or every six hours while a backfill is running or the
-last read found nothing, since the archive may still be filling in. It is shown as one line in the drawer and on no
+last read found nothing, since the archive may still be filling in — and
+nothing is published for a window a running backfill has not finished
+walking through, whose later days alone would pass for 「去年此時」. A
+refresh that has already run four minutes leaves the read to the next one. It is shown as one line in the drawer and on no
 card: `drawer_opened` carries `has_last_year`, and whether it earns a badge
 is for those numbers to say. `diag.sheet_history.year_ago` reports which
 trading date it compares and how many crops it covers.

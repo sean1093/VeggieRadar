@@ -201,6 +201,7 @@ function readChunkedProp(prefix, countKey) {
  * can show that refreshes are running and what they decided.
  */
 function refreshBoardCache() {
+  var started = Date.now();
   var board = buildBoard();
   var props = PropertiesService.getScriptProperties();
   var verdict = board.items && board.items.length
@@ -239,7 +240,7 @@ function refreshBoardCache() {
     // Last of all: the year-ago medians the NEXT build compares with. A slow
     // Sheets read here costs that comparison at most — the board is stored,
     // mirrored, archived and its outcome recorded.
-    refreshYearAgo(board.roc_date);
+    refreshYearAgo(board.roc_date, started);
   } else {
     var reason = verdict.reasons.join('; ');
     if (board.items && board.items.length) {

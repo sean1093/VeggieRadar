@@ -1411,43 +1411,54 @@ function keptYearAgo(boardRoc) {
  * @returns {Object|null} the medians now kept, or null when there is no
  *   archive or the read failed.
  */
-function refreshYearAgo(boardRoc) {
-  var props;
-  var sheetId;
+function refreshYearAgo(boardRoc, startedAt) {
   try {
-    props = PropertiesService.getScriptProperties();
-    sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
-  } catch (err) {
-    Logger.log('refreshYearAgo: properties unavailable: ' + err);
-    return null;
-  }
-  if (!sheetId || !boardRoc) return null;
+    if (startedAt && Date.now() - startedAt > YOY_START_BY_MS) {
+      // Late in a long refresh: the execution limit would end the run without
+      // the cleanup its caller does (`refreshBoardCacheOnce`'s `finally`). The
+      // next refresh reads; this one keeps what is kept.
+      Logger.log('refreshYearAgo: skipped, the refresh has run ' + Math.round((Date.now() - startedAt) / 1000) + ' s');
+      return null;
+    }
+    var props = PropertiesService.getScriptProperties();
+    var sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
+    if (!sheetId || !boardRoc) return null;
 
-  var kept = parseYearAgo(props.getProperty(YOY_PROP));
-  if (kept && kept.date === boardRoc && kept.sheet === sheetId) {
-    var filling = !Object.keys(kept.items).length || backfillRunning(props);
-    if (Date.now() - Date.parse(kept.at) < (filling ? YOY_EMPTY_RETRY_MS : YOY_KEEP_MS)) return kept.items;
-  }
-  var medians;
-  try {
-    medians = yearAgoMedians(SpreadsheetApp.openById(sheetId), boardRoc);
+    var kept = parseYearAgo(props.getProperty(YOY_PROP));
+    var job = parseSheetBackfill(props.getProperty(SHEET_BACKFILL_PROP));
+    var window = yearAgoWindow(boardRoc);
+    var filling = !!job && job.status === 'running' && !backfillStalled(job);
+    if (kept && kept.date === boardRoc && kept.sheet === sheetId) {
+      var empty = !Object.keys(kept.items).length;
+      if (Date.now() - Date.parse(kept.at) < (empty || filling ? YOY_EMPTY_RETRY_MS : YOY_KEEP_MS)) return kept.items;
+    }
+    // A backfill still walking through the window has written only its newer
+    // days, and a median of those would be published as 「去年此時」. Nothing
+    // until it is past; read again in six hours.
+    var incomplete = filling && job.sheet === sheetId && job.from <= window.to && job.cursor >= window.from;
+    var medians = incomplete ? {} : yearAgoMedians(SpreadsheetApp.openById(sheetId), window);
+    try {
+      props.setProperty(YOY_PROP, JSON.stringify({
+        date: boardRoc, sheet: sheetId, at: new Date().toISOString(), items: medians
+      }));
+    } catch (err) {
+      Logger.log('refreshYearAgo: not kept: ' + err); // read again next refresh
+    }
+    return medians;
   } catch (err) {
+    // Not kept: the next refresh asks again, rather than the day going
+    // without a comparison because one read failed.
     Logger.log('refreshYearAgo failed: ' + err);
     return null;
   }
-  try {
-    props.setProperty(YOY_PROP, JSON.stringify({
-      date: boardRoc, sheet: sheetId, at: new Date().toISOString(), items: medians
-    }));
-  } catch (err) {
-    Logger.log('refreshYearAgo: not kept: ' + err); // read again next refresh
-  }
-  return medians;
 }
 
-function backfillRunning(props) {
-  var job = parseSheetBackfill(props.getProperty(SHEET_BACKFILL_PROP));
-  return !!job && job.status === 'running';
+/** The ISO dates a year back, `YOY_WINDOW_DAYS` either side of `boardRoc`. */
+function yearAgoWindow(boardRoc) {
+  var target = rocToDate(boardRoc);
+  target.setFullYear(target.getFullYear() - 1);
+  var iso = rocToISO(dateToROC(target));
+  return { from: shiftISO(iso, -YOY_WINDOW_DAYS), to: shiftISO(iso, YOY_WINDOW_DAYS) };
 }
 
 function parseYearAgo(raw) {
@@ -1467,13 +1478,19 @@ function parseYearAgo(raw) {
  *
  * Column A of each year tab the window touches is read to find the window's
  * rows, and then only those rows — in the runs they sit in, since the
- * backfill writes days in its own order. A year tab is ~50k rows.
+ * backfill writes days in its own order. A year tab is ~50k rows. Past
+ * `YOY_MAX_RUNS` (a tab sorted by another column scatters the week into
+ * hundreds) the span from the first run to the last is read in one go.
+ *
+ * Not under the history lock, and it needs none: the only thing that deletes
+ * rows is the live path's correction of its own day, in the CURRENT year's
+ * tab, and a year back is always an older one — where the backfill only ever
+ * appends, which moves nothing already read. Dates are checked again on the
+ * second read all the same, for a sort by hand in between.
  */
-function yearAgoMedians(spreadsheet, boardRoc) {
-  var target = rocToDate(boardRoc);
-  target.setFullYear(target.getFullYear() - 1);
-  var from = rocToISO(shiftROC(dateToROC(target), -YOY_WINDOW_DAYS));
-  var to = rocToISO(shiftROC(dateToROC(target), YOY_WINDOW_DAYS));
+function yearAgoMedians(spreadsheet, window) {
+  var from = window.from;
+  var to = window.to;
   var zone = spreadsheet.getSpreadsheetTimeZone();
   var years = from.substring(0, 4) === to.substring(0, 4) ? [from.substring(0, 4)] : [from.substring(0, 4), to.substring(0, 4)];
 
@@ -1496,6 +1513,7 @@ function yearAgoMedians(spreadsheet, boardRoc) {
         runs.push({ first: row, last: row });
       }
     }
+    if (runs.length > YOY_MAX_RUNS) runs = [{ first: runs[0].first, last: runs[runs.length - 1].last }];
     for (var r = 0; r < runs.length; r++) {
       var values = sheet.getRange(runs[r].first, 1, runs[r].last - runs[r].first + 1, SHEET_HEADER.length).getValues();
       for (var v = 0; v < values.length; v++) {
@@ -1508,9 +1526,9 @@ function yearAgoMedians(spreadsheet, boardRoc) {
         var price = Number(cells8[4]);
         if (!(price > 0)) continue;
         var name = String(cells8[1]);
-        // One value per day: a day archived twice must not weigh twice.
-        var byDay = (prices[name] = prices[name] || {});
-        if (!(date in byDay)) byDay[date] = price;
+        // One value per day: a day archived twice must not weigh twice. The
+        // row written last wins, since a later write is the likelier correction.
+        (prices[name] = prices[name] || {})[date] = price;
       }
     }
   }
@@ -1525,8 +1543,13 @@ function yearAgoMedians(spreadsheet, boardRoc) {
   return out;
 }
 
-/** The kept year-ago reference as `diag` publishes it: when, and how many. */
-function publicYearAgo(raw) {
+/**
+ * The kept year-ago reference as `diag` publishes it: when, and how many.
+ * Null when it is not for the spreadsheet configured now, which the build
+ * would not apply either (`keptYearAgo`).
+ */
+function publicYearAgo(raw, sheetId) {
   var kept = parseYearAgo(raw);
-  return kept ? { date: kept.date, at: kept.at, items: Object.keys(kept.items).length } : null;
+  if (!kept || !sheetId || kept.sheet !== sheetId) return null;
+  return { date: kept.date, at: kept.at, items: Object.keys(kept.items).length };
 }

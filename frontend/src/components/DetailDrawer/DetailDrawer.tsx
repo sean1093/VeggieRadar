@@ -346,7 +346,7 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
               </p>
             )}
             {lastYear !== null && (
-              <p className="mt-1 text-xs text-stone">
+              <p className={`${vsBaseline !== null && item.baseline_price != null ? 'mt-1' : 'mt-2'} text-xs text-stone`}>
                 去年此時批發約 {lastYear.price} 元/台斤（今日{relativePhrase(lastYear.percent)}）。
               </p>
             )}
