@@ -430,6 +430,115 @@ Enabling it needs the `spreadsheets` OAuth scope, which is now in
 re-consent before the Web App serves again**. §8 has the canary procedure;
 this is the same step the `script.send_mail` scope needed.
 
+#### Backfilling it from MOA
+
+The archive starts empty on the day it is configured, and both of its readers
+need what came before — 「比去年同期」 a year of it, a per-variety baseline the
+last 45 days. `?action=backfill&sheet=1&months=12` (admin token) fills that in
+from MOA's range queries:
+
+- **A chain of one-off triggers, one window a link.** A year is ~40 windows
+  and one Apps Script execution stops at 6 minutes, so each link crawls one
+  12-day window, writes it and queues the next a second later. It walks
+  **newest first**: the weeks a variety baseline needs land in the first
+  minutes, the year-old days last. A year costs ~40 links of about a minute
+  each — mind the consumer account's 90 minutes of trigger runtime a day,
+  which the 4-hourly refresh also draws on.
+- **A day is built by the same code as a crawled one, and judged by the
+  same guard** — `boardCards`, `validateBoard`, `historyRowsFor`. The guard's
+  board-level rules compare a day with another, and the live path has the
+  board it stored; the past has no such anchor. A chain of "the last day let
+  through" starts every window from a day judged against nothing, and a vote
+  of the two neighbours lets a broken stretch vouch for itself — so a day is
+  judged against **the rest of the 12-day span**, each item at its median
+  price across the other days. A broken day, or a short run of them, is
+  outvoted, and every day has a reference, the first and the newest alike.
+  What it cannot tell from a broken stretch is a real shift that lasts (a
+  typhoon week): the minority side of the span is refused — a missing day over
+  a wrong one — and those days are holes that a later job, whose spans fall
+  differently, judges again. A refused day is not written, and is listed
+  under the job's `rejected`. Each window fetches three
+  extra leading days that are never written: they are the *previous trading
+  day* rule (e) judges the first day against, and without them one day in
+  every nine would go into the archive unjudged. After a longer closure
+  (春節 runs 4–6 days) the first day still has none in reach, so it is
+  deferred: the next window ends on it, with its own days behind it.
+- **A window is written whole or not at all.** A day is skipped by date ever
+  after it is written, so a hole would be permanent. MOA answers a burst with
+  an *empty body* — not an empty `Data` — so a root it did not answer, even
+  after the retry, is told apart from one that did not trade, and fails the
+  window; the next link tries again. Two cases are stepped past once MOA has
+  answered the window the same way three times, or nothing older could ever
+  be reached: no probe rows dated inside the window at all (a hole in MOA's
+  own data; listed under `gaps`), and one or two crops refused while the
+  probe answered (written without them; listed under `partial`). A refused
+  probe, or a batch-sized hole, is a throttle — it hits the same place in
+  every burst — and keeps failing the window instead. Retries waiting on
+  MOA's answer to settle are not charged to the failure budget, so an
+  unrelated failure in between cannot stop the job one answer short.
+- **It never writes a day the live path can.** The job ends the day before
+  the board's trading date, fixed when it starts; the live archive only ever
+  writes that date or a later one. A day already in the Sheet — live or from
+  an earlier backfill — is left alone. That check runs *outside* the history
+  lock, and is safe there only because nothing else writes a date in the
+  job's range and one link writes at a time: a link takes a **lease** on the
+  job under the lock when it begins, appends only while it still holds it
+  (checked under the lock the append runs in) and finishes only while it
+  still holds it — so a link its watchdog has taken over, or one a resume has
+  revoked, can neither write a window twice nor its state over the newer
+  one. The append runs inside the lock, since the live archive appends too. The dates a tab
+  holds are read once per job and cached, not once per link.
+- **A truncated MOA response is refetched, not trusted.** Past ~1,000 rows MOA
+  keeps the newest and sets `Next: true`; the oldest day left can be missing
+  markets, and an average built from it is simply wrong. The window is halved
+  until each piece is whole, and a single day that still truncates leaves that
+  crop out of that day — missing is honest, wrong would be permanent.
+  If the probe root loses a day that way it still counts as trading, so the
+  next day is not judged against the one before it; any crop left out of a
+  day is withheld from the next one too, which has nothing to judge it by.
+  (`calibrate` has always refetched. The rolling history's seed crawls every
+  window in one execution, where open-ended refetches could push it past the
+  limit, so a cut root gets exactly one more request for what was cut; the
+  trend runs on the public path, where one request is the budget, and leaves
+  a cut oldest point out. Both used to average whichever markets MOA left
+  in.)
+- **It survives stopping.** The job — reach, cursor, counts, last error — is
+  one property. A failed window is retried by the next link, 3 then 6 minutes
+  later — a per-IP throttle lasts minutes, and retrying after a second would
+  spend every retry inside it; three in a row stop the chain as `failed`. A
+  link is counted *before* it works and arms a watchdog trigger for after the
+  execution limit, because one the 6-minute limit kills never reaches its
+  `catch` or its `finally` — so the watchdog retries it, and a window that is
+  always too slow ends as `failed` too, rather than stalling for ever. Asking
+  again with the same `months=` resumes a failed job, or a running one that
+  has not moved for 15 minutes, from its cursor; a different reach replaces
+  it (once its last link cannot still be running and write it back);
+  `cancel=1` stops it after the current window, and is kept in a property of
+  its own so the chain's next write cannot undo it. Requests are serialised
+  under the history lock, so two at once cannot start two chains.
+- **A new job skips what earlier ones finished** — but not what they moved
+  past without writing (refused days and gaps: the job's `holes`), which a
+  later job crawls again; a job with more holes than it can keep (40) claims
+  no coverage of its own rather than forget one; and only on the same spreadsheet;
+  pointed at a new one, nothing is skipped, and a running job whose
+  `HISTORY_SHEET_ID` changes under it ends itself as `failed` rather than
+  carry its cursor into another sheet (`cancel=1` works with the id cleared). Re-running a year would crawl ~40
+  windows to write nothing; a new `months=` steps over the range the jobs
+  before it covered without a request, so extending 12 months to 24
+  crawls only the new year. `months` must be a whole number (1–24; more is
+  clamped) — `months=0` is refused rather than read as a year. To redo a range
+  on purpose — after deleting rows by hand — delete the `veggie_sheet_backfill`
+  property.
+
+Rows land in the order they were written, not in date order — the live days,
+then each window newest-first. Nothing reads the tab in order (the readers
+group by date), so sorting column A in the Sheets UI is safe at any time: the
+header row is frozen (the backfill freezes tabs the live archive made before
+it did), so it stays on row 1, and a sort by date keeps each
+day's rows together, which is all the correction path relies on. (Sort by any
+other column and a later correction reports the day `scattered` and leaves
+it alone.)
+
 
 ### Static board mirror
 
@@ -741,6 +850,16 @@ GET {WEB_APP_URL}/exec?action=backfill&token=…[&force=1]
      "history": { "items": 97, "min_days": 1, "max_days": 24 } }
 → { "type": "backfill", "error": "unauthorized", "message": "此操作需要 token 參數" }   # wrong or missing token
 
+GET {WEB_APP_URL}/exec?action=backfill&sheet=1&token=…[&months=12 | &cancel=1]
+→ { "type": "backfill", "sheet": true, "queued": true, "message": "已排入背景回填",
+     "job": { "status": "running", "months": 12, "from": "2025-09-21", "to": "2026-09-20",
+              "cursor": "2026-09-20", "windows": 0, "days_written": 0, "days_skipped": 0,
+              "rows_written": 0, "failures": 0, "last_error": null, ... } }
+→ without `months` — status only, nothing crawled or queued, plus what the Sheet holds
+   (counted at most every ten minutes; `as_of` says when):
+   { ..., "queued": false, "archive": { "rows": 61234, "days": 249, "first_date": "2025-09-22",
+                                        "last_date": "2026-09-22", "as_of": "…" } }
+
 GET {WEB_APP_URL}/exec?action=diag[&token=…]
 → { "type": "diag", "board": { "generated_at": ..., "stale": false },
      "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null,
@@ -748,7 +867,8 @@ GET {WEB_APP_URL}/exec?action=diag[&token=…]
      "history": { "items": 97, "min_days": 1, "max_days": 24 },
      "mirror_dispatch": { "at": "2026-09-21T16:04:11.201Z", "outcome": "dispatched",
                           "last_ok": "2026-09-21T16:04:11.201Z" },
-     "sheet_history": { "configured": false, "last_write": null },
+     "sheet_history": { "configured": true, "last_write": { "date": "2026-09-22", "generated_at": "…" },
+                        "backfill": { "status": "running", "cursor": "2026-06-14", "windows": 11, ... } },
      "alert": { "failure_streak": 0, "incident_open": false, "last_attempt": null, "recipient_configured": true,
                 "last_send_failure": null } }
 
@@ -757,7 +877,9 @@ GET {WEB_APP_URL}/exec?action=alerttest&token=…
 ```
 `warm` and `backfill` both queue their crawl in a one-off trigger and answer at
 once — the crawls take minutes and would blow the Web App response window.
-`backfill` is idempotent per trading date, so re-running only fills gaps. `diag`
+`backfill` is idempotent per trading date, so re-running only fills gaps; with
+`sheet=1` it backfills the long-term archive instead (§2), and `diag` publishes
+that job's progress but never its `last_error`, which is platform text. `diag`
 is how you tell "markets closed" from "refresh pipeline dead" without the GAS
 console, and how you confirm history coverage after a backfill.
 
@@ -1130,7 +1252,9 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
      whether or not you set this**, so the next deploy asks you to re-consent
      either way — verify it on a canary deployment first, as with the mail
      scope. `diag.sheet_history` says whether it is configured and what was
-     last written, from the properties alone.
+     last written, from the properties alone. Once a refresh has stored a
+     board, `?action=backfill&sheet=1&months=12&token=…` fills in the past
+     year (§2); `diag.sheet_history.backfill` shows it walking back.
 3. Run `installDailyTrigger()` once in the editor — it installs the refresh
    trigger on `REFRESH_INTERVAL_HOURS` and warms the board so the first visitor
    never hits a cold crawl. Confirm with `?action=diag`: `triggers` must list

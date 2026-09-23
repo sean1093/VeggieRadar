@@ -81,14 +81,7 @@ function buildBoard() {
   var today = fetchRootRows(roots, dates.latest);
   var prev = dates.prev ? fetchRootRows(roots, dates.prev) : {};
 
-  var items = [];
-  for (var i = 0; i < BOARD_ITEMS.length; i++) {
-    var def = BOARD_ITEMS[i];
-    var todayRows = selectRows(today[def.official], def);
-    if (!todayRows.length) continue;
-    var card = aggregateGroup(def, todayRows, selectRows(prev[def.official], def));
-    if (card) items.push(card);
-  }
+  var items = boardCards(today, prev);
   applyBaselines(items, readHistory(), dates.latest);
 
   return {
@@ -103,6 +96,24 @@ function buildBoard() {
     count: items.length,
     items: items
   };
+}
+
+/**
+ * The board's cards from one trading day's rows and the previous trading
+ * day's, each keyed by MOA root. Shared by the crawl and the archive's
+ * backfill (`backfillDays`), so a backfilled day is the day the board would
+ * have shown.
+ */
+function boardCards(todayByRoot, prevByRoot) {
+  var items = [];
+  for (var i = 0; i < BOARD_ITEMS.length; i++) {
+    var def = BOARD_ITEMS[i];
+    var todayRows = selectRows(todayByRoot[def.official], def);
+    if (!todayRows.length) continue;
+    var card = aggregateGroup(def, todayRows, selectRows(prevByRoot[def.official], def));
+    if (card) items.push(card);
+  }
+  return items;
 }
 
 /** Distinct MOA root names to fetch — several board items share one root. */

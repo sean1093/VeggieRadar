@@ -376,16 +376,17 @@ function handleTrend(params) {
 
   var start = new Date(today);
   start.setDate(today.getDate() - (days - 1));
-  var rows = tradedRows(fetchCrop(term, dateToROC(start), dateToROC(today))).filter(function (r) {
+  // 14 days is sized to stay under MOA's row cap, but a response it does cut
+  // drops the OLDEST rows, and the sparkline's first point would be an average
+  // of whichever markets were left. That point is left out instead of made
+  // whole: this is the public serving path, where one request is the budget.
+  var page = fetchPage(term, dateToROC(start), dateToROC(today));
+  var rows = tradedRows(wholeDaysOf(page)).filter(function (r) {
     return rowRoot(r.CropName) === root;
   });
 
   // Group rows by trading date, then walk the calendar so closed days stay null.
-  var byDate = {};
-  for (var i = 0; i < rows.length; i++) {
-    var dateKey = rows[i].TransDate;
-    (byDate[dateKey] = byDate[dateKey] || []).push(rows[i]);
-  }
+  var byDate = groupByTransDate(rows);
 
   var trend = [];
   for (var offset = days - 1; offset >= 0; offset--) {
@@ -396,6 +397,10 @@ function handleTrend(params) {
   }
 
   var payload = { cropName: cropName, days: days, trend: trend };
-  cache.put(cacheKey, JSON.stringify(payload), TREND_CACHE_TTL);
+  // An answer is shared for an hour. A request MOA did not answer is shared
+  // for a couple of minutes only: long enough that visitors do not hammer a
+  // throttled MOA from the same IP, short enough not to show them a crop with
+  // no trades for an hour.
+  cache.put(cacheKey, JSON.stringify(payload), page.answered ? TREND_CACHE_TTL : TREND_UNANSWERED_TTL);
   return payload;
 }

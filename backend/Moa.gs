@@ -13,14 +13,55 @@
  * filter with `selectRows` / `rowRoot`.
  */
 function fetchCrop(cropName, rocStart, rocEnd) {
-  if (!cropName || !rocStart) return [];
+  return fetchPage(cropName, rocStart, rocEnd).rows;
+}
+
+/** Like `fetchCrop`, with the whole `parsePage` verdict rather than the rows. */
+function fetchPage(cropName, rocStart, rocEnd) {
+  if (!cropName || !rocStart) return { rows: [], answered: false, next: false };
   try {
-    var resp = UrlFetchApp.fetch(cropUrl(cropName, rocStart, rocEnd), { muteHttpExceptions: true });
-    return parseRows(resp);
+    return parsePage(UrlFetchApp.fetch(cropUrl(cropName, rocStart, rocEnd), { muteHttpExceptions: true }));
   } catch (err) {
     Logger.log('fetchCrop error (' + cropName + ' ' + rocStart + '): ' + err);
-    return [];
+    return { rows: [], answered: false, next: false };
   }
+}
+
+/**
+ * A cut root's rows made whole with at most ONE more request: the rows MOA
+ * kept, less their oldest date, which the cut may have left partial; plus
+ * that date and everything before it back to `rocStart`, fetched on their own
+ * — and trimmed the same way if MOA cuts those too. For a caller that must
+ * stay inside a time budget, where halving until whole could not.
+ */
+function patchTruncated(root, rocStart, rows) {
+  var kept = wholeDaysOf({ rows: rows, next: true });
+  var oldest = oldestDate(rows);
+  if (!oldest || oldest < rocStart) return kept;
+  Utilities.sleep(120);
+  var page = fetchPage(root, rocStart, oldest);
+  return page.answered ? wholeDaysOf(page).concat(kept) : kept;
+}
+
+function oldestDate(rows) {
+  var oldest = null;
+  for (var i = 0; i < rows.length; i++) {
+    var day = rows[i].TransDate;
+    if (day && (oldest === null || day < oldest)) oldest = day;
+  }
+  return oldest;
+}
+
+/**
+ * A page's rows less its oldest date when MOA cut it short — the one date the
+ * cut can have left partial, since MOA drops the oldest rows first. For a
+ * caller that would rather show a day as missing than spend more requests
+ * making it whole: the trend, on the public serving path.
+ */
+function wholeDaysOf(page) {
+  if (!page.next || !page.rows.length) return page.rows;
+  var oldest = oldestDate(page.rows);
+  return page.rows.filter(function (r) { return r.TransDate !== oldest; });
 }
 
 /** Single-date URL when `rocEnd` is omitted; a closed range otherwise. */
@@ -32,14 +73,34 @@ function cropUrl(cropName, rocStart, rocEnd) {
   ].join('&');
 }
 
-/** Parses MOA rows from a single HTTPResponse. */
-function parseRows(resp) {
+/**
+ * A response's rows, whether MOA answered at all, and whether it cut the rows
+ * short.
+ *
+ *   - `answered` is false for a throttled or failed request. MOA answers a
+ *     burst with an EMPTY BODY, not an empty `Data`, so "nothing traded" and
+ *     "nothing was said" are told apart here — a distinction every caller but
+ *     the archive's backfill has so far been able to shrug off.
+ *   - `next` is MOA's `Next: true`. Past roughly 1,000 rows it keeps the
+ *     NEWEST and drops the oldest, so the oldest date left in a truncated
+ *     response can be missing markets, and its average is then wrong rather
+ *     than missing.
+ */
+function parsePage(resp) {
+  var none = { rows: [], answered: false, next: false };
   try {
-    if (resp.getResponseCode() !== 200) return [];
+    if (resp.getResponseCode() !== 200) return none;
     var json = JSON.parse(resp.getContentText());
-    return (json && json.Data) ? json.Data : [];
+    // An answer is `RS: "OK"` or carries a `Data` array, even when nothing
+    // traded. Anything else — an error object, a throttle — is MOA saying
+    // something other than "nothing traded", and taking it for that would
+    // archive the crop's absence.
+    if (!json || typeof json !== 'object') return none;
+    var data = Array.isArray(json.Data) ? json.Data : null;
+    if (!data && json.RS !== 'OK') return none;
+    return { rows: data || [], answered: true, next: json.Next === true };
   } catch (err) {
-    return [];
+    return none;
   }
 }
 
@@ -48,9 +109,12 @@ function parseRows(resp) {
  * date, or across a closed range when `rocEnd` is given (backfill). A single
  * 70+ request burst trips MOA's per-IP limit and comes back empty, so
  * concurrency is capped and each batch pauses briefly.
+ * @param {Object=} meta optional; `meta.truncated[root]` is set for every root
+ *   MOA cut short and `meta.unanswered[root]` for every root it did not
+ *   answer, each cleared again by a later call that answers it whole.
  * @returns {Object} map of root → rows[]
  */
-function fetchAllRows(cropNames, rocStart, rocEnd) {
+function fetchAllRows(cropNames, rocStart, rocEnd, meta) {
   var out = {};
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
@@ -60,14 +124,39 @@ function fetchAllRows(cropNames, rocStart, rocEnd) {
     try {
       var responses = UrlFetchApp.fetchAll(requests);
       for (var i = 0; i < responses.length; i++) {
-        out[slice[i]] = parseRows(responses[i]);
+        var page = parsePage(responses[i]);
+        out[slice[i]] = page.rows;
+        if (meta) notePage(meta, slice[i], page);
       }
     } catch (err) {
       Logger.log('fetchAllRows batch error (' + rocStart + '): ' + err);
+      if (meta) {
+        for (var j = 0; j < slice.length; j++) notePage(meta, slice[j], { answered: false, next: false });
+      }
     }
     if (start + FETCH_BATCH < cropNames.length) Utilities.sleep(120);
   }
   return out;
+}
+
+/**
+ * Records what one response said about a root. An answer is never taken back:
+ * `fetchRootRows` retries every root that came back empty, out-of-season ones
+ * included, and a retry throttled into silence says nothing about a root that
+ * already answered "nothing traded".
+ */
+function notePage(meta, root, page) {
+  if (page.answered) {
+    meta.answered[root] = true;
+    delete meta.unanswered[root];
+    if (page.next) {
+      meta.truncated[root] = true;
+    } else {
+      delete meta.truncated[root];
+    }
+  } else if (!meta.answered[root]) {
+    meta.unanswered[root] = true;
+  }
 }
 
 /**
@@ -76,18 +165,88 @@ function fetchAllRows(cropNames, rocStart, rocEnd) {
  * genuinely out-of-season roots just stay empty. Accepts an optional range
  * end for the backfill path.
  */
-function fetchRootRows(roots, rocStart, rocEnd) {
-  var out = fetchAllRows(roots, rocStart, rocEnd);
+function fetchRootRows(roots, rocStart, rocEnd, meta) {
+  var out = fetchAllRows(roots, rocStart, rocEnd, meta);
   var misses = roots.filter(function (r) { return !out[r] || !out[r].length; });
   if (!misses.length) return out;
 
   Utilities.sleep(1500);
-  var retry = fetchAllRows(misses, rocStart, rocEnd);
+  var retry = fetchAllRows(misses, rocStart, rocEnd, meta);
   for (var i = 0; i < misses.length; i++) {
     var root = misses[i];
     if (retry[root] && retry[root].length) out[root] = retry[root];
   }
   return out;
+}
+
+/**
+ * Like `fetchRootRows` across a range, but for the long-term archive, where a
+ * wrong number is worse than a missing one and a missing one is permanent: a
+ * day is written once, and skipped by date ever after.
+ *
+ *   - A root MOA cut short is refetched in halves until every piece is whole.
+ *     Halves rather than "keep what came back and fetch the rest": that would
+ *     trust MOA to cut strictly by date, and a response it cut is the one
+ *     thing here not to trust. A single day that still truncates cannot be
+ *     made whole by splitting, so that root is left out of that day.
+ *   - A root MOA did not answer, even after `fetchRootRows`' retry, is
+ *     REPORTED rather than returned empty, so the caller can retry the window
+ *     instead of archiving days without the crop.
+ * @returns {{rows: Object, unanswered: string[], dropped: Object}} `dropped`
+ *   maps a root to the days left out of it because they truncate alone.
+ */
+function fetchCompleteRows(roots, rocStart, rocEnd) {
+  var meta = { answered: {}, truncated: {}, unanswered: {} };
+  var rows = fetchRootRows(roots, rocStart, rocEnd, meta);
+  var dropped = {};
+  Object.keys(meta.truncated).forEach(function (root) {
+    var days = [];
+    var whole = fetchSplit(root, rocStart, rocEnd, days);
+    if (whole === null) {
+      // Not the truncated page either: its oldest day is the partial one this
+      // exists to keep out, and a caller that ignores `unanswered` would use it.
+      rows[root] = [];
+      meta.unanswered[root] = true;
+    } else {
+      rows[root] = whole;
+      if (days.length) dropped[root] = days;
+    }
+  });
+  return { rows: rows, unanswered: Object.keys(meta.unanswered), dropped: dropped };
+}
+
+/**
+ * Both halves of a truncated window, each fetched until it is whole, or null
+ * when MOA stopped answering part-way. A day that truncates on its own is
+ * left out, and pushed onto `dropped` when one is given.
+ */
+function fetchSplit(root, rocStart, rocEnd, dropped) {
+  var from = rocToDate(rocStart);
+  var span = Math.round((rocToDate(rocEnd).getTime() - from.getTime()) / 86400000) + 1;
+  if (span <= 1) {
+    Logger.log('fetchSplit: ' + root + ' still truncates on ' + rocStart + ' alone; left out');
+    if (dropped) dropped.push(rocStart);
+    return [];
+  }
+  var half = Math.ceil(span / 2);
+  // Sequential requests right after a truncated one: keep under the per-IP limit.
+  Utilities.sleep(120);
+  var older = fetchWhole(root, rocStart, shiftROC(rocStart, half - 1), dropped);
+  if (older === null) return null;
+  Utilities.sleep(120);
+  var newer = fetchWhole(root, shiftROC(rocStart, half), rocEnd, dropped);
+  return newer === null ? null : older.concat(newer);
+}
+
+/**
+ * One term across a range, split until MOA stops cutting it short — or null
+ * when MOA did not answer. One request when nothing is cut. Not for the
+ * serving path: a cut response costs sequential requests, as many as it takes.
+ */
+function fetchWhole(root, rocStart, rocEnd, dropped) {
+  var page = fetchPage(root, rocStart, rocEnd);
+  if (!page.answered) return null;
+  return page.next ? fetchSplit(root, rocStart, rocEnd, dropped) : page.rows;
 }
 
 /**
@@ -104,7 +263,7 @@ function resolveTradeDates(fresh) {
     if (hit) return JSON.parse(hit);
   }
 
-  var probe = '甘藍'; // cabbage: year-round, all markets, high volume — the most reliable probe
+  var probe = PROBE_ROOT;
   var today = new Date();
   var latest = null;
   var prev = null;
@@ -137,12 +296,36 @@ function resolveTradeDates(fresh) {
  * it would pick a date on which every board item aggregates to nothing.
  */
 function isTradingDate(probe, rocDate) {
-  var rows = tradedRows(fetchCrop(probe, rocDate));
+  return tradedVolume(fetchCrop(probe, rocDate)) >= PROBE_MIN_VOLUME;
+}
+
+/**
+ * The dates on which the probe root really traded, oldest first — the
+ * `isTradingDate` test applied to a range already fetched.
+ */
+function tradingDates(probeRows) {
+  var byDate = groupByTransDate(probeRows);
+  return Object.keys(byDate).filter(function (day) {
+    return tradedVolume(byDate[day]) >= PROBE_MIN_VOLUME;
+  }).sort();
+}
+
+/** Kilograms really traded across rows, placeholders and zero rows excluded. */
+function tradedVolume(rows) {
+  var traded = tradedRows(rows);
   var volume = 0;
-  for (var i = 0; i < rows.length; i++) {
-    volume += parseFloat(rows[i].Trans_Quantity || 0);
+  for (var i = 0; i < traded.length; i++) volume += parseFloat(traded[i].Trans_Quantity || 0);
+  return volume;
+}
+
+/** Rows keyed by their ROC `TransDate`; a row without one is dropped. */
+function groupByTransDate(rows) {
+  var out = {};
+  for (var i = 0; i < (rows || []).length; i++) {
+    var day = rows[i].TransDate;
+    if (day) (out[day] = out[day] || []).push(rows[i]);
   }
-  return volume >= PROBE_MIN_VOLUME;
+  return out;
 }
 
 // --- Row filtering ---
@@ -216,4 +399,21 @@ function rocToISO(roc) {
   var p = roc.split('.');
   var y = parseInt(p[0], 10) + 1911;
   return y + '-' + p[1] + '-' + p[2];
+}
+
+function isoToROC(iso) {
+  var p = iso.split('-');
+  return (parseInt(p[0], 10) - 1911) + '.' + p[1] + '.' + p[2];
+}
+
+/** The ISO date `days` calendar days after `iso` (before, when negative). */
+function shiftISO(iso, days) {
+  return rocToISO(shiftROC(isoToROC(iso), days));
+}
+
+/** The ROC date `days` calendar days after `roc` (before, when negative). */
+function shiftROC(roc, days) {
+  var d = rocToDate(roc);
+  d.setDate(d.getDate() + days);
+  return dateToROC(d);
 }

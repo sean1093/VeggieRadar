@@ -169,6 +169,14 @@ function historySummary() {
  * never run inside the Web App response window. `force=1` jumps the lock.
  */
 function handleBackfill(params) {
+  // The long-term archive's backfill (#22 §4) is a different job with its own
+  // state; it shares the action and the admin gate, nothing else.
+  if (params && params.sheet === '1') return handleSheetBackfill(params);
+  if (params && params.sheet) {
+    // Anything else there is a typo for the archive, and falling through to
+    // the rolling seed — and its hour-long queue lock — would be a surprise.
+    return { type: 'backfill', sheet: true, queued: false, message: 'sheet 參數只接受 1' };
+  }
   var cache = CacheService.getScriptCache();
   if (params && params.force) cache.remove(BACKFILL_LOCK_KEY);
   if (cache.get(BACKFILL_LOCK_KEY)) {
@@ -232,13 +240,7 @@ function mergeCrawled(crawled) {
         var rowsByRoot = crawled[c];
         for (var i = 0; i < BOARD_ITEMS.length; i++) {
           var def = BOARD_ITEMS[i];
-          var rows = selectRows(rowsByRoot[def.official], def);
-          var byDate = {};
-          for (var r = 0; r < rows.length; r++) {
-            var dateKey = rows[r].TransDate;
-            if (!dateKey) continue;
-            (byDate[dateKey] = byDate[dateKey] || []).push(rows[r]);
-          }
+          var byDate = groupByTransDate(selectRows(rowsByRoot[def.official], def));
           Object.keys(byDate).forEach(function (roc) {
             var day = weightedAverage(byDate[roc]);
             if (day.volume < MIN_TRADE_VOLUME || !(day.avg > 0)) return;
@@ -274,9 +276,23 @@ function backfillHistory() {
     end.setDate(today.getDate() - w * BACKFILL_WINDOW_DAYS);
     var start = new Date(end);
     start.setDate(end.getDate() - (BACKFILL_WINDOW_DAYS - 1));
-    // fetchRootRows retries empty roots once, so one throttled batch cannot
-    // silently strip a slice of roots from the one-time seed.
-    crawled.push(fetchRootRows(roots, dateToROC(start), dateToROC(end)));
+    // Retries empty roots once, so one throttled batch cannot silently strip
+    // a slice of roots from the one-time seed; and refetches what MOA cut from
+    // a root, whose oldest day would otherwise be an average of some markets.
+    // A root still unanswered is simply missing, as it always was: the
+    // 4-hourly refresh tops the window up.
+    //
+    // A cut root gets one more request for what MOA cut, not halving until
+    // whole: this seed crawls every window in ONE execution, and an open-ended
+    // run of refetches could push it past the 6-minute limit and lose the
+    // lot. No older window covers those days either, so dropping them would
+    // leave the baseline a hole until they aged out.
+    var meta = { answered: {}, truncated: {}, unanswered: {} };
+    var rows = fetchRootRows(roots, dateToROC(start), dateToROC(end), meta);
+    Object.keys(meta.truncated).forEach(function (root) {
+      rows[root] = patchTruncated(root, dateToROC(start), rows[root]);
+    });
+    crawled.push(rows);
   }
 
   // Retried once, because losing this lock now costs more than it used to: the

@@ -27,6 +27,7 @@ var ADMIN_TOKEN_PROP = 'ADMIN_TOKEN';
 
 var MIN_TRADE_VOLUME = 200;      // kg; filters out sparse trades for one item
 var PROBE_MIN_VOLUME = 50000;    // kg; a real island-wide trading day for the probe crop
+var PROBE_ROOT = '甘藍';         // cabbage: year-round, all markets, high volume — the most reliable probe
 // Variety breakdown shown in the item drawer. Only varieties that matter are
 // published: at least two of them, each holding a meaningful slice of the
 // item's traded volume — otherwise the blended average already tells the story.
@@ -45,7 +46,10 @@ var FETCH_BATCH = 13;            // concurrent UrlFetchApp requests; a 70+ burst
 var TREND_CACHE_PREFIX = 'veggie_trend_';
 
 var TREND_CACHE_TTL = 60 * 60;   // seconds; bounds staleness once closing prices publish
-var TREND_MAX_DAYS = 14;         // MOA caps one response near 1000 rows; 14 days stays under it
+var TREND_UNANSWERED_TTL = 2 * 60; // seconds; see `handleTrend`
+// MOA caps one response near 1000 rows. 14 days of most crops stays under it;
+// when a broad term does not, `handleTrend` leaves the cut oldest point out.
+var TREND_MAX_DAYS = 14;
 var TRADE_DATES_CACHE_KEY = 'veggie_trade_dates';
 
 var TRADE_DATES_TTL = 60 * 60;   // seconds; saves up to 16 probe fetches per search miss
@@ -189,6 +193,70 @@ var SHEET_LAST_WRITE_PROP = 'veggie_sheet_last_write';
 // a later crawl can carry better numbers; inside this window it is the
 // 4-hourly refresh revisiting the same day, and is skipped without a read.
 var SHEET_CORRECTION_MS = 6 * 60 * 60 * 1000;
+
+// Backfilling the archive from MOA (#22 §4). A year is ~40 range windows and
+// one Apps Script execution stops at 6 minutes, so the backfill is a chain of
+// one-off triggers, one window each, walking backwards from the day before the
+// board's trading date. The job — its reach, where it has got to and what it
+// wrote — lives in one property, which is what lets a chain that died (a
+// quota, a deploy, a trigger that never fired) be resumed rather than redone.
+var SHEET_BACKFILL_FN = 'sheetBackfillStep';
+var SHEET_BACKFILL_PROP = 'veggie_sheet_backfill';
+// The id of a job the operator cancelled. Its own property, because the chain
+// rewrites the job as it goes and could write "running" straight back over a
+// cancel that landed between its read and its write; nothing but a cancel
+// ever writes this one.
+var SHEET_BACKFILL_CANCEL_PROP = 'veggie_sheet_backfill_cancel';
+// Leading days fetched only to be the PREVIOUS trading day of the first day
+// written: `validateBoard`'s rule (e) judges a day against the one before it,
+// and without them the first day of every window would go unjudged. Taken out
+// of the same `BACKFILL_WINDOW_DAYS` request, which is what keeps it under
+// MOA's row cap: each link writes the other 9. A closure longer than this
+// (春節 runs 4–6 days) is handled by deferring that first day to the next
+// window, where it is the newest day and has the whole window behind it.
+var SHEET_BACKFILL_CONTEXT_DAYS = 3;
+var SHEET_BACKFILL_DEFAULT_MONTHS = 12;
+var SHEET_BACKFILL_MAX_MONTHS = 24;
+// Consecutive failed windows before the chain stops itself. A window that
+// failed is retried by the next link, but one that keeps failing — a revoked
+// share, a spent quota, a window too slow for the 6-minute limit — must not
+// loop a crawl every few seconds for ever.
+var SHEET_BACKFILL_MAX_FAILURES = 3;
+// A running job that has not moved for this long has no chain behind it: one
+// link runs for at most 6 minutes and queues the next within minutes.
+var SHEET_BACKFILL_STALL_MS = 15 * 60 * 1000;
+// How long a link can possibly still be running: the execution limit, plus a
+// margin. A job whose last link started longer ago than this has nothing in
+// flight that could still write it back.
+var SHEET_BACKFILL_LINK_MAX_MS = 7 * 60 * 1000;
+// The wait before retrying a failed window, times the failures so far. A
+// per-IP throttle lasts minutes; retrying after a second would spend every
+// retry inside it and stop the job over something that clears on its own.
+// Kept well under the stall window, which it must not look like.
+var SHEET_BACKFILL_RETRY_MS = 3 * 60 * 1000;
+// A window MOA keeps answering the same way is not retried for ever. Up to
+// this many roots refused every time — the probe never among them — is a
+// refusal of those crops, and the window is written without them, on record.
+// More is a throttle, which drops a whole batch and clears on its own, and
+// keeps failing the window instead.
+var SHEET_BACKFILL_MAX_REFUSED = 2;
+// How many times MOA must answer a window the same way before that answer is
+// acted on (a gap, or a window written without a refused crop). Its own knob:
+// tolerating flakier links must not also mean crawling a hole more times.
+var SHEET_BACKFILL_SETTLE_ANSWERS = 3;
+// Days a job moved past without writing, kept so coverage can leave them out.
+// Past this the job stops claiming coverage (`addHoles`), rather than forget.
+var SHEET_BACKFILL_MAX_HOLES = 40;
+// The dates a year tab already holds, cached for the length of a job: its
+// range never meets a date the live path writes, so after the first read the
+// only dates that can appear in it are its own, which it adds as it goes.
+var SHEET_PRESENT_CACHE_PREFIX = 'veggie_sheet_present_';
+var SHEET_PRESENT_CACHE_TTL = 6 * 60 * 60; // seconds; the platform maximum
+var SHEET_FROZEN_CACHE_PREFIX = 'veggie_sheet_frozen_';
+// What the archive holds, as the status request reports it. Counting it reads
+// column A of every year tab, and an operator watching a job polls.
+var SHEET_SUMMARY_CACHE_KEY = 'veggie_sheet_summary';
+var SHEET_SUMMARY_CACHE_TTL = 10 * 60; // seconds
 
 // Plausibility guard (`Validate.gs`). The refresh used to reject exactly one
 // thing — an EMPTY board — so a throttled crawl or a MOA unit change would
