@@ -384,8 +384,19 @@ function refreshBoardCacheOnce() {
   try {
     refreshBoardCache();
   } finally {
-    dropTriggers(REFRESH_ONCE_FN);
-    CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
+    // Each guarded on its own, and the trigger first: a `ScriptApp` failure
+    // here used to strand `REFRESH_LOCK_KEY` for its whole TTL, which is the
+    // lock that stops `?action=warm` queueing another rebuild.
+    try {
+      dropTriggers(REFRESH_ONCE_FN);
+    } catch (err) {
+      Logger.log('refreshBoardCacheOnce: trigger not dropped: ' + err);
+    }
+    try {
+      CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
+    } catch (err) {
+      Logger.log('refreshBoardCacheOnce: refresh lock not cleared: ' + err);
+    }
   }
 }
 

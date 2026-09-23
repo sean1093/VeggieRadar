@@ -54,6 +54,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   const formatZones: string[] = [];
   let sheetThrows = false;
   let sheetZone = 'Asia/Taipei';
+  let triggerDeleteThrows = false;
   const mails: { to: string; subject: string; body: string }[] = [];
   let mailThrows = false;
   let brokenPropKey: string | null = null;
@@ -203,6 +204,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
           getUniqueId: () => `${t.handler}:${t.kind}`,
         })),
       deleteTrigger: (t: { getHandlerFunction: () => string }) => {
+        if (triggerDeleteThrows) throw new Error('Service unavailable: Script service');
         const i = triggers.findIndex((x) => x.handler === t.getHandlerFunction());
         if (i >= 0) triggers.splice(i, 1);
       },
@@ -222,7 +224,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'tradedRows', 'selectRows', 'rowRoot', 'rowVariety', 'isTradingDate',
     'retailBand', 'aggregateGroup', 'boardRoots', 'BOARD_ITEMS',
     'RETAIL_MARKUP_ROOT', 'RETAIL_MARKUP_CATEGORY', 'storeBoard', 'readDurableBoard',
-    'readBoard', 'boardAgeMs', 'scheduleRefresh', 'dropTriggers', 'handleWarm',
+    'readBoard', 'boardAgeMs', 'scheduleRefresh', 'refreshBoardCacheOnce', 'dropTriggers', 'handleWarm',
     'handleDiag', 'BOARD_MAX_AGE_MS', 'REFRESH_ONCE_FN',
     'handleTrend', 'resolveTradeDates',
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
@@ -258,6 +260,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     breakSheet: () => { sheetThrows = true; },
     formatZones,
     setSheetZone: (zone: string) => { sheetZone = zone; },
+    breakTriggerDelete: () => { triggerDeleteThrows = true; },
     breakDispatch: () => { dispatchThrows = true; },
     rejectDispatch: (code: number) => { dispatchStatus = code; },
     breakMail: () => { mailThrows = true; },
@@ -1008,6 +1011,20 @@ describe('backfillHistory — losing the lock', () => {
     expect(locks.waits).toBe(1);
     expect(logs.some((l) => l.includes('mergeCrawled failed'))).toBe(true);
     expect(logs.some((l) => l.includes('history lock busy'))).toBe(false);
+  });
+
+  it('frees the queue even when the trigger will not drop', () => {
+    // Both cleanups are guarded, and the trigger goes first: freeing the lock
+    // before the trigger is gone leaves a window where a new backfill queues
+    // itself and has its trigger deleted by this very line.
+    const { api, cache, contendLock, breakTriggerDelete, logs } = loadBackend(plausibleRows());
+    api.handleBackfill({});
+    contendLock();
+    breakTriggerDelete();
+
+    expect(() => api.backfillHistoryOnce()).not.toThrow();
+    expect(cache.has('veggie_backfill_queued')).toBe(false);
+    expect(logs.some((l) => l.includes('trigger not dropped'))).toBe(true);
   });
 
   it('keeps the queue lock when the merge worked', () => {
@@ -2153,6 +2170,20 @@ describe('alerting under contention and failure', () => {
     const board = api.refreshBoardCache();
     expect(board.count).toBeGreaterThan(0); // the board still shipped
     expect(logs.some((l) => l.includes('alert bookkeeping failed'))).toBe(true);
+  });
+
+  it('clears the refresh lock even when the trigger will not drop', () => {
+    // Same shape as the backfill's cleanup: a `ScriptApp` failure used to
+    // strand `REFRESH_LOCK_KEY` for its whole TTL, and that is the lock that
+    // stops `?action=warm` queueing another rebuild.
+    const { api, cache, breakTriggerDelete, logs } = loadBackend(plausibleRows());
+    api.scheduleRefresh();
+    expect(cache.get('veggie_refresh_queued')).toBe('1');
+    breakTriggerDelete();
+
+    expect(() => api.refreshBoardCacheOnce()).not.toThrow();
+    expect(cache.has('veggie_refresh_queued')).toBe(false);
+    expect(logs.some((l) => l.includes('trigger not dropped'))).toBe(true);
   });
 
   it('keeps the probe limiter durable across cache eviction', () => {
