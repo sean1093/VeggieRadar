@@ -28,6 +28,31 @@ function fetchPage(cropName, rocStart, rocEnd) {
 }
 
 /**
+ * A cut root's rows made whole with at most ONE more request: the rows MOA
+ * kept, less their oldest date, which the cut may have left partial; plus
+ * that date and everything before it back to `rocStart`, fetched on their own
+ * — and trimmed the same way if MOA cuts those too. For a caller that must
+ * stay inside a time budget, where halving until whole could not.
+ */
+function patchTruncated(root, rocStart, rows) {
+  var kept = wholeDaysOf({ rows: rows, next: true });
+  var oldest = oldestDate(rows);
+  if (!oldest || oldest < rocStart) return kept;
+  Utilities.sleep(120);
+  var page = fetchPage(root, rocStart, oldest);
+  return page.answered ? wholeDaysOf(page).concat(kept) : kept;
+}
+
+function oldestDate(rows) {
+  var oldest = null;
+  for (var i = 0; i < rows.length; i++) {
+    var day = rows[i].TransDate;
+    if (day && (oldest === null || day < oldest)) oldest = day;
+  }
+  return oldest;
+}
+
+/**
  * A page's rows less its oldest date when MOA cut it short — the one date the
  * cut can have left partial, since MOA drops the oldest rows first. For a
  * caller that would rather show a day as missing than spend more requests
@@ -35,11 +60,7 @@ function fetchPage(cropName, rocStart, rocEnd) {
  */
 function wholeDaysOf(page) {
   if (!page.next || !page.rows.length) return page.rows;
-  var oldest = null;
-  for (var i = 0; i < page.rows.length; i++) {
-    var day = page.rows[i].TransDate;
-    if (day && (oldest === null || day < oldest)) oldest = day;
-  }
+  var oldest = oldestDate(page.rows);
   return page.rows.filter(function (r) { return r.TransDate !== oldest; });
 }
 

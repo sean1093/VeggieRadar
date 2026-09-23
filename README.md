@@ -465,7 +465,9 @@ from MOA's range queries:
   own data; listed under `gaps`), and one or two crops refused while the
   probe answered (written without them; listed under `partial`). A refused
   probe, or a batch-sized hole, is a throttle — it hits the same place in
-  every burst — and keeps failing the window instead.
+  every burst — and keeps failing the window instead. Retries waiting on
+  MOA's answer to settle are not charged to the failure budget, so an
+  unrelated failure in between cannot stop the job one answer short.
 - **It never writes a day the live path can.** The job ends the day before
   the board's trading date, fixed when it starts; the live archive only ever
   writes that date or a later one. A day already in the Sheet — live or from
@@ -484,10 +486,11 @@ from MOA's range queries:
   next day is not judged against the one before it; any crop left out of a
   day is withheld from the next one too, which has nothing to judge it by.
   (`calibrate` has always refetched. The rolling history's seed crawls every
-  window in one execution, where refetches could push it past the limit, and
-  the trend runs on the public path, where one request is the budget: both
-  now drop a cut oldest day instead — they used to average whichever markets
-  MOA left in.)
+  window in one execution, where open-ended refetches could push it past the
+  limit, so a cut root gets exactly one more request for what was cut; the
+  trend runs on the public path, where one request is the budget, and leaves
+  a cut oldest point out. Both used to average whichever markets MOA left
+  in.)
 - **It survives stopping.** The job — reach, cursor, counts, last error — is
   one property. A failed window is retried by the next link, 3 then 6 minutes
   later — a per-IP throttle lasts minutes, and retrying after a second would
@@ -503,7 +506,9 @@ from MOA's range queries:
   its own so the chain's next write cannot undo it. Requests are serialised
   under the history lock, so two at once cannot start two chains.
 - **A new job skips what earlier ones finished** — on the same spreadsheet;
-  pointed at a new one, nothing is skipped. Re-running a year would crawl ~40
+  pointed at a new one, nothing is skipped, and a running job whose
+  `HISTORY_SHEET_ID` changes under it ends itself as `failed` rather than
+  carry its cursor into another sheet (`cancel=1` works with the id cleared). Re-running a year would crawl ~40
   windows to write nothing; a new `months=` steps over the range the jobs
   before it covered without a request, so extending 12 months to 24
   crawls only the new year. `months` must be a whole number (1–24; more is

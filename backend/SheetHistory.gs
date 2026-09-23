@@ -215,15 +215,19 @@ function growFor(sheet, lastNeeded) {
 function readDay(sheet, date, zone) {
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return { first: 0, count: 0, rows: [] };
-  var values = sheet.getRange(2, 1, lastRow - 1, SHEET_HEADER.length).getValues();
+  // Column A to find the block, then the block alone: this runs under the
+  // history lock, and a backfilled year is ~50k rows — all eight columns of
+  // it would be 400k cells read to rewrite a couple of hundred.
+  var dates = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
   var first = 0;
-  var rows = [];
-  for (var i = 0; i < values.length; i++) {
-    if (cellDate(values[i][0], zone) !== date) continue;
+  var count = 0;
+  for (var i = 0; i < dates.length; i++) {
+    if (cellDate(dates[i][0], zone) !== date) continue;
     if (!first) first = i + 2; // 1-based, past the header
-    rows.push(values[i]);
+    count++;
   }
-  return { first: first, count: rows.length, rows: rows };
+  if (!count) return { first: 0, count: 0, rows: [] };
+  return { first: first, count: count, rows: sheet.getRange(first, 1, count, SHEET_HEADER.length).getValues() };
 }
 
 /** Whether a day's archived rows already say what this crawl would write. */
@@ -317,8 +321,10 @@ function parseSheetWrite(value) {
 function handleSheetBackfill(params) {
   var props = PropertiesService.getScriptProperties();
   var sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
-  if (!sheetId) return backfillReply(readSheetBackfill(props), false, '尚未設定 HISTORY_SHEET_ID');
   var cancel = params.cancel === '1';
+  // A cancel needs no sheet: clearing the property is a natural way to stop
+  // archiving, and the job it leaves running must still be stoppable.
+  if (!sheetId && !cancel) return backfillReply(readSheetBackfill(props), false, '尚未設定 HISTORY_SHEET_ID');
   if (params.months && backfillMonths(params.months) === null) {
     // Refused, not defaulted: `months=0` reads like "nothing", and answering
     // it with a year of crawling is the one reading that costs a day's quota.
@@ -427,7 +433,7 @@ function newSheetBackfill(boardRoc, months, previous, sheetId) {
     // Coverage is a fact about ONE spreadsheet: pointed at a new one, the
     // previous job's range was never written there.
     sheet: sheetId,
-    skip: previous && previous.sheet === sheetId ? coveredBy(previous) : null,
+    skip: previous && previous.sheet === sheetId ? coveredBy(previous) : [],
     started_at: now,
     updated_at: now,
     link_started_at: null,
@@ -477,25 +483,37 @@ function monthsBefore(roc, n) {
 }
 
 /**
- * The range a job being replaced leaves covered: what it wrote itself —
- * everything after its cursor — joined to the range it was itself told to
- * skip when the two meet, so coverage carries across any number of jobs
- * rather than only the last. Null when there is none.
+ * The ranges a job being replaced leaves covered: what it wrote itself —
+ * everything after its cursor — and the ranges it was itself told to skip,
+ * merged where they meet. A list, so coverage carries across any number of
+ * jobs, however their ranges fall.
  */
 function coveredBy(job) {
-  if (!job || !job.cursor) return null;
+  if (!job || !job.cursor) return [];
+  var ranges = (job.skip || []).slice();
   var cursorNext = rocToISO(shiftROC(isoToROC(job.cursor), 1));
   var from = cursorNext > job.from ? cursorNext : job.from;
-  var own = from <= job.to ? { from: from, to: job.to } : null;
-  var prior = job.skip || null;
-  if (!own || !prior) return own || prior;
-  var meets = prior.to >= rocToISO(shiftROC(isoToROC(own.from), -1)) &&
-    prior.from <= rocToISO(shiftROC(isoToROC(own.to), 1));
-  if (!meets) return own; // disjoint: keep the newer, which the next job meets first
-  return {
-    from: prior.from < own.from ? prior.from : own.from,
-    to: prior.to > own.to ? prior.to : own.to
-  };
+  if (from <= job.to) ranges.push({ from: from, to: job.to });
+  return mergeRanges(ranges);
+}
+
+/**
+ * Date ranges sorted and joined where they overlap or touch. The newest ten
+ * are kept: the list lives in a property, and the newest are what a new job
+ * meets first.
+ */
+function mergeRanges(ranges) {
+  var sorted = ranges.slice().sort(function (a, b) { return a.from < b.from ? -1 : a.from > b.from ? 1 : 0; });
+  var out = [];
+  for (var i = 0; i < sorted.length; i++) {
+    var last = out[out.length - 1];
+    if (last && sorted[i].from <= rocToISO(shiftROC(isoToROC(last.to), 1))) {
+      if (sorted[i].to > last.to) last.to = sorted[i].to;
+    } else {
+      out.push({ from: sorted[i].from, to: sorted[i].to });
+    }
+  }
+  return out.slice(-10);
 }
 
 /**
@@ -544,7 +562,7 @@ function sheetBackfillStep() {
     return job;
   }
   try {
-    backfillWindow(job, props.getProperty(HISTORY_SHEET_ID_PROP));
+    backfillWindow(job, job.sheet);
   } catch (err) {
     job.last_error = String(err && err.message || err).substring(0, 200);
     Logger.log('sheetBackfillStep failed (' + job.failures + '): ' + err);
@@ -570,6 +588,14 @@ function beginBackfillLink(props) {
     return { action: 'leave', job: job };
   }
   if (!job || job.status !== 'running' || cancelRequested(props, job)) return { action: 'finish', job: job };
+  if (props.getProperty(HISTORY_SHEET_ID_PROP) !== job.sheet) {
+    // Pointed elsewhere, or cleared, mid-job. Its cursor, its coverage and its
+    // cached dates are all about the spreadsheet it started on; carrying on
+    // into another would leave that one with holes the job calls covered.
+    job.status = 'failed';
+    job.last_error = 'HISTORY_SHEET_ID changed since this job started; start a new one';
+    return { action: 'finish', job: job };
+  }
   if ((job.failures || 0) >= SHEET_BACKFILL_MAX_FAILURES) {
     // The previous links were counted and never reported back: killed by the
     // execution limit, most likely, which no `catch` survives.
@@ -600,7 +626,10 @@ function finishBackfillStep(props, job) {
   try {
     stored = readSheetBackfill(props);
   } catch (err) {
-    Logger.log('finishBackfillStep: job unreadable: ' + err);
+    // Unknowable whose job is stored, so nothing is safe to drop or queue.
+    // The watchdog, if this link armed one, will retry past the limit.
+    Logger.log('finishBackfillStep: job unreadable; leaving the triggers: ' + err);
+    return;
   }
   var ours = !!job && !!stored && stored.id === job.id;
   if (ours && cancelRequested(props, job)) {
@@ -638,8 +667,12 @@ function finishBackfillStep(props, job) {
   }
   if (ours && job.status === 'running') {
     try {
-      // A failed window waits before it is retried, longer each time.
-      var wait = job.failures ? SHEET_BACKFILL_RETRY_MS * job.failures : 1000;
+      // A failed window waits before it is retried, longer each time — by the
+      // failures or by MOA's repeated answers, whichever is further along —
+      // and never as long as the stall window, which it must not look like.
+      var v = job.verdict && job.verdict.cursor === job.cursor ? job.verdict.tries : 0;
+      var tries = Math.min(Math.max(job.failures || 0, v), 2);
+      var wait = tries ? SHEET_BACKFILL_RETRY_MS * tries : 1000;
       ScriptApp.newTrigger(SHEET_BACKFILL_FN).timeBased().after(wait).create();
     } catch (err) {
       // The chain stops here, and `months=` resumes it once it reads as
@@ -683,17 +716,21 @@ function backfillWindow(job, sheetId) {
   if (!sheetId) throw new Error('HISTORY_SHEET_ID is not set');
   var from = isoToROC(job.from);
   var end = isoToROC(job.cursor);
-  var skip = job.skip ? { from: isoToROC(job.skip.from), to: isoToROC(job.skip.to) } : null;
+  var skips = (job.skip || []).map(function (r) { return { from: isoToROC(r.from), to: isoToROC(r.to) }; });
 
-  if (skip && end >= skip.from && end <= skip.to) {
-    // Written by the job before this one: step over it without a crawl.
-    moveBackfillCursor(job, shiftROC(skip.from, -1));
-    job.failures = 0;
-    return;
+  for (var k = 0; k < skips.length; k++) {
+    if (end >= skips[k].from && end <= skips[k].to) {
+      // Written by a job before this one: step over it without a crawl.
+      moveBackfillCursor(job, shiftROC(skips[k].from, -1));
+      job.failures = 0;
+      return;
+    }
   }
   var start = shiftROC(end, -(BACKFILL_WINDOW_DAYS - SHEET_BACKFILL_CONTEXT_DAYS - 1));
   if (start < from) start = from;
-  if (skip && end > skip.to && start <= skip.to) start = shiftROC(skip.to, 1);
+  for (var m = 0; m < skips.length; m++) {
+    if (end > skips[m].to && start <= skips[m].to) start = shiftROC(skips[m].to, 1);
+  }
 
   var fetched = fetchCompleteRows(boardRoots(), shiftROC(start, -SHEET_BACKFILL_CONTEXT_DAYS), end);
   var span = rocToISO(start) + '…' + rocToISO(end);
@@ -706,9 +743,7 @@ function backfillWindow(job, sheetId) {
     // Anything else — the probe refused, or a batch-sized hole — is a
     // throttle or an outage, and fails the window until it clears.
     var few = refused.length <= SHEET_BACKFILL_MAX_REFUSED && refused.indexOf(PROBE_ROOT) === -1;
-    if (!few || sameVerdict(job, 'refused ' + refused.join('、')) < SHEET_BACKFILL_MAX_FAILURES) {
-      throw new Error(why);
-    }
+    if (!few || !settledAnswer(job, 'refused ' + refused.join('、'))) throw new Error(why);
     job.partial = recent(job.partial, span + ' without ' + refused.join('、'));
   }
   var built = backfillDays(fetched.rows, start, end, fetched.dropped);
@@ -718,9 +753,7 @@ function backfillWindow(job, sheetId) {
     // market gets `休市` rows. Retried first; said the same way every time,
     // it is a hole in MOA's own data, and stepping past it on record is the
     // only way the rest of the reach gets done.
-    if (sameVerdict(job, 'empty') < SHEET_BACKFILL_MAX_FAILURES) {
-      throw new Error('no ' + PROBE_ROOT + ' rows for ' + start + '–' + end);
-    }
+    if (!settledAnswer(job, 'empty')) throw new Error('no ' + PROBE_ROOT + ' rows for ' + start + '–' + end);
     job.gaps = recent(job.gaps, span);
     job.windows += 1;
     job.failures = 0;
@@ -742,18 +775,29 @@ function backfillWindow(job, sheetId) {
 }
 
 /**
- * How many times MOA has now answered the window at the cursor this same way.
- * Counted per answer, not per failure: a link killed by the limit, or a Sheet
- * that would not open, says nothing about what MOA has for these days.
+ * Whether MOA has now answered the window at the cursor this same way often
+ * enough to act on. Counted per answer, not per failure: a link killed by the
+ * limit, or a Sheet that would not open, says nothing about what MOA has for
+ * these days.
+ *
+ * Until it has, the window is retried — and the retry is refunded from the
+ * failure budget, which is for links that failed, so an unrelated failure
+ * cannot stop the job one answer short of settling. The refund is capped per
+ * window: answers that keep changing are charged again, or they could retry
+ * for ever.
  */
-function sameVerdict(job, kind) {
+function settledAnswer(job, kind) {
   var v = job.verdict;
-  if (v && v.cursor === job.cursor && v.kind === kind) {
-    v.count += 1;
-  } else {
-    v = job.verdict = { cursor: job.cursor, kind: kind, count: 1 };
+  if (!v || v.cursor !== job.cursor) v = job.verdict = { cursor: job.cursor, kind: kind, count: 0, tries: 0 };
+  if (v.kind !== kind) {
+    v.kind = kind;
+    v.count = 0;
   }
-  return v.count;
+  v.count += 1;
+  v.tries += 1;
+  if (v.count >= SHEET_BACKFILL_MAX_FAILURES) return true;
+  if (v.tries < 2 * SHEET_BACKFILL_MAX_FAILURES) job.failures = Math.max(0, (job.failures || 0) - 1);
+  return false;
 }
 
 /** `list` with `entry` appended, keeping the last few: it lives in a property. */
@@ -834,8 +878,10 @@ function backfillDays(rowsByRoot, rocStart, rocEnd, dropped) {
     var prev = t > 0 ? trading[t - 1] : null;
     var inWindow = day >= rocStart;
     if (inWindow && !prev && day !== rocEnd) {
+      // Judged all the same — it is the day the next one is judged against —
+      // but written by the next window, where it has a day behind it.
       deferred = day;
-      continue;
+      inWindow = false;
     }
     var board = {
       date: rocToISO(day),
