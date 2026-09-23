@@ -1,4 +1,4 @@
-import type { ProduceItem } from '../../types/produce';
+import type { ProduceItem, ProduceVariety } from '../../types/produce';
 
 /**
  * Today's distance from the item's own monthly baseline, or null when that
@@ -21,6 +21,17 @@ import type { ProduceItem } from '../../types/produce';
 export function trustedBaseline(item: ProduceItem): number | null {
   if (item.suspect === true) return null;
   const vs = item.vs_baseline_percent;
+  return typeof vs === 'number' && Number.isFinite(vs) ? vs : null;
+}
+
+/**
+ * A variety row's distance from that variety's own monthly median (#22 §3),
+ * or null. The item's rule: nothing that compares today with another day is
+ * trusted on a day the guard flagged.
+ */
+export function trustedVarietyBaseline(item: ProduceItem, variety: ProduceVariety): number | null {
+  if (item.suspect === true) return null;
+  const vs = variety.vs_baseline_percent;
   return typeof vs === 'number' && Number.isFinite(vs) ? vs : null;
 }
 

@@ -268,7 +268,16 @@ var YOY_PROP = 'veggie_yoy';
 // Six hours while a backfill is running, which may be adding to the window.
 var YOY_KEEP_MS = 24 * 60 * 60 * 1000;
 var YOY_SOON_MS = 6 * 60 * 60 * 1000;
-var ISO_DAY = /^\d{4}-\d{2}-\d{2}$/; // what a date cell in the archive reads as // …while a backfill may add to the window, or the tab needs re-sorting
+var ISO_DAY = /^\d{4}-\d{2}-\d{2}$/; // what a date cell in the archive reads as
+
+// Per-variety baselines (#22 §3): each variety's own 28-trading-day median,
+// read from the archive's variety rows the way the item baseline reads the
+// rolling history — `BASELINE_WINDOW` days within `BASELINE_HORIZON_DAYS`,
+// `BASELINE_MIN_DAYS` of them at least. Chunked: ~100 items with up to four
+// varieties each is more than one 9 KB property holds.
+var VARIETY_BASE_PREFIX = 'veggie_variety_base_chunk_';
+var VARIETY_BASE_COUNT = 'veggie_variety_base_chunks';
+var VARIETY_BASE_SKIPPED_PROP = 'veggie_variety_base_skipped_at'; // …while a backfill may add to the window, or the tab needs re-sorting
 // Kept medians older than this many days are not applied at all: the window
 // they describe has moved too far from the board's date.
 var YOY_KEPT_MAX_DAYS = 7;

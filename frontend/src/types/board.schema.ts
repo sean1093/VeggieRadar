@@ -50,6 +50,9 @@ export const ProduceVarietySchema = z.object({
   // 推估菜市場價（元/台斤）＝ 該品種批發價 + 與卡片相同的攤販加成。因加成是
   // 加法常數，卡片大字恰為各品種依成交量加權的平均。舊版快取可能沒有此欄位。
   retail_price: z.optional(z.number()),
+  // 該品種今日批發價相對它自己近 28 個交易日中位數的百分比（#22 §3），由長期
+  // 封存算出。封存未設定、或該品種近月成交不足 10 天時不送。
+  vs_baseline_percent: z.optional(z.number()),
 });
 
 export const ProduceItemSchema = z.object({

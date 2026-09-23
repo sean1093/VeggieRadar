@@ -563,6 +563,21 @@ card: `drawer_opened` carries `has_last_year`, and whether it earns a badge
 is for those numbers to say. `diag.sheet_history.year_ago` reports which
 trading date it compares and how many crops it covers.
 
+#### Reading it: each variety against its own month
+
+The drawer breaks a blended price into its varieties, and could say what each
+costs today but not whether that is cheap *for that variety*: the 28-day
+baseline is the blend's, and 綠竹筍 at twice 麻竹筍 is not "expensive" (#22 §3).
+The archive keeps each variety's own row a day, so each gets its own median —
+by the item baseline's rule (its most recent 28 archived days within the 45
+before the board's date, ten at least, the day itself left out) — and the
+row shows 「比近月低/高 N%」 as `varieties[].vs_baseline_percent`, hidden on a
+suspect day like everything that compares days. It is read exactly as the
+year-ago medians are: the refresh's last step, kept per trading date (chunked
+— a hundred items' varieties are more than one property holds), applied by
+the next build, read again on the same terms, the live year's tab under the
+lock. `diag.sheet_history.variety_baseline` reports what it covers.
+
 Rows land in the order they were written, not in date order — the live days,
 then each window newest-first. Nothing reads the tab in order (the readers
 group by date), so sorting column A in the Sheets UI is safe at any time: the
@@ -813,6 +828,7 @@ does not justify publishing.
 | `baseline_price`, `vs_baseline_percent` | fewer than 10 in-horizon observations for that crop (§5) |
 | `last_year_price`, `vs_last_year_percent` | no long-term archive configured, or fewer than two archived trading days for that crop on either side of this date a year back, within a week of it (§2) |
 | `varieties` | fewer than 2 varieties clear the share and volume thresholds (§5) |
+| `varieties[].vs_baseline_percent` | no long-term archive configured, or fewer than 10 archived days for that variety within the 45 days before this date (§2) |
 | `suspect` | the item's numbers are plausible; it appears only on an item the guard flagged (§2), whose change, baseline and year-ago comparison the client must then hide — everything that compares today with another day |
 
 `date` is the trading date; `generated_at` is when the backend crawled. See

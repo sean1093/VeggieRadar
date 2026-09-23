@@ -86,6 +86,7 @@ function buildBoard() {
   // The medians kept from the last read: a Sheets read has no place before
   // the board is stored (`refreshYearAgo` runs last in the refresh).
   applyYearOverYear(items, keptYearAgo(dates.latest));
+  applyVarietyBaselines(items, keptVarietyBaselines(dates.latest));
 
   return {
     type: 'board',
@@ -241,6 +242,7 @@ function refreshBoardCache() {
     // Sheets read here costs that comparison at most — the board is stored,
     // mirrored, archived and its outcome recorded.
     refreshYearAgo(board.roc_date, started);
+    refreshVarietyBaselines(board.roc_date, started);
   } else {
     var reason = verdict.reasons.join('; ');
     if (board.items && board.items.length) {

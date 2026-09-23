@@ -283,6 +283,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'handleSheetBackfill', 'sheetBackfillStep', 'backfillDays', 'fetchCompleteRows', 'archiveSummary',
     'SHEET_BACKFILL_PROP', 'SHEET_BACKFILL_FN', 'SHEET_BACKFILL_MAX_FAILURES', 'SHEET_BACKFILL_STALL_MS',
     'refreshYearAgo', 'keptYearAgo', 'applyYearOverYear', 'YOY_PROP', 'YOY_SOON_MS', 'YOY_KEEP_MS',
+    'refreshVarietyBaselines', 'keptVarietyBaselines', 'applyVarietyBaselines',
     'GH_DISPATCH_MIN_INTERVAL_MS', 'GH_DISPATCH_FAIL_BACKOFF_MS', 'GH_DISPATCH_PROP', 'GH_DISPATCH_OK_PROP',
     'validateBoard', 'markSuspects', 'readChunkedProp',
     'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
@@ -1924,7 +1925,7 @@ describe('long-term history in a Sheet', () => {
       expect(openedIds).toEqual([]);
       expect(tabs.size).toBe(0);
       expect(api.handleDiag().sheet_history).toEqual({
-        configured: false, last_write: null, backfill: null, year_ago: null,
+        configured: false, last_write: null, backfill: null, year_ago: null, variety_baseline: null,
       });
     });
 
@@ -4338,6 +4339,119 @@ describe('same weeks last year (#22 §2)', () => {
     const items = [{ name: '高麗菜', avg_price: 30 }, { name: '番茄', avg_price: 40 }];
     loadBackend().api.applyYearOverYear(items, { 高麗菜: 25 });
     expect(items[1]).toEqual({ name: '番茄', avg_price: 40 });
+  });
+});
+
+describe('per-variety baselines (#22 §3)', () => {
+  const SHEET_ID = '1AbCdEfGh_stub';
+  const HEADER = ['date', 'item', 'root', 'variety', 'avg_price_kg', 'volume_kg', 'markets', 'share_percent'];
+  const ROC = '115.09.21';
+  const dayOf = (roc: string, days: number): string => rocIso(rocShift(roc, days));
+  const varietyRow = (date: string, item: string, name: string, kg: number) => [date, item, item, name, kg, '', '', 50];
+  const blendRow = (date: string, item: string, kg: number) => [date, item, item, '', kg, 1000, 3, ''];
+
+  const archived = (rows: unknown[][], responses: Record<string, Row[]> = {}) => {
+    const back = loadBackend(responses);
+    back.props.set(back.api.HISTORY_SHEET_ID_PROP, SHEET_ID);
+    for (const r of rows) {
+      const year = String(r[0]).slice(0, 4);
+      if (!back.tabs.has(year)) back.tabs.set(year, { rows: [HEADER], maxRows: 100000, textColumnA: true });
+      back.tabs.get(year)?.rows.push(r);
+    }
+    return back;
+  };
+  /** `n` days of one variety at one price, ending the day before `roc`. */
+  const days = (roc: string, item: string, variety: string, kg: number, n: number) =>
+    Array.from({ length: n }, (_, i) => varietyRow(dayOf(roc, -1 - i), item, variety, kg));
+
+  it('does nothing until a sheet is configured', () => {
+    const back = loadBackend();
+    expect(back.api.refreshVarietyBaselines(ROC)).toBeNull();
+    expect(back.api.keptVarietyBaselines(ROC)).toBeNull();
+    expect(back.openedIds).toEqual([]);
+  });
+
+  it('takes each variety\'s own median, by the item baseline\'s rule', () => {
+    // 改良種 over the whole horizon: the latest 28 days at 68 … 41, the 17
+    // before them at 17 … 1. Its median over all 45 would be 46.
+    const reach = Array.from({ length: 45 }, (_, i) =>
+      varietyRow(dayOf(ROC, -1 - i), '高麗菜', '改良種', i < 28 ? 68 - i : 45 - i));
+    const back = archived([
+      ...days(ROC, '高麗菜', '初秋', 20, 12),
+      ...days(ROC, '高麗菜', '雪翠', 30, 9), // nine days: short of ten…
+      varietyRow(dayOf(ROC, 0), '高麗菜', '雪翠', 30), // …and today does not make it ten
+      ...reach, // only the latest 28
+      ...Array.from({ length: 12 }, (_, i) => blendRow(dayOf(ROC, -1 - i), '高麗菜', 25)), // the blend is no variety
+      varietyRow(dayOf(ROC, -50), '高麗菜', '初秋', 500), // past the horizon
+      ...days(ROC, '已下架', '某品種', 10, 12), // not a board item
+    ]);
+    expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20, 改良種: 54.5 } });
+  });
+
+  it('puts the percentage on the variety rows of the next build', () => {
+    const roc = rocDate(0);
+    const back = archived(days(roc, '高麗菜', '初秋', 25, 12), {
+      甘藍: [row('甘藍-初秋', 20, 60000), row('甘藍-雪翠', 30, 40000, '台中')],
+    });
+    back.api.refreshVarietyBaselines(roc);
+    const board = back.api.buildBoard();
+    const cabbage = board.items.find((it: { name: string }) => it.name === '高麗菜');
+    expect(cabbage.varieties).toEqual([
+      expect.objectContaining({ name: '初秋', vs_baseline_percent: -20 }), // 12 元/台斤 against 15
+      expect.not.objectContaining({ vs_baseline_percent: expect.anything() }), // 雪翠: no history
+    ]);
+    const result = BoardResponseSchema.safeParse(board);
+    expect(result.success ? [] : result.error.issues).toEqual([]);
+  });
+
+  it('reads the Sheet once a trading day, and keeps more than one property holds', () => {
+    // ~100 items × up to four varieties is past a single 9 KB property.
+    const names = Array.from({ length: 60 }, (_, i) => `品種${String(i).padStart(3, '0')}的長名字`);
+    const back = archived(names.flatMap((n) => days(ROC, '高麗菜', n, 20, 10)));
+    back.api.refreshVarietyBaselines(ROC);
+    const reads = back.sheetReads.length;
+    expect(Object.keys(back.api.keptVarietyBaselines(ROC).高麗菜)).toHaveLength(60);
+    back.api.refreshVarietyBaselines(ROC);
+    expect(back.sheetReads).toHaveLength(reads);
+  });
+
+  it('reads the live year\'s tab under the history lock, and keeps nothing when it cannot', () => {
+    const back = archived(days(ROC, '高麗菜', '初秋', 20, 12));
+    back.contendLock();
+    expect(back.api.refreshVarietyBaselines(ROC)).toBeNull();
+    expect(back.api.keptVarietyBaselines(ROC)).toBeNull();
+  });
+
+  it('never costs the board anything when the Sheet cannot be read', () => {
+    const back = archived([], plausibleRowsWith({}));
+    back.breakSheet();
+    expect(back.api.refreshBoardCache().count).toBeGreaterThan(0);
+    expect(back.api.keptVarietyBaselines(rocDate(0))).toBeNull();
+  });
+
+  it('leaves the read to the next refresh when this one has run long, and says so', () => {
+    const back = archived(days(ROC, '高麗菜', '初秋', 20, 12));
+    back.api.storeBoard({ type: 'board', date: 'x', roc_date: ROC, generated_at: new Date().toISOString(), count: 0, items: [] });
+    expect(back.api.refreshVarietyBaselines(ROC, Date.now() - 5 * 60_000)).toBeNull();
+    expect(back.sheetReads).toHaveLength(0);
+    expect(back.api.handleDiag().sheet_history.variety_baseline).toMatchObject({ skipped_at: expect.any(String) });
+  });
+
+  it('says in diag what it covers and whether the board uses it', () => {
+    const back = archived([...days(ROC, '高麗菜', '初秋', 20, 12), ...days(ROC, '番茄', '牛番茄', 30, 12)]);
+    back.api.storeBoard({ type: 'board', date: 'x', roc_date: ROC, generated_at: new Date().toISOString(), count: 0, items: [] });
+    back.api.refreshVarietyBaselines(ROC);
+    expect(back.api.handleDiag().sheet_history.variety_baseline).toMatchObject({
+      date: ROC, items: 2, varieties: 2, applied: true,
+    });
+  });
+
+  it('does not apply medians kept for another spreadsheet or a far date', () => {
+    const back = archived(days(ROC, '高麗菜', '初秋', 20, 12));
+    back.api.refreshVarietyBaselines(ROC);
+    expect(back.api.keptVarietyBaselines(rocShift(ROC, 30))).toBeNull();
+    back.props.set(back.api.HISTORY_SHEET_ID_PROP, 'another');
+    expect(back.api.keptVarietyBaselines(ROC)).toBeNull();
   });
 });
 
