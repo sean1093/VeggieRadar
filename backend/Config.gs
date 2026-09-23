@@ -259,8 +259,7 @@ var SHEET_FROZEN_CACHE_PREFIX = 'veggie_sheet_frozen_';
 // this many calendar days either side of the date a year back — a window, not
 // the one day, because a single day a year ago is one market's weather.
 var YOY_WINDOW_DAYS = 7;
-var YOY_MIN_DAYS = 3;            // fewer archived days than this → nothing published
-var YOY_MIN_SIDE_DAYS = 2;       // …nor with fewer than this on either side of the day
+var YOY_MIN_SIDE_DAYS = 2;       // archived days needed on EACH side of the day; fewer → nothing published
 // Computed once per trading date and kept here, so a refresh reads the Sheet
 // once a day rather than every four hours: "<roc date>" plus the medians.
 var YOY_PROP = 'veggie_yoy';

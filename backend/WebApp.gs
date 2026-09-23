@@ -180,7 +180,8 @@ function handleDiag(full, props) {
       backfill: publicBackfill(parseSheetBackfill(props[SHEET_BACKFILL_PROP])),
       // The year-ago reference (§2) the board is being compared with: for
       // which trading date, and how many items it covers.
-      year_ago: publicYearAgo(props[YOY_PROP], props[HISTORY_SHEET_ID_PROP], props[YOY_SKIPPED_PROP]),
+      year_ago: publicYearAgo(props[YOY_PROP], props[HISTORY_SHEET_ID_PROP], props[YOY_SKIPPED_PROP],
+        (boardSummary() || {}).roc_date, props[SHEET_BACKFILL_PROP]),
     },
     // Whether the mirror is being republished by the crawl or left to the
     // fallback cron: an expired PAT would 401 on every refresh and nothing

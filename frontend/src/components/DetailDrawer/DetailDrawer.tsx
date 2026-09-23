@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -106,14 +106,27 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
   const hasLastYear = lastYear !== null;
   const hasRetail = marketPrice(item) != null;
 
+  // Once per open. A fresh board replacing the cached one under an open
+  // drawer changes these flags — a cached board rarely has a baseline or a
+  // year-ago price yet — and reporting the open again would count it twice,
+  // in exactly the numbers these flags exist to measure.
+  // Keyed by the item, not its root: 青椒 and 甜椒 share one, and moving from
+  // one to the other inside the drawer is a second open.
+  const openKey = isOpen && item ? item.name : null;
+  const trackedKey = useRef<string | null>(null);
   useEffect(() => {
-    if (!trendKey) return;
+    if (!openKey) {
+      trackedKey.current = null;
+      return;
+    }
+    if (trackedKey.current === openKey) return;
+    trackedKey.current = openKey;
     // `has_last_year` is how #22 decides whether the comparison earns a place
     // on the card too: it is shown here only until that is measured.
     track('drawer_opened', {
       has_varieties: hasVarieties, has_baseline: hasBaseline, has_last_year: hasLastYear, has_retail: hasRetail,
     });
-  }, [trendKey, hasVarieties, hasBaseline, hasLastYear, hasRetail]);
+  }, [openKey, hasVarieties, hasBaseline, hasLastYear, hasRetail]);
 
   // Phones hand the sentence to LINE through the native sheet; desktops, which
   // have no sheet, get the link on the clipboard. Only the completed path is

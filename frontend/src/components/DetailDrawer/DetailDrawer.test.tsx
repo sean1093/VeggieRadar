@@ -228,6 +228,33 @@ describe('DetailDrawer', () => {
       expect(screen.queryByText(/去年此時/)).not.toBeInTheDocument();
     });
 
+    it('reports an open once, even when a fresh board fills the flags in after', () => {
+      // A cached board rarely has the year-ago price yet; the fresh one that
+      // replaces it under an open drawer must not count the open twice.
+      const gtag = vi.fn();
+      vi.stubGlobal('gtag', gtag);
+      try {
+        const { rerender } = render(
+          <DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />,
+        );
+        rerender(
+          <DetailDrawer
+            isOpen
+            onClose={() => {}}
+            item={{ ...withRetail, last_year_price: 16, vs_last_year_percent: 5, baseline_price: 18, vs_baseline_percent: 3 }}
+            allProduceItems={mockAllProduceItems}
+          />,
+        );
+        expect(gtag.mock.calls.filter((c) => c[1] === 'drawer_opened')).toHaveLength(1);
+
+        rerender(<DetailDrawer isOpen={false} onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
+        rerender(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
+        expect(gtag.mock.calls.filter((c) => c[1] === 'drawer_opened')).toHaveLength(2); // a new open
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
     it('reports that the item has one when the drawer opens', () => {
       const gtag = vi.fn();
       vi.stubGlobal('gtag', gtag);

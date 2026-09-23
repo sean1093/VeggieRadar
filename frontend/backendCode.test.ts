@@ -3869,11 +3869,72 @@ describe('same weeks last year (#22 §2)', () => {
     expect(bare.props.has('veggie_yoy_skipped_at')).toBe(false);
   });
 
+  it('reads again once a backfill has written since the last read', () => {
+    // An empty answer read before a backfill must not outlive it by a day.
+    const roc = '115.09.21';
+    const back = archived([]);
+    back.tabs.set('2025', { rows: [HEADER], maxRows: 1000, textColumnA: true });
+    expect(back.api.refreshYearAgo(roc)).toEqual({});
+    for (const d of [-2, -1, 1, 2]) back.tabs.get('2025')?.rows.push(blend(yearAgo(roc, d), '高麗菜', 25));
+    back.props.set('veggie_sheet_backfill', JSON.stringify({
+      id: 'j', status: 'done', updated_at: new Date(Date.now() + 1000).toISOString(),
+      sheet: SHEET_ID, from: '2025-01-01', cursor: '2024-12-31',
+    }));
+    expect(back.api.refreshYearAgo(roc)).toEqual({ 高麗菜: 25 });
+  });
+
+  it('does not wait on a backfill for a window it skips as written', () => {
+    const roc = '115.09.21';
+    const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)));
+    back.props.set('veggie_sheet_backfill', JSON.stringify({
+      id: 'j', status: 'running', updated_at: new Date().toISOString(),
+      sheet: SHEET_ID, from: '2025-01-01', cursor: '2026-06-01',
+      skip: [{ from: '2025-01-01', to: '2026-01-01' }],
+    }));
+    expect(back.api.refreshYearAgo(roc)).toEqual({ 高麗菜: 25 });
+  });
+
+  it('says in diag whether the board is compared with what is kept, and why not', () => {
+    const roc = rocDate(0);
+    const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)), plausibleRowsWith({}));
+    back.api.refreshBoardCache(); // a board, and the medians for its date
+    expect(back.api.handleDiag().sheet_history.year_ago).toMatchObject({ applied: true });
+
+    const kept = JSON.parse(back.props.get(back.api.YOY_PROP) as string);
+    back.props.set(back.api.YOY_PROP, JSON.stringify({ ...kept, date: rocShift(roc, -30) }));
+    expect(back.api.handleDiag().sheet_history.year_ago).toMatchObject({ applied: false }); // a month off
+    back.props.set(back.api.YOY_PROP, JSON.stringify(kept));
+
+    back.props.set('veggie_sheet_backfill', JSON.stringify({
+      id: 'j', status: 'running', updated_at: new Date().toISOString(),
+      sheet: SHEET_ID, from: '2020-01-01', cursor: '2099-01-01',
+    }));
+    expect(back.api.handleDiag().sheet_history.year_ago).toMatchObject({ waiting_for_backfill: true });
+
+    back.props.delete(back.api.HISTORY_SHEET_ID_PROP);
+    back.props.set('veggie_yoy_skipped_at', new Date().toISOString());
+    expect(back.api.handleDiag().sheet_history.year_ago).toBeNull(); // no archive, nothing to report
+  });
+
+  it('gives a resumed job the week before its reach it started without', () => {
+    // A job started before the reach took in the year-ago week.
+    const roc = '115.09.21';
+    const back = archived([]);
+    back.api.storeBoard({ type: 'board', date: '2026-09-21', roc_date: roc, generated_at: new Date().toISOString(), count: 0, items: [] });
+    back.props.set('veggie_sheet_backfill', JSON.stringify({
+      id: 'old', status: 'failed', months: 12, from: '2025-09-21', to: '2026-09-20', cursor: '2026-03-01',
+      sheet: SHEET_ID, skip: [], failures: 3, updated_at: new Date().toISOString(),
+    }));
+    back.api.handleSheetBackfill({ months: '12' });
+    expect(JSON.parse(back.props.get('veggie_sheet_backfill') as string)).toMatchObject({ id: 'old', from: '2025-09-14' });
+  });
+
   it('takes a stalled backfill for what it is: not filling anything', () => {
     const roc = '115.09.21';
     const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)));
     back.props.set('veggie_sheet_backfill', JSON.stringify({
-      id: 'j', status: 'running', updated_at: new Date(Date.now() - 3_600_000).toISOString(),
+      // Stalled: nothing written for most of a day.
+      id: 'j', status: 'running', updated_at: new Date(Date.now() - 20 * 3_600_000).toISOString(),
       sheet: SHEET_ID, from: '2025-01-01', cursor: yearAgo(roc, 3),
     }));
     expect(back.api.refreshYearAgo(roc)).toEqual({ 高麗菜: 25 }); // not held back for a dead chain

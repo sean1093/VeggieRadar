@@ -538,9 +538,9 @@ archived blend rows within a week either side of the trading date a year
 back — column A of the year tab (two, across New Year) to find them, then
 only those rows; under the history lock only late in December, when the
 window reaches the current year's tab, where the live path rewrites its day
-— and takes each crop's median, one value per day. With at least three
-archived days, two of them on each side of the day itself (fewer on one side
-is a half-filled window, whose median leans to one week), a crop gets
+— and takes each crop's median, one value per day. With at least two
+archived days on each side of the day itself (fewer on one side is a
+half-filled window, whose median leans to one week), a crop gets
 `last_year_price` (元/台斤) and `vs_last_year_percent`, wholesale against
 wholesale like the baseline. A tab sorted by another column is reported as
 `scattered` in `diag` rather than read around.
@@ -808,7 +808,7 @@ does not justify publishing.
 | --- | --- |
 | `retail_*` | the cached board predates the retail band |
 | `baseline_price`, `vs_baseline_percent` | fewer than 10 in-horizon observations for that crop (§5) |
-| `last_year_price`, `vs_last_year_percent` | no long-term archive configured, or fewer than 3 archived trading days for that crop within a week of this date a year back (§2) |
+| `last_year_price`, `vs_last_year_percent` | no long-term archive configured, or fewer than two archived trading days for that crop on either side of this date a year back, within a week of it (§2) |
 | `varieties` | fewer than 2 varieties clear the share and volume thresholds (§5) |
 | `suspect` | the item's numbers are plausible; it appears only on an item the guard flagged (§2), whose change, baseline and year-ago comparison the client must then hide — everything that compares today with another day |
 
