@@ -396,15 +396,26 @@ privileged thing in the backend that it can be:
 - it runs after the board is stored, never throws, and a day it misses costs
   the archive rather than the board — the same contract the alerting and the
   mirror dispatch honour;
-- a trading day is written **once**, and corrected at most once. The refresh
-  revisits the same day every 4 h; only a crawl more than 6 h newer than the
-  one on record replaces it, because MOA completes a day's closing prices
-  through the evening. The cap is what a weekend needs: the board keeps a
-  trading date until the next one publishes, so an uncapped rule would delete
-  and rewrite the same unchanged Friday every few hours until Monday;
+- a trading day is written **once**, and rewritten only when its numbers have
+  moved. MOA completes a day's closing prices through the evening, so a later
+  crawl can carry better ones — but the board keeps a trading date until the
+  next one publishes, so over a weekend the same unchanged Friday is re-crawled
+  for days. What decides is the rows: a revisit inside 6 h is skipped without
+  reading anything, and past that the archived day is compared with what the
+  crawl would write. Comparing crawl times instead would either spend a fixed
+  budget of corrections before the evening completion arrived, or rewrite an
+  unchanged day every few hours until Monday;
+- a date cell is read in the **spreadsheet's** timezone, not the script's. The
+  column is written as text so this does not normally arise; on a tab someone
+  reformatted, reading an instant in the wrong zone would put it on the day
+  before and the replacement would find nothing to replace;
 - it runs under the same lock as `updateHistory` — the same two executions
   overlap (the 4-hourly trigger and a `?action=warm` rebuild), and a
-  check-then-append race would archive a day twice;
+  check-then-append race would archive a day twice. That lock is now held
+  across a Sheets round trip rather than a property write, so `backfillHistory`
+  retries the merge once and reports `merged: false` rather than throwing away
+  a crawl that took minutes — and frees its queue lock, so the operator can
+  simply ask again;
 - one tab per calendar year, header `date, item, root, variety, avg_price_kg,
   volume_kg, markets, share_percent`. A variety row carries the share and
   leaves volume and markets empty: the breakdown publishes shares and prices

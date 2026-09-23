@@ -188,10 +188,52 @@ function handleBackfill(params) {
 
 /** One-off trigger target; the lock keeps repeat taps cheap for its full TTL. */
 function backfillHistoryOnce() {
+  var result = null;
   try {
-    backfillHistory();
+    result = backfillHistory();
   } finally {
     dropTriggers(BACKFILL_ONCE_FN);
+    // A run that merged nothing leaves no queue behind it: the crawl is gone
+    // either way, and making the operator wait out the hour to ask again
+    // would be a penalty for someone else's lock.
+    if (!result || !result.merged) CacheService.getScriptCache().remove(BACKFILL_LOCK_KEY);
+  }
+  return result;
+}
+
+/**
+ * Merges the crawled windows into the history under the lock.
+ * @returns {boolean} false when the lock could not be taken.
+ */
+function mergeCrawled(crawled) {
+  try {
+    withHistoryLock(function () {
+      var history = readHistory();
+      for (var c = 0; c < crawled.length; c++) {
+        var rowsByRoot = crawled[c];
+        for (var i = 0; i < BOARD_ITEMS.length; i++) {
+          var def = BOARD_ITEMS[i];
+          var rows = selectRows(rowsByRoot[def.official], def);
+          var byDate = {};
+          for (var r = 0; r < rows.length; r++) {
+            var dateKey = rows[r].TransDate;
+            if (!dateKey) continue;
+            (byDate[dateKey] = byDate[dateKey] || []).push(rows[r]);
+          }
+          Object.keys(byDate).forEach(function (roc) {
+            var day = weightedAverage(byDate[roc]);
+            if (day.volume < MIN_TRADE_VOLUME || !(day.avg > 0)) return;
+            history.items[def.name] = appendObservation(history.items[def.name], roc, round1(day.avg));
+          });
+        }
+      }
+      pruneHistory(history);
+      writeHistory(history);
+    });
+    return true;
+  } catch (err) {
+    Logger.log('mergeCrawled: ' + err);
+    return false;
   }
 }
 
@@ -218,31 +260,16 @@ function backfillHistory() {
     crawled.push(fetchRootRows(roots, dateToROC(start), dateToROC(end)));
   }
 
-  withHistoryLock(function () {
-    var history = readHistory();
-    for (var c = 0; c < crawled.length; c++) {
-      var rowsByRoot = crawled[c];
-      for (var i = 0; i < BOARD_ITEMS.length; i++) {
-        var def = BOARD_ITEMS[i];
-        var rows = selectRows(rowsByRoot[def.official], def);
-        var byDate = {};
-        for (var r = 0; r < rows.length; r++) {
-          var dateKey = rows[r].TransDate;
-          if (!dateKey) continue;
-          (byDate[dateKey] = byDate[dateKey] || []).push(rows[r]);
-        }
-        Object.keys(byDate).forEach(function (roc) {
-          var day = weightedAverage(byDate[roc]);
-          if (day.volume < MIN_TRADE_VOLUME || !(day.avg > 0)) return;
-          history.items[def.name] = appendObservation(history.items[def.name], roc, round1(day.avg));
-        });
-      }
-    }
-    pruneHistory(history);
-    writeHistory(history);
-  });
-
+  // Retried once, because losing this lock now costs more than it used to: the
+  // long-term archive (#22) holds the same lock across a Sheets round trip, so
+  // a 30 s wait can genuinely time out — and a thrown timeout here would throw
+  // away a crawl that took minutes, behind a one-hour queue lock that stops
+  // anyone simply asking again.
+  var merged = mergeCrawled(crawled) || mergeCrawled(crawled);
   var summary = historySummary();
-  Logger.log('Backfill complete: ' + summary.items + ' items with history');
+  summary.merged = merged;
+  Logger.log(merged
+    ? 'Backfill complete: ' + summary.items + ' items with history'
+    : 'Backfill merged nothing: the history lock stayed busy');
   return summary;
 }

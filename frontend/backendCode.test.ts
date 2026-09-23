@@ -51,7 +51,9 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   type Tab = { rows: unknown[][]; maxRows: number; textColumnA: boolean };
   const tabs = new Map<string, Tab>();
   const openedIds: string[] = [];
+  const formatZones: string[] = [];
   let sheetThrows = false;
+  let sheetZone = 'Asia/Taipei';
   const mails: { to: string; subject: string; body: string }[] = [];
   let mailThrows = false;
   let brokenPropKey: string | null = null;
@@ -116,6 +118,9 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
         if (sheetThrows) throw new Error('Requested entity was not found');
         openedIds.push(id);
         return {
+          // The spreadsheet's own zone, which is what a date cell means —
+          // not the script's.
+          getSpreadsheetTimeZone: () => sheetZone,
           getSheetByName: (name: string) => (tabs.has(name) ? tabApi(name) : null),
           insertSheet: (name: string) => {
             // Sheets' own default for a new tab, which is the whole point of
@@ -172,7 +177,21 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
       },
     },
     Logger: { log: (m: unknown) => void logs.push(String(m)) },
-    Utilities: { sleep: () => {} },
+    Utilities: {
+      sleep: () => {},
+      // Only the one pattern `SheetHistory.gs` asks for, and it records the
+      // zone so a test can assert which one was used.
+      formatDate: (date: Date, zone: string, pattern: string) => {
+        formatZones.push(zone);
+        if (pattern !== 'yyyy-MM-dd') throw new Error(`unstubbed pattern ${pattern}`);
+        const shifted = zone === 'Pacific/Auckland' ? new Date(date.getTime() + 4 * 3_600_000) : date;
+        return [
+          shifted.getFullYear(),
+          String(shifted.getMonth() + 1).padStart(2, '0'),
+          String(shifted.getDate()).padStart(2, '0'),
+        ].join('-');
+      },
+    },
     ContentService: {
       MimeType: { JSON: 'json' },
       createTextOutput: (t: string) => ({ setMimeType: () => ({ body: t }) }),
@@ -207,7 +226,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'handleDiag', 'BOARD_MAX_AGE_MS', 'REFRESH_ONCE_FN',
     'handleTrend', 'resolveTradeDates',
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
-    'applyBaselines', 'backfillHistory', 'handleBackfill', 'buildBoard',
+    'applyBaselines', 'backfillHistory', 'backfillHistoryOnce', 'handleBackfill', 'buildBoard',
     'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown', 'handleSearch', 'RETAIL_BAND_ROOT',
     'sendAlert', 'recordRefreshOutcome', 'withAlertLock', 'handleAlertTest',
     'ALERT_FAILURE_STREAK', 'ALERT_SILENCE_MS', 'ALERT_COOLDOWN_MS',
@@ -237,6 +256,8 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     api,
     logs, props, cache, triggers, fetches, locks, mails, dispatches, tabs, openedIds,
     breakSheet: () => { sheetThrows = true; },
+    formatZones,
+    setSheetZone: (zone: string) => { sheetZone = zone; },
     breakDispatch: () => { dispatchThrows = true; },
     rejectDispatch: (code: number) => { dispatchStatus = code; },
     breakMail: () => { mailThrows = true; },
@@ -955,6 +976,33 @@ describe('backfillHistory — one-time seeding', () => {
     api.backfillHistory();
     expect(locks.waits).toBe(1);
     expect(locks.releases).toBe(1);
+  });
+});
+
+describe('backfillHistory — losing the lock', () => {
+  it('retries the merge, and frees the queue when it still cannot write', () => {
+    // The archive now holds this lock across a Sheets round trip, so a 30 s
+    // wait can genuinely time out — and a thrown timeout would throw away a
+    // crawl that took minutes, behind an hour-long queue lock that stops
+    // anyone asking again.
+    const { api, cache, contendLock, locks, logs } = loadBackend(plausibleRows());
+    api.handleBackfill({});
+    expect(cache.get('veggie_backfill_queued')).toBe('1');
+    contendLock();
+
+    const result = api.backfillHistoryOnce();
+
+    expect(result.merged).toBe(false);
+    expect(locks.waits).toBe(2); // tried twice before giving the crawl up
+    expect(logs.some((l) => l.includes('merged nothing'))).toBe(true);
+    expect(cache.has('veggie_backfill_queued')).toBe(false); // ask again whenever you like
+  });
+
+  it('keeps the queue lock when the merge worked', () => {
+    const { api, cache } = loadBackend(plausibleRows());
+    api.handleBackfill({});
+    expect(api.backfillHistoryOnce().merged).toBe(true);
+    expect(cache.get('veggie_backfill_queued')).toBe('1'); // one queued backfill per hour
   });
 });
 
@@ -1818,7 +1866,9 @@ describe('long-term history in a Sheet', () => {
       const { api, tabs } = configured();
       api.appendDailyHistory(boardOf('2026-09-20', 30));
       api.appendDailyHistory(boardOf('2026-09-21', 8));
-      api.appendDailyHistory(boardOf('2026-09-21'));
+      const corrected = boardOf('2026-09-21');
+      corrected.items[1].avg_price = 41.5;
+      api.appendDailyHistory(corrected);
 
       const rows = (tabs.get('2026') as { rows: unknown[][] }).rows;
       const dates = rows.slice(1).map((r) => r[0]);
@@ -1833,6 +1883,19 @@ describe('long-term history in a Sheet', () => {
 
       expect([...tabs.keys()]).toEqual(['2026', '2027']);
       expect((tabs.get('2027') as { rows: unknown[][] }).rows).toHaveLength(5);
+    });
+
+    it('keeps a malformed board inside its own failure, not the lock\'s', () => {
+      // `historyRowsFor` reads a board the crawl built. If that ever throws,
+      // it has to be caught where it happened: outside the try it would
+      // surface as lock contention and log the wrong cause.
+      const { api, logs } = configured();
+      const broken = boardOf('2026-09-21');
+      broken.items = [null] as unknown as typeof broken.items;
+
+      expect(api.appendDailyHistory(broken)).toBe('failed');
+      expect(logs.some((l) => l.includes('archiveDay failed'))).toBe(true);
+      expect(logs.some((l) => l.includes('appendDailyHistory skipped'))).toBe(false);
     });
 
     it('never lets a Sheets failure cost the board', () => {
@@ -1890,22 +1953,54 @@ describe('long-term history in a Sheet', () => {
       tab.textColumnA = false;
       tab.rows = tab.rows.map((row, i) => (i === 0 ? row : [new Date('2026-09-21T00:00:00'), ...row.slice(1)]));
 
-      expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('replaced');
+      const corrected = boardOf('2026-09-21');
+      corrected.items[1].avg_price = 41.5;
+      expect(api.appendDailyHistory(corrected)).toBe('replaced');
       expect(tab.rows).toHaveLength(5);
     });
 
-    it('corrects a day once, not every few hours until the market reopens', () => {
+    it('rewrites a day only when its numbers have moved', () => {
       // The board keeps a trading date until the next one publishes, so over a
-      // weekend an uncapped rule would delete and rewrite the same unchanged
-      // Friday every 8 hours.
+      // weekend the same unchanged Friday is re-crawled for days. What decides
+      // is the rows, not the clock — and the clock only keeps the comparison
+      // itself cheap.
       const { api, tabs, props } = configured();
       api.appendDailyHistory(boardOf('2026-09-18', 48));
-      expect(api.appendDailyHistory(boardOf('2026-09-18', 40))).toBe('replaced');
-      expect(api.appendDailyHistory(boardOf('2026-09-18', 24))).toBe('already corrected');
-      expect(api.appendDailyHistory(boardOf('2026-09-18'))).toBe('already corrected');
+
+      // The evening completion: better numbers for the same day.
+      const completed = boardOf('2026-09-18', 40);
+      completed.items[1].avg_price = 41.5;
+      expect(api.appendDailyHistory(completed)).toBe('replaced');
+
+      // And then the same numbers, again and again, for the rest of the break.
+      expect(api.appendDailyHistory(boardOf('2026-09-18', 24, { items: completed.items }))).toBe('unchanged');
+      expect(api.appendDailyHistory(boardOf('2026-09-18', 8, { items: completed.items }))).toBe('unchanged');
+      // …with the crawl time recorded each time, so the next revisit inside
+      // the window is skipped without reading the sheet at all.
+      expect(api.appendDailyHistory(boardOf('2026-09-18', 6, { items: completed.items }))).toBe('already written');
 
       expect((tabs.get('2026') as { rows: unknown[][] }).rows).toHaveLength(5);
-      expect(props.get('veggie_sheet_last_write')).toContain(' 1');
+      expect(props.get('veggie_sheet_last_write')).toContain('2026-09-18');
+    });
+
+    it('reads a date cell in the spreadsheet\'s timezone, not the script\'s', () => {
+      // A date cell is an instant, and only a calendar date in some zone. Read
+      // in the wrong one, a sheet kept east of Asia/Taipei lands on the day
+      // before and the replacement finds nothing — the bug the text column
+      // exists to avoid, reintroduced by the fallback that tolerates it.
+      const { api, tabs, formatZones, setSheetZone } = configured();
+      setSheetZone('Pacific/Auckland');
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+
+      const tab = tabs.get('2026') as { rows: unknown[][]; textColumnA: boolean };
+      tab.textColumnA = false;
+      tab.rows = tab.rows.map((row, i) => (i === 0 ? row : [new Date('2026-09-20T20:00:00'), ...row.slice(1)]));
+
+      const corrected = boardOf('2026-09-21');
+      corrected.items[1].avg_price = 41.5;
+      expect(api.appendDailyHistory(corrected)).toBe('replaced');
+      expect(tab.rows).toHaveLength(5); // replaced, not duplicated
+      expect(formatZones).toContain('Pacific/Auckland');
     });
 
     it('does not drop the day for a board it would write nothing for', () => {

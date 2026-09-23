@@ -73,33 +73,51 @@ function archiveDay(board) {
   if (!sheetId) return 'unconfigured';
   if (!board || !board.date || !board.items || !board.items.length) return 'nothing to write';
 
-  // Was this trading day already archived, and has anything changed since?
-  // MOA completes a day's closing prices during the evening, so the same date
-  // crawled hours later is a correction worth keeping — and the same date
-  // crawled again half an hour later is the same day twice.
+  // Was this trading day already archived? The refresh revisits the same day
+  // every 4 h, and MOA completes a day's closing prices through the evening,
+  // so the same date crawled hours later may be a correction worth keeping —
+  // or the same numbers again, which the board keeps serving until the next
+  // trading date publishes (all weekend, and longer over a holiday).
   //
-  // The correction is capped rather than open-ended: the board keeps a trading
-  // date until the next one publishes, so across a weekend or a holiday this
-  // would otherwise re-replace the same unchanged day every few hours for as
-  // long as the break lasts.
+  // The first bound is the clock, and it is only there to keep this cheap: a
+  // revisit within the window is skipped without reading anything. Past it,
+  // what decides is the ROWS — replace when they differ, and do not when they
+  // do not. Comparing crawl times instead would either spend a fixed budget
+  // of corrections before the evening completion arrived, or rewrite an
+  // unchanged Friday every few hours until Monday.
   var last = parseSheetWrite(written);
-  var replacing = false;
-  if (last && last.date === board.date) {
-    var moved = Date.parse(board.generated_at || '') - Date.parse(last.generated_at || '');
-    if (!(moved > SHEET_CORRECTION_MS)) return 'already written';
-    if (last.corrections >= SHEET_MAX_CORRECTIONS) return 'already corrected';
-    replacing = true;
+  var revisit = !!last && last.date === board.date;
+  if (revisit && !(Date.parse(board.generated_at || '') - Date.parse(last.generated_at || '') > SHEET_CORRECTION_MS)) {
+    return 'already written';
   }
 
-  // Built before anything is deleted: an all-flagged board contributes no
-  // rows, and dropping the day for it would leave the archive emptier than
-  // the crawl was.
-  var rows = historyRowsFor(board);
-  if (!rows.length) return 'nothing to write';
-
   try {
-    var sheet = yearSheet(SpreadsheetApp.openById(sheetId), board.date.substring(0, 4));
-    if (replacing) dropDay(sheet, board.date);
+    // Inside the try with everything else: `historyRowsFor` reads a board the
+    // crawl built, and the promise this function makes is that nothing here
+    // reaches the caller.
+    //
+    // Built before anything is deleted: an all-flagged board contributes no
+    // rows, and dropping the day for it would leave the archive emptier than
+    // the crawl was.
+    var rows = historyRowsFor(board);
+    if (!rows.length) return 'nothing to write';
+
+    var spreadsheet = SpreadsheetApp.openById(sheetId);
+    var sheet = yearSheet(spreadsheet, board.date.substring(0, 4));
+    var zone = spreadsheet.getSpreadsheetTimeZone();
+    var replacing = false;
+    if (revisit) {
+      var existing = readDay(sheet, board.date, zone);
+      if (sameRows(existing.rows, rows)) {
+        // Nothing moved. Recording the crawl time keeps the cheap skip above
+        // working, so this read happens once per window rather than per
+        // refresh.
+        props.setProperty(SHEET_LAST_WRITE_PROP, board.date + ' ' + board.generated_at);
+        return 'unchanged';
+      }
+      if (existing.count) sheet.deleteRows(existing.first, existing.count);
+      replacing = true;
+    }
     var from = sheet.getLastRow() + 1;
     // `setValues` writes into the grid that exists — it does not grow it, and
     // a default tab is 1000 rows, which ~200 rows a trading day fills in a
@@ -107,10 +125,7 @@ function archiveDay(board) {
     // out-of-bounds error and nothing else to show for it.
     growFor(sheet, from + rows.length - 1);
     sheet.getRange(from, 1, rows.length, SHEET_HEADER.length).setValues(rows);
-    props.setProperty(
-      SHEET_LAST_WRITE_PROP,
-      board.date + ' ' + board.generated_at + ' ' + (replacing ? last.corrections + 1 : 0),
-    );
+    props.setProperty(SHEET_LAST_WRITE_PROP, board.date + ' ' + board.generated_at);
     Logger.log('archiveDay: ' + rows.length + ' rows for ' + board.date + (replacing ? ' (replaced)' : ''));
     return replacing ? 'replaced' : 'appended';
   } catch (err) {
@@ -174,45 +189,53 @@ function growFor(sheet, lastNeeded) {
 }
 
 /**
- * Removes a date's rows so they can be rewritten. They are contiguous: rows
- * are only ever appended, one trading day at a time, and `validateBoard`
+ * One date's block: where it starts, how long it is, and what is in it. The
+ * rows are contiguous — days are only ever appended, and `validateBoard`
  * refuses a board whose trading date went backwards.
  */
-function dropDay(sheet, date) {
+function readDay(sheet, date, zone) {
   var lastRow = sheet.getLastRow();
-  if (lastRow < 2) return 0;
-  var dates = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
-  var first = -1;
-  var count = 0;
-  for (var i = 0; i < dates.length; i++) {
-    if (cellDate(dates[i][0]) !== date) continue;
-    if (first === -1) first = i + 2; // 1-based, past the header
-    count++;
+  if (lastRow < 2) return { first: 0, count: 0, rows: [] };
+  var values = sheet.getRange(2, 1, lastRow - 1, SHEET_HEADER.length).getValues();
+  var first = 0;
+  var rows = [];
+  for (var i = 0; i < values.length; i++) {
+    if (cellDate(values[i][0], zone) !== date) continue;
+    if (!first) first = i + 2; // 1-based, past the header
+    rows.push(values[i]);
   }
-  if (count) sheet.deleteRows(first, count);
-  return count;
+  return { first: first, count: rows.length, rows: rows };
+}
+
+/** Whether a day's archived rows already say what this crawl would write. */
+function sameRows(existing, rows) {
+  if (existing.length !== rows.length) return false;
+  for (var i = 0; i < rows.length; i++) {
+    for (var c = 0; c < SHEET_HEADER.length; c++) {
+      // Through strings: a number read back from a cell is a number, and the
+      // one written may be either.
+      if (String(existing[i][c]) !== String(rows[i][c])) return false;
+    }
+  }
+  return true;
 }
 
 /**
  * A date cell as `yyyy-MM-dd`. Text comes back as itself; a cell Sheets parsed
- * as a date comes back as a `Date`, and its calendar parts are already in the
- * script's timezone, which is the one the manifest pins.
+ * as a date comes back as a `Date` — an instant, which is only a calendar date
+ * in some timezone, and the one that decides is the SPREADSHEET's. Reading it
+ * in the script's would put a sheet kept east of Asia/Taipei on the day
+ * before, and `readDay` would find nothing to replace.
  */
-function cellDate(value) {
+function cellDate(value, zone) {
   if (!value) return '';
   if (typeof value.getFullYear !== 'function') return String(value);
-  var month = value.getMonth() + 1;
-  var day = value.getDate();
-  return value.getFullYear() + '-' + (month < 10 ? '0' : '') + month + '-' + (day < 10 ? '0' : '') + day;
+  return Utilities.formatDate(value, zone, 'yyyy-MM-dd');
 }
 
-/** `"<ISO date> <generated_at> <corrections>"`, or null before the first write. */
+/** `"<ISO date> <generated_at>"`, or null before the first write. */
 function parseSheetWrite(value) {
   if (!value) return null;
   var parts = String(value).split(' ');
-  return {
-    date: parts[0] || '',
-    generated_at: parts[1] || '',
-    corrections: parseInt(parts[2] || '0', 10) || 0,
-  };
+  return { date: parts[0] || '', generated_at: parts[1] || '' };
 }

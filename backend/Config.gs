@@ -180,19 +180,15 @@ var GH_DISPATCH_FAIL_BACKOFF_MS = 5 * 60 * 1000;
 // this property; unset, the whole thing is off and nothing changes.
 var HISTORY_SHEET_ID_PROP = 'HISTORY_SHEET_ID';
 // The last trading day archived, as "<ISO date> <generated_at>". The date says
-// whether today is already written; the timestamp says whether the numbers
-// under it have moved since.
+// whether that day is already written; the timestamp bounds how often a
+// revisit is worth looking at, which is all the clock decides — what replaces
+// a day is the rows differing (`archiveDay`).
 var SHEET_LAST_WRITE_PROP = 'veggie_sheet_last_write';
-// How much later a crawl of the SAME trading day counts as a correction
-// rather than the 4-hourly refresh revisiting it. MOA completes a day's
-// closing prices through the evening, so the last crawl of a day is the one
-// worth keeping.
+// How often a crawl of the SAME trading day is worth comparing against what
+// was archived. MOA completes a day's closing prices through the evening, so
+// a later crawl can carry better numbers; inside this window it is the
+// 4-hourly refresh revisiting the same day, and is skipped without a read.
 var SHEET_CORRECTION_MS = 6 * 60 * 60 * 1000;
-// And how many such corrections a date may have. The board keeps a trading
-// date until the next one publishes, so across a weekend or a holiday an
-// uncapped rule would re-replace the same unchanged day every few hours for
-// as long as the break lasts.
-var SHEET_MAX_CORRECTIONS = 1;
 
 // Plausibility guard (`Validate.gs`). The refresh used to reject exactly one
 // thing — an EMPTY board — so a throttled crawl or a MOA unit change would
