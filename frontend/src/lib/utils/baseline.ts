@@ -23,3 +23,20 @@ export function trustedBaseline(item: ProduceItem): number | null {
   const vs = item.vs_baseline_percent;
   return typeof vs === 'number' && Number.isFinite(vs) ? vs : null;
 }
+
+/**
+ * Today against the same weeks last year (#22 §2), or null when that
+ * comparison cannot be trusted or is not there. The same rule as
+ * `trustedBaseline`: a day the guard flagged is compared with nothing.
+ *
+ * Both numbers or neither — the sentence needs the price and the difference,
+ * and a half-sent pair is a backend defect, not something to render around.
+ */
+export function trustedLastYear(item: ProduceItem): { price: number; percent: number } | null {
+  if (item.suspect === true) return null;
+  const price = item.last_year_price;
+  const percent = item.vs_last_year_percent;
+  if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) return null;
+  if (typeof percent !== 'number' || !Number.isFinite(percent)) return null;
+  return { price, percent };
+}

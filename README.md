@@ -530,6 +530,21 @@ from MOA's range queries:
   on purpose — after deleting rows by hand — delete the `veggie_sheet_backfill`
   property.
 
+#### Reading it: the same weeks last year
+
+The archive's first reader is 「比去年同期」 (#22 §2). Once per trading date
+the refresh reads the archived blend rows within a week either side of that
+date a year back — column A of the year tab (two, across New Year) to find
+them, then only those rows — and takes each crop's median. With at least
+three archived days it attaches `last_year_price` (元/台斤) and
+`vs_last_year_percent`, wholesale against wholesale like the baseline. The
+medians are kept in one property for the day, so the other refreshes read
+nothing; an empty result (the backfill has not reached back a year yet) is
+asked again after six hours. It is shown as one line in the drawer and on no
+card: `drawer_opened` carries `has_last_year`, and whether it earns a badge
+is for those numbers to say. `diag.sheet_history.year_ago` reports which
+trading date it compares and how many crops it covers.
+
 Rows land in the order they were written, not in date order — the live days,
 then each window newest-first. Nothing reads the tab in order (the readers
 group by date), so sorting column A in the Sheets UI is safe at any time: the
@@ -766,8 +781,8 @@ GET {WEB_APP_URL}/exec
 }
 ```
 `avg_price` is `元/公斤`. `catty_price`, the three `retail_*` fields,
-`baseline_price` and both `varieties[].catty_price` / `varieties[].retail_price`
-are `元/台斤`.
+`baseline_price`, `last_year_price` and both `varieties[].catty_price` /
+`varieties[].retail_price` are `元/台斤`.
 `retail_estimated` is always `true` — see §4.
 
 **Every derived field is optional and clients must treat it as such**: an older
@@ -778,6 +793,7 @@ does not justify publishing.
 | --- | --- |
 | `retail_*` | the cached board predates the retail band |
 | `baseline_price`, `vs_baseline_percent` | fewer than 10 in-horizon observations for that crop (§5) |
+| `last_year_price`, `vs_last_year_percent` | no long-term archive configured, or fewer than 3 archived trading days for that crop within a week of this date a year back (§2) |
 | `varieties` | fewer than 2 varieties clear the share and volume thresholds (§5) |
 | `suspect` | the item's numbers are plausible; it appears only on an item the guard flagged (§2), whose change and baseline the client must then hide |
 

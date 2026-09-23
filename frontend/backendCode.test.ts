@@ -275,6 +275,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'SHEET_LAST_WRITE_PROP', 'SHEET_CORRECTION_MS',
     'handleSheetBackfill', 'sheetBackfillStep', 'backfillDays', 'fetchCompleteRows', 'archiveSummary',
     'SHEET_BACKFILL_PROP', 'SHEET_BACKFILL_FN', 'SHEET_BACKFILL_MAX_FAILURES', 'SHEET_BACKFILL_STALL_MS',
+    'readYearAgo', 'applyYearOverYear', 'YOY_PROP', 'YOY_EMPTY_RETRY_MS',
     'GH_DISPATCH_MIN_INTERVAL_MS', 'GH_DISPATCH_FAIL_BACKOFF_MS', 'GH_DISPATCH_PROP', 'GH_DISPATCH_OK_PROP',
     'validateBoard', 'markSuspects', 'readChunkedProp',
     'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
@@ -1915,7 +1916,9 @@ describe('long-term history in a Sheet', () => {
       expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('unconfigured');
       expect(openedIds).toEqual([]);
       expect(tabs.size).toBe(0);
-      expect(api.handleDiag().sheet_history).toEqual({ configured: false, last_write: null, backfill: null });
+      expect(api.handleDiag().sheet_history).toEqual({
+        configured: false, last_write: null, backfill: null, year_ago: null,
+      });
     });
 
     it('creates the year tab with its header and appends the day', () => {
@@ -3694,6 +3697,157 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       back.api.fetchCompleteRows(['甘藍'], '115.09.01', '115.09.04');
       expect(back.moa.requests).toHaveLength(1);
     });
+  });
+});
+
+describe('same weeks last year (#22 §2)', () => {
+  const SHEET_ID = '1AbCdEfGh_stub';
+  const HEADER = ['date', 'item', 'root', 'variety', 'avg_price_kg', 'volume_kg', 'markets', 'share_percent'];
+
+  /** ISO date `days` after the day one year before `roc`. */
+  const yearAgo = (roc: string, days = 0): string => {
+    const [y, m, d] = roc.split('.').map(Number);
+    const at = new Date(Date.UTC(y + 1911 - 1, m - 1, d + days));
+    return at.toISOString().slice(0, 10);
+  };
+  const blend = (date: string, item: string, price: number) => [date, item, item, '', price, 1000, 3, ''];
+  const variety = (date: string, item: string, name: string, price: number) => [date, item, item, name, price, '', '', 50];
+
+  /** A backend with an archive holding `rows`, split into year tabs. */
+  const archived = (rows: unknown[][], responses: Record<string, Row[]> = {}) => {
+    const back = loadBackend(responses);
+    back.props.set(back.api.HISTORY_SHEET_ID_PROP, SHEET_ID);
+    for (const r of rows) {
+      const year = String(r[0]).slice(0, 4);
+      if (!back.tabs.has(year)) back.tabs.set(year, { rows: [HEADER], maxRows: 100000, textColumnA: true });
+      back.tabs.get(year)?.rows.push(r);
+    }
+    return back;
+  };
+
+  it('does nothing until a sheet is configured', () => {
+    const back = loadBackend({ 甘藍: [row('甘藍-初秋', 20, 60000)] });
+    expect(back.api.readYearAgo('115.09.21')).toBeNull();
+    const cabbage = back.api.buildBoard().items.find((it: { name: string }) => it.name === '高麗菜');
+    expect(cabbage).not.toHaveProperty('last_year_price');
+    expect(back.openedIds).toEqual([]);
+  });
+
+  it('takes each item\'s median blend price over the week either side, a year back', () => {
+    const roc = '115.09.21';
+    const back = archived([
+      blend(yearAgo(roc, -6), '高麗菜', 20),
+      blend(yearAgo(roc, 0), '高麗菜', 30),
+      blend(yearAgo(roc, 5), '高麗菜', 25),
+      variety(yearAgo(roc, 0), '高麗菜', '初秋', 99), // a variety row, not the item
+      blend(yearAgo(roc, -8), '高麗菜', 100), // outside the window
+      blend(yearAgo(roc, 0), '番茄', 40), // two days: too few to say anything
+      blend(yearAgo(roc, 1), '番茄', 42),
+    ]);
+    expect(back.api.readYearAgo(roc)).toEqual({ 高麗菜: 25 });
+  });
+
+  it('puts both fields on the board, wholesale against wholesale', () => {
+    const roc = rocDate(0);
+    const back = archived(
+      [0, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)),
+      { 甘藍: [row('甘藍-初秋', 30, 60000)] },
+    );
+    const board = back.api.buildBoard();
+    const cabbage = board.items.find((it: { name: string }) => it.name === '高麗菜');
+    expect(cabbage.last_year_price).toBe(15); // 25 元/公斤 × 0.6
+    expect(cabbage.vs_last_year_percent).toBe(20); // 30 vs 25
+
+    const result = BoardResponseSchema.safeParse(board);
+    expect(result.success ? [] : result.error.issues).toEqual([]);
+  });
+
+  it('reads the Sheet once a trading day, not every refresh', () => {
+    const roc = '115.09.21';
+    const back = archived([0, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)));
+    back.api.readYearAgo(roc);
+    const reads = back.sheetReads.length;
+
+    expect(back.api.readYearAgo(roc)).toEqual({ 高麗菜: 25 });
+    expect(back.sheetReads).toHaveLength(reads);
+    back.api.readYearAgo('115.09.22'); // the next trading date asks again
+    expect(back.sheetReads.length).toBeGreaterThan(reads);
+  });
+
+  it('asks again later when the archive did not reach back a year yet', () => {
+    // The backfill may still be walking there.
+    const roc = '115.09.21';
+    const back = archived([]);
+    back.tabs.set('2025', { rows: [HEADER, blend('2025-01-01', '高麗菜', 1)], maxRows: 1000, textColumnA: true });
+    expect(back.api.readYearAgo(roc)).toEqual({});
+    const reads = back.sheetReads.length;
+
+    back.api.readYearAgo(roc);
+    expect(back.sheetReads).toHaveLength(reads); // not every refresh…
+
+    const kept = JSON.parse(back.props.get(back.api.YOY_PROP) as string);
+    kept.at = new Date(Date.now() - back.api.YOY_EMPTY_RETRY_MS - 60_000).toISOString();
+    back.props.set(back.api.YOY_PROP, JSON.stringify(kept));
+    back.api.readYearAgo(roc);
+    expect(back.sheetReads.length).toBeGreaterThan(reads); // …but not never
+  });
+
+  it('reads across New Year from both tabs', () => {
+    const roc = '115.01.03'; // a year back is 2025-01-03: the window starts in 2024
+    const back = archived([
+      blend('2024-12-30', '高麗菜', 20),
+      blend('2024-12-31', '高麗菜', 22),
+      blend('2025-01-02', '高麗菜', 24),
+    ]);
+    expect(back.api.readYearAgo(roc)).toEqual({ 高麗菜: 22 });
+  });
+
+  it('finds the window\'s days wherever they sit, and reads only them', () => {
+    // The backfill writes windows newest-first, so a week's days can be in
+    // more than one run of rows, with other days between.
+    const roc = '115.09.21';
+    const filler = Array.from({ length: 300 }, (_, i) => blend(`2025-03-${String(i % 28 + 1).padStart(2, '0')}`, '番茄', 1));
+    const back = archived([
+      blend(yearAgo(roc, 3), '高麗菜', 30),
+      ...filler.slice(0, 150),
+      blend(yearAgo(roc, -3), '高麗菜', 10),
+      blend(yearAgo(roc, -2), '高麗菜', 20),
+      ...filler.slice(150),
+    ]);
+    back.cellsRead.count = 0;
+    expect(back.api.readYearAgo(roc)).toEqual({ 高麗菜: 20 });
+    expect(back.cellsRead.count).toBeLessThan(303 + 3 * 8 + 1); // column A, then the three rows
+  });
+
+  it('never costs the board anything when the Sheet cannot be read', () => {
+    const back = archived([], { 甘藍: [row('甘藍-初秋', 30, 60000)] });
+    back.breakSheet();
+    const board = back.api.buildBoard();
+    expect(board.items.length).toBeGreaterThan(0);
+    expect(back.props.has(back.api.YOY_PROP)).toBe(false); // not kept: the next refresh asks again
+  });
+
+  it('asks again when pointed at another spreadsheet', () => {
+    const roc = '115.09.21';
+    const back = archived([0, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)));
+    back.api.readYearAgo(roc);
+    const reads = back.sheetReads.length;
+    back.props.set(back.api.HISTORY_SHEET_ID_PROP, 'another');
+    back.api.readYearAgo(roc);
+    expect(back.sheetReads.length).toBeGreaterThan(reads);
+  });
+
+  it('says in diag which trading date it compares and how many items it covers', () => {
+    const roc = '115.09.21';
+    const back = archived([0, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)));
+    back.api.readYearAgo(roc);
+    expect(back.api.handleDiag().sheet_history.year_ago).toMatchObject({ date: roc, items: 1 });
+  });
+
+  it('leaves an item without a year-ago median as it was', () => {
+    const items = [{ name: '高麗菜', avg_price: 30 }, { name: '番茄', avg_price: 40 }];
+    loadBackend().api.applyYearOverYear(items, { 高麗菜: 25 });
+    expect(items[1]).toEqual({ name: '番茄', avg_price: 40 });
   });
 });
 

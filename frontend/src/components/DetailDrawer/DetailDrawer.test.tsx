@@ -58,6 +58,7 @@ describe('DetailDrawer', () => {
       expect(gtag).toHaveBeenCalledWith('event', 'drawer_opened', {
         has_varieties: false,
         has_baseline: false,
+        has_last_year: false,
         has_retail: true,
       });
       expect(gtag).toHaveBeenCalledTimes(1);
@@ -157,6 +158,78 @@ describe('DetailDrawer', () => {
     it('omits the caption when the item has no baseline', () => {
       render(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
       expect(screen.queryByText(/近一個月批發中位/)).not.toBeInTheDocument();
+    });
+  });
+  describe('same weeks last year', () => {
+    // Wholesale, like the baseline line above it, and on no card yet: #22
+    // puts it in the drawer until the drawer's numbers say it earns more.
+    it('says what the same weeks cost a year ago, and how today compares', () => {
+      render(
+        <DetailDrawer
+          isOpen
+          onClose={() => {}}
+          item={{ ...withRetail, last_year_price: 16.2, vs_last_year_percent: -13.6 }}
+          allProduceItems={mockAllProduceItems}
+        />,
+      );
+      expect(screen.getByText(/去年此時批發約 16.2 元\/台斤（今日低 14%）/)).toBeInTheDocument();
+    });
+
+    it('says 高 when dearer and 持平 at zero', () => {
+      const { unmount } = render(
+        <DetailDrawer
+          isOpen
+          onClose={() => {}}
+          item={{ ...withRetail, last_year_price: 16, vs_last_year_percent: 31.5 }}
+          allProduceItems={mockAllProduceItems}
+        />,
+      );
+      expect(screen.getByText(/今日高 32%/)).toBeInTheDocument();
+      unmount();
+      render(
+        <DetailDrawer
+          isOpen
+          onClose={() => {}}
+          item={{ ...withRetail, last_year_price: 16, vs_last_year_percent: 0 }}
+          allProduceItems={mockAllProduceItems}
+        />,
+      );
+      expect(screen.getByText(/今日持平/)).toBeInTheDocument();
+    });
+
+    it('says nothing when there is no year-ago price, or only half of one', () => {
+      const { unmount } = render(
+        <DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />,
+      );
+      expect(screen.queryByText(/去年此時/)).not.toBeInTheDocument();
+      unmount();
+      render(
+        <DetailDrawer
+          isOpen
+          onClose={() => {}}
+          item={{ ...withRetail, last_year_price: 16 }}
+          allProduceItems={mockAllProduceItems}
+        />,
+      );
+      expect(screen.queryByText(/去年此時/)).not.toBeInTheDocument();
+    });
+
+    it('reports that the item has one when the drawer opens', () => {
+      const gtag = vi.fn();
+      vi.stubGlobal('gtag', gtag);
+      try {
+        render(
+          <DetailDrawer
+            isOpen
+            onClose={() => {}}
+            item={{ ...withRetail, last_year_price: 16, vs_last_year_percent: 5 }}
+            allProduceItems={mockAllProduceItems}
+          />,
+        );
+        expect(gtag).toHaveBeenCalledWith('event', 'drawer_opened', expect.objectContaining({ has_last_year: true }));
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
   });
   describe('variety breakdown', () => {
@@ -301,6 +374,18 @@ describe('DetailDrawer', () => {
     it('drops the baseline sentence even though the fields are present', () => {
       render(<DetailDrawer isOpen onClose={() => {}} item={flagged} allProduceItems={mockAllProduceItems} />);
       expect(screen.queryByText(/近一個月批發中位/)).not.toBeInTheDocument();
+    });
+
+    it('drops the year-ago sentence too — it compares today with another day', () => {
+      render(
+        <DetailDrawer
+          isOpen
+          onClose={() => {}}
+          item={{ ...flagged, last_year_price: 16.2, vs_last_year_percent: -13.6 }}
+          allProduceItems={mockAllProduceItems}
+        />,
+      );
+      expect(screen.queryByText(/去年此時/)).not.toBeInTheDocument();
     });
   });
 });

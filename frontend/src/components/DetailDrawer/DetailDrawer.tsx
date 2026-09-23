@@ -10,7 +10,7 @@ import type { ProduceItem } from '../../types/produce';
 import { fetchProduceTrend } from '../../services/api';
 import { itemUrl } from '../../lib/urlState';
 import { marketPrice } from '../../lib/utils/market-price';
-import { trustedBaseline } from '../../lib/utils/baseline';
+import { trustedBaseline, trustedLastYear } from '../../lib/utils/baseline';
 import { track } from '../../lib/analytics';
 
 // recharts is ~half the initial JS and serves exactly one element inside this
@@ -99,12 +99,18 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
   const hasVarieties = (item.varieties?.length ?? 0) > 0;
   const vsBaseline = trustedBaseline(item);
   const hasBaseline = vsBaseline !== null;
+  const lastYear = trustedLastYear(item);
+  const hasLastYear = lastYear !== null;
   const hasRetail = marketPrice(item) != null;
 
   useEffect(() => {
     if (!trendKey) return;
-    track('drawer_opened', { has_varieties: hasVarieties, has_baseline: hasBaseline, has_retail: hasRetail });
-  }, [trendKey, hasVarieties, hasBaseline, hasRetail]);
+    // `has_last_year` is how #22 decides whether the comparison earns a place
+    // on the card too: it is shown here only until that is measured.
+    track('drawer_opened', {
+      has_varieties: hasVarieties, has_baseline: hasBaseline, has_last_year: hasLastYear, has_retail: hasRetail,
+    });
+  }, [trendKey, hasVarieties, hasBaseline, hasLastYear, hasRetail]);
 
   // Phones hand the sentence to LINE through the native sheet; desktops, which
   // have no sheet, get the link on the clipboard. Only the completed path is
@@ -341,6 +347,17 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
                     ? `高 ${Math.round(vsBaseline)}%`
                     : '持平'}
                 ；卡片徽章與「划算優先」排序以此為準。
+              </p>
+            )}
+            {lastYear !== null && (
+              <p className="mt-1 text-xs text-stone">
+                去年此時批發約 {lastYear.price} 元/台斤（今日
+                {lastYear.percent < 0
+                  ? `低 ${Math.round(Math.abs(lastYear.percent))}%`
+                  : lastYear.percent > 0
+                    ? `高 ${Math.round(lastYear.percent)}%`
+                    : '持平'}
+                ）。
               </p>
             )}
           </div>

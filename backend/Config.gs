@@ -253,6 +253,20 @@ var SHEET_BACKFILL_MAX_HOLES = 40;
 var SHEET_PRESENT_CACHE_PREFIX = 'veggie_sheet_present_';
 var SHEET_PRESENT_CACHE_TTL = 6 * 60 * 60; // seconds; the platform maximum
 var SHEET_FROZEN_CACHE_PREFIX = 'veggie_sheet_frozen_';
+
+// 「比去年同期」 (#22 §2): each item against its own price in the same weeks a
+// year earlier, from the archive. The median over the trading days within
+// this many calendar days either side of the date a year back — a window, not
+// the one day, because a single day a year ago is one market's weather.
+var YOY_WINDOW_DAYS = 7;
+var YOY_MIN_DAYS = 3;            // fewer archived days than this → nothing published
+// Computed once per trading date and kept here, so a refresh reads the Sheet
+// once a day rather than every four hours: "<roc date>" plus the medians.
+var YOY_PROP = 'veggie_yoy';
+// A result with nothing in it — the archive does not reach back a year yet, or
+// the backfill is still walking there — is tried again after this long, not
+// only on the next trading date.
+var YOY_EMPTY_RETRY_MS = 6 * 60 * 60 * 1000;
 // What the archive holds, as the status request reports it. Counting it reads
 // column A of every year tab, and an operator watching a job polls.
 var SHEET_SUMMARY_CACHE_KEY = 'veggie_sheet_summary';

@@ -1358,3 +1358,142 @@ function publicBackfill(job) {
     updated_at: job.updated_at
   };
 }
+
+
+// --- Same weeks last year (#22 §2) ---
+//
+// The archive's first reader. Everything here is optional in the same way the
+// archive is: no `HISTORY_SHEET_ID`, no fields; a Sheet that cannot be read,
+// no fields; an item with too few days a year back, no fields for that item.
+// The board never waits on it and never fails for it.
+
+/**
+ * Attaches `last_year_price` (元/台斤) and `vs_last_year_percent` to the items
+ * the archive has a year-ago median for, the way `applyBaselines` attaches the
+ * 28-day ones. Wholesale against wholesale: the archive holds `avg_price`.
+ */
+function applyYearOverYear(items, medians) {
+  if (!medians) return;
+  for (var i = 0; i < items.length; i++) {
+    var base = medians[items[i].name];
+    if (!(base > 0)) continue;
+    items[i].last_year_price = round1(base * CATTY_PER_KG);
+    items[i].vs_last_year_percent = round1(((items[i].avg_price - base) / base) * 100);
+  }
+}
+
+/**
+ * Each item's median 元/公斤 over the archived trading days within
+ * `YOY_WINDOW_DAYS` of this trading date one year back, or null when there is
+ * no archive to ask. Computed once per trading date and kept in a property;
+ * an empty answer is asked again after `YOY_EMPTY_RETRY_MS`. Never throws.
+ */
+function readYearAgo(boardRoc) {
+  var props;
+  var sheetId;
+  try {
+    props = PropertiesService.getScriptProperties();
+    sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
+  } catch (err) {
+    Logger.log('readYearAgo: properties unavailable: ' + err);
+    return null;
+  }
+  if (!sheetId || !boardRoc) return null;
+
+  var kept = parseYearAgo(props.getProperty(YOY_PROP));
+  if (kept && kept.date === boardRoc && kept.sheet === sheetId) {
+    var empty = !Object.keys(kept.items).length;
+    if (!empty || Date.now() - Date.parse(kept.at) < YOY_EMPTY_RETRY_MS) return kept.items;
+  }
+  var medians;
+  try {
+    medians = yearAgoMedians(SpreadsheetApp.openById(sheetId), boardRoc);
+  } catch (err) {
+    // Not kept: the next refresh asks again, rather than the day going
+    // without a comparison because one read failed.
+    Logger.log('readYearAgo failed: ' + err);
+    return null;
+  }
+  try {
+    props.setProperty(YOY_PROP, JSON.stringify({
+      date: boardRoc, sheet: sheetId, at: new Date().toISOString(), items: medians
+    }));
+  } catch (err) {
+    Logger.log('readYearAgo: not kept: ' + err); // asked again next refresh
+  }
+  return medians;
+}
+
+function parseYearAgo(raw) {
+  if (!raw) return null;
+  try {
+    var kept = JSON.parse(raw);
+    return kept && kept.items ? kept : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * The medians themselves: the blend rows (variety empty) of the archived days
+ * in the window, per item. Suspect days never reached the archive, so there
+ * is nothing to filter here.
+ *
+ * Column A of each year tab the window touches is read to find the window's
+ * rows, and then only those rows — in the runs they sit in, since the
+ * backfill writes days in its own order. A year tab is ~50k rows.
+ */
+function yearAgoMedians(spreadsheet, boardRoc) {
+  var target = rocToDate(boardRoc);
+  target.setFullYear(target.getFullYear() - 1);
+  var from = rocToISO(shiftROC(dateToROC(target), -YOY_WINDOW_DAYS));
+  var to = rocToISO(shiftROC(dateToROC(target), YOY_WINDOW_DAYS));
+  var zone = spreadsheet.getSpreadsheetTimeZone();
+  var years = from.substring(0, 4) === to.substring(0, 4) ? [from.substring(0, 4)] : [from.substring(0, 4), to.substring(0, 4)];
+
+  var prices = {};
+  var days = {};
+  for (var y = 0; y < years.length; y++) {
+    var sheet = spreadsheet.getSheetByName(years[y]);
+    if (!sheet) continue;
+    var last = sheet.getLastRow();
+    if (last < 2) continue;
+    var cells = sheet.getRange(2, 1, last - 1, 1).getValues();
+    var runs = [];
+    for (var i = 0; i < cells.length; i++) {
+      var day = cellDate(cells[i][0], zone);
+      if (day < from || day > to) continue;
+      var row = i + 2;
+      var run = runs[runs.length - 1];
+      if (run && run.last === row - 1) {
+        run.last = row;
+      } else {
+        runs.push({ first: row, last: row });
+      }
+    }
+    for (var r = 0; r < runs.length; r++) {
+      var values = sheet.getRange(runs[r].first, 1, runs[r].last - runs[r].first + 1, SHEET_HEADER.length).getValues();
+      for (var v = 0; v < values.length; v++) {
+        var cells8 = values[v];
+        if (cells8[3] !== '' && cells8[3] !== null) continue; // a variety row
+        var price = Number(cells8[4]);
+        if (!(price > 0)) continue;
+        var name = String(cells8[1]);
+        (prices[name] = prices[name] || []).push(price);
+        (days[name] = days[name] || {})[cellDate(cells8[0], zone)] = true;
+      }
+    }
+  }
+  var out = {};
+  Object.keys(prices).forEach(function (name) {
+    if (Object.keys(days[name]).length < YOY_MIN_DAYS) return;
+    out[name] = round1(median(prices[name]));
+  });
+  return out;
+}
+
+/** The kept year-ago reference as `diag` publishes it: when, and how many. */
+function publicYearAgo(raw) {
+  var kept = parseYearAgo(raw);
+  return kept ? { date: kept.date, at: kept.at, items: Object.keys(kept.items).length } : null;
+}

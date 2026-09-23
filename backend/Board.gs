@@ -83,6 +83,7 @@ function buildBoard() {
 
   var items = boardCards(today, prev);
   applyBaselines(items, readHistory(), dates.latest);
+  applyYearOverYear(items, readYearAgo(dates.latest));
 
   return {
     type: 'board',
