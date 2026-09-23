@@ -226,7 +226,8 @@ Two further robustness measures: `fetchRootRows()` retries roots that came back
 empty once, because a throttled 13-request batch used to drop a whole slice of
 the board (including 高麗菜) without any error; and `writeChunkedProp()` splits
 the ~34 KB board — and the price history — across numbered `ScriptProperties`
-chunks, since a single property value is capped at 9 KB.
+chunks, since a single property value is capped at 9 KB — cut at 8000 UTF-8
+bytes, not characters, since a crop's name takes three bytes a character.
 
 ### The search path: answer, refuse, or crawl
 
@@ -544,7 +545,8 @@ archived), so a window with more on one side — a backfill that stopped
 part-way, a gap, a closure — cannot lean to that week. With at least two on
 each side, a crop gets
 `last_year_price` (元/台斤) and `vs_last_year_percent`, wholesale against
-wholesale like the baseline. A tab sorted by another column is reported as
+wholesale like the baseline. A window spread too thin over the tab to read
+in a few calls — a tab sorted by another column, most likely — is reported as
 `scattered` in `diag` rather than read around.
 
 The read is the refresh's **last** step, after the board is stored and its
@@ -553,24 +555,56 @@ timeout there costs only the comparison. The board is built with the
 medians kept from the last read, which after a new trading date are those of
 a window a day or two older: a ±7-day median barely moves. They are read
 again once a day; every six hours while a backfill that reaches the window
-runs, or after a tab was found out of date order; and as soon as a backfill
+runs, or after a tab was found too spread to read; and as soon as a backfill
 has finished since the last read — and
 nothing is published for a window a running backfill has not finished
 walking through, whose later days alone would pass for 「去年此時」. A
 refresh that has already run four minutes leaves the read to the next one,
-and `diag.sheet_history.year_ago.skipped_at` says so. It is shown as one line in the drawer and on no
+and `diag.sheet_history.year_ago.skipped_at` says so, with `skipped` saying
+why: `late`, or `failed` (the Sheet unreachable, or the history lock busy past
+the readers' five-second wait). It is shown as one line in the drawer and on no
 card: `drawer_opened` carries `has_last_year`, and whether it earns a badge
 is for those numbers to say. `diag.sheet_history.year_ago` reports which
 trading date it compares and how many crops it covers.
+
+#### Reading it: each variety against its own month
+
+The drawer breaks a blended price into its varieties, and could say what each
+costs today but not whether that is cheap *for that variety*: the 28-day
+baseline is the blend's, and 綠竹筍 at twice 麻竹筍 is not "expensive" (#22 §3).
+The archive keeps each variety's own row a day, so each gets its own median —
+over the item baseline's days (the item's most recent 28 archived trading days
+within the 45 before the board's date, the day itself left out). A variety's
+row is archived only on days the board broke the item down, which takes two
+varieties past the share and volume floors, so a crop nearly all one variety
+has rows for it only on a few contested days; a variety gets a median only
+when it was listed on at least half those 28 days, and ten at least. A
+variety just in season therefore waits a fortnight or so: from these rows it
+cannot be told from a dominant one only lately broken down. The
+row shows 「批發比近月低/高 N%」 as `varieties[].vs_baseline_percent` —
+wholesale, in 元/公斤 as the archive holds it, since the row leads with a
+retail estimate — hidden on a
+suspect day like everything that compares days. It is read exactly as the
+year-ago medians are: the refresh's last step, kept per trading date (chunked
+— a hundred items' varieties are more than one property holds), applied by
+the next build, read again on the same terms, the live year's tab under the
+lock — and not read while a backfill is still walking through the span, whose
+later days alone would give a fortnight's median as the month's
+(`waiting_for_backfill`). `diag.sheet_history.variety_baseline` reports what it covers, and a
+read left undone the same way — `skipped` also `not kept` when the property
+store would not take the result.
 
 Rows land in the order they were written, not in date order — the live days,
 then each window newest-first. Nothing reads the tab in order (the readers
 group by date), so sorting column A in the Sheets UI is safe at any time: the
 header row is frozen (the backfill freezes tabs the live archive made before
 it did), so it stays on row 1, and a sort by date keeps each
-day's rows together, which is all the correction path relies on. (Sort by any
-other column and a later correction reports the day `scattered` and leaves
-it alone.)
+day's rows together, which is all the correction path and the readers rely
+on. (Sort by any other column and a later correction reports the day
+`scattered` and leaves it alone. A reader checks every row's date, so order
+matters to it only as cost: a span it would need more than
+`ARCHIVE_MAX_READS` (20) separate reads for — a block an item — is reported
+`scattered` rather than read.)
 
 
 ### Static board mirror
@@ -813,6 +847,7 @@ does not justify publishing.
 | `baseline_price`, `vs_baseline_percent` | fewer than 10 in-horizon observations for that crop (§5) |
 | `last_year_price`, `vs_last_year_percent` | no long-term archive configured, or fewer than two archived trading days for that crop on either side of this date a year back, within a week of it (§2) |
 | `varieties` | fewer than 2 varieties clear the share and volume thresholds (§5) |
+| `varieties[].vs_baseline_percent` | no long-term archive configured, or fewer than 10 archived days for that variety within the 45 days before this date (§2) |
 | `suspect` | the item's numbers are plausible; it appears only on an item the guard flagged (§2), whose change, baseline and year-ago comparison the client must then hide — everything that compares today with another day |
 
 `date` is the trading date; `generated_at` is when the backend crawled. See

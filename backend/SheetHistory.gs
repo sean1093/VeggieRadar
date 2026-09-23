@@ -241,7 +241,7 @@ function readDay(sheet, date, zone) {
  * The runs of consecutive rows whose date lies in [from, to], 1-based, found
  * by reading column A alone: a backfilled year is ~50k rows, and all eight
  * columns of it would be 400k cells read to use a few hundred. The one way
- * this archive locates a day, for the correction path and the year-ago read.
+ * this archive locates a day, for the correction path and the readers.
  */
 function findRuns(sheet, from, to, zone) {
   var lastRow = sheet.getLastRow();
@@ -252,7 +252,7 @@ function findRuns(sheet, from, to, zone) {
     var day = cellDate(cells[i][0], zone);
     // Text that sorts between two dates (one typed with a trailing space) is
     // let into a run on purpose: dropping it would split the run around it,
-    // and the second read checks every row's date anyway (`readYearAgoTab`);
+    // and the second read checks every row's date anyway (`scanTab`);
     // `readDay` matches one exact date, which such text never is.
     if (day < from || day > to) continue;
     var row = i + 2; // past the header
@@ -1417,9 +1417,7 @@ function keptYearAgo(boardRoc) {
     var props = PropertiesService.getScriptProperties();
     var sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
     if (!sheetId || !boardRoc) return null;
-    var kept = parseYearAgo(props.getProperty(YOY_PROP));
-    if (!kept || kept.sheet !== sheetId) return null;
-    return keptApplies(kept, boardRoc) ? kept.items : null;
+    return keptItemsFor(parseYearAgo(props.getProperty(YOY_PROP)), sheetId, boardRoc);
   } catch (err) {
     Logger.log('keptYearAgo: ' + err);
     return null;
@@ -1443,27 +1441,14 @@ function refreshYearAgo(boardRoc, startedAt) {
     var kept = parseYearAgo(props.getProperty(YOY_PROP));
     var job = parseSheetBackfill(props.getProperty(SHEET_BACKFILL_PROP));
     var span = yearAgoWindow(boardRoc);
-    var ours = backfillReaches(job, sheetId, span);
-    var filling = backfillActive(job, sheetId, span);
-    if (kept && kept.date === boardRoc && kept.sheet === sheetId) {
-      // Six hours while such a backfill runs, a day otherwise — unless one has
-      // FINISHED since this was read: an empty answer read before a backfill
-      // must not outlive it by a day. (A running one bumps its clock every
-      // link, so "written since" would mean every refresh.)
-      var finishedSince = ours && job.status !== 'running' && Date.parse(job.updated_at || '') > Date.parse(kept.at);
-      // A tab found out of date order is looked at again as soon, too: its
-      // fix is a re-sort by hand, which nothing else here would notice.
-      var soon = filling || kept.scattered;
-      if (!finishedSince && Date.now() - Date.parse(kept.at) < (soon ? YOY_SOON_MS : YOY_KEEP_MS)) {
-        return kept.items;
-      }
-    }
+    if (keptStillFresh(kept, boardRoc, sheetId, job, span)) return kept.items;
     if (backfillHoldsWindow(job, sheetId, span)) {
       // A backfill still walking through the window has written only its
       // newer days, and a median of those would be published as 「去年此時」.
       // Nothing is read, and nothing kept: kept, an empty answer would
       // outlive the backfill. Every refresh asks again, which costs a
-      // property; the kept medians of an earlier date stand meanwhile.
+      // property; the kept medians of an earlier date stand meanwhile, and
+      // `diag` says it waits (`noteReaderState`).
       return {};
     }
     if (startedAt && Date.now() - startedAt > YOY_START_BY_MS) {
@@ -1473,7 +1458,7 @@ function refreshYearAgo(boardRoc, startedAt) {
       // `diag`, or refreshes that are always this slow would leave the
       // comparison off with nothing to show why.
       Logger.log('refreshYearAgo: skipped, the refresh has run ' + Math.round((Date.now() - startedAt) / 1000) + ' s');
-      props.setProperty(YOY_SKIPPED_PROP, JSON.stringify({ at: new Date().toISOString(), sheet: sheetId }));
+      noteUnread(props, YOY_SKIPPED_PROP, sheetId, 'late');
       return null;
     }
     // The board's own year is the one tab read under the history lock — late
@@ -1484,21 +1469,26 @@ function refreshYearAgo(boardRoc, startedAt) {
         date: boardRoc, sheet: sheetId, at: new Date().toISOString(),
         items: found.items, scattered: found.scattered || undefined
       }));
-      props.deleteProperty(YOY_SKIPPED_PROP); // read after all: nothing left undone
     } catch (err) {
-      Logger.log('refreshYearAgo: not kept: ' + err); // read again next refresh
+      // Read again by the next refresh — and said in `diag`, or a full
+      // property store would have every refresh read with nothing showing why.
+      Logger.log('refreshYearAgo: not kept: ' + err);
+      noteUnread(props, YOY_SKIPPED_PROP, sheetId, 'not kept');
+      return found.items;
     }
+    clearUnread(props, YOY_SKIPPED_PROP); // read after all: nothing left undone
     return found.items;
   } catch (err) {
     // Not kept: the next refresh asks again, rather than the day going
-    // without a comparison because one read failed.
+    // without a comparison because one read failed — and `diag` says so.
     Logger.log('refreshYearAgo failed: ' + err);
+    noteUnread(props, YOY_SKIPPED_PROP, sheetId, 'failed'); // no sheet id read: nothing to note
     return null;
   }
 }
 
 /**
- * Whether a running backfill has yet to write part of the year-ago span: its
+ * Whether a running backfill has yet to write part of a reader's span: its
  * reach includes some of it, its cursor has not passed it, and that part is
  * not a range it skips as already written.
  */
@@ -1518,6 +1508,15 @@ function yearAgoWindow(boardRoc) {
   return { from: shiftISO(iso, -YOY_WINDOW_DAYS), to: shiftISO(iso, YOY_WINDOW_DAYS), day: iso };
 }
 
+/**
+ * What a reader kept, if it may be applied to a board of `boardRoc`: read
+ * from this spreadsheet, for a trading date near enough (`keptApplies`).
+ */
+function keptItemsFor(kept, sheetId, boardRoc) {
+  if (!kept || !kept.items || kept.sheet !== sheetId) return null;
+  return keptApplies(kept, boardRoc) ? kept.items : null;
+}
+
 /** Whether medians kept for one trading date may be applied to a board of another. */
 function keptApplies(kept, boardRoc) {
   var apart = Math.abs(rocToDate(boardRoc).getTime() - rocToDate(kept.date).getTime()) / 86400000;
@@ -1525,12 +1524,31 @@ function keptApplies(kept, boardRoc) {
 }
 
 /**
- * A backfill job of this spreadsheet whose reach takes in the year-ago span:
- * the only kind that can change what a read of it finds. One filling the last
- * month for the variety baseline cannot.
+ * Whether what a read of `span` kept for `boardRoc` still stands. A day,
+ * normally; six hours while a backfill that reaches the span runs, or after
+ * the tab was found too spread to read (`scattered`: its fix is a re-sort by hand, which
+ * nothing else here would notice) — and not a moment longer once such a
+ * backfill has FINISHED since the read: an answer read before a backfill must
+ * not outlive it by a day. (A running one bumps its clock every link, so
+ * "written since" would mean every refresh.) The rule for every reader of the
+ * archive the refresh keeps a result for.
+ */
+function keptStillFresh(kept, boardRoc, sheetId, job, span) {
+  if (!kept || kept.date !== boardRoc || kept.sheet !== sheetId) return false;
+  var finishedSince = backfillReaches(job, sheetId, span) && job.status !== 'running' &&
+    Date.parse(job.updated_at || '') > Date.parse(kept.at);
+  if (finishedSince) return false;
+  var soon = backfillActive(job, sheetId, span) || kept.scattered;
+  return Date.now() - Date.parse(kept.at) < (soon ? YOY_SOON_MS : YOY_KEEP_MS);
+}
+
+/**
+ * A backfill job of this spreadsheet whose range overlaps `span`: the only
+ * kind that can change what a read of it finds. One filling the last month
+ * cannot reach a year back, nor one filling 2023 the last month.
  */
 function backfillReaches(job, sheetId, span) {
-  return !!job && job.sheet === sheetId && job.from <= span.to;
+  return !!job && job.sheet === sheetId && job.from <= span.to && job.to >= span.from;
 }
 
 /** …and running: its links still writing, not stalled. */
@@ -1565,69 +1583,86 @@ function parseJson(raw) {
 
 /**
  * The medians themselves: the blend rows (variety empty) of the archived days
- * in the window, per item. Suspect days never reached the archive, so there
- * is nothing to filter here.
- *
- * Column A of each year tab the window touches is read to find the window's
- * rows, and then only those rows — in the runs they sit in, since the
- * backfill writes days in its own order. A year tab is ~50k rows. Past
- * `YOY_MAX_RUNS` the tab has been sorted by another column, which scatters
- * the week into hundreds of runs: that is reported as `scattered`, as
- * `readDay` does, rather than read around with a read of the whole tab.
- *
- * The caller holds the history lock only when the span reaches the board's
- * own year (see `refreshYearAgo`); everywhere else the tab is only appended
- * to. Dates are checked again on the second read all the same, for a sort by
- * hand in between — and anything that writes or deletes here would need the
- * lock taken for every span.
+ * in the window, per item — walked by `scanSpan`, which says which tab is read
+ * under the lock and which tabs are reported `scattered`. Suspect days never
+ * reached the archive, so there is nothing to filter here.
  *
  * An item needs `YOY_MIN_SIDE_DAYS` archived days on EACH side of the day a
  * year back, and its median is taken over the SAME number from each side —
- * the nearest ones — plus the day itself if archived. A window with more on
- * one side (a backfill that stopped part-way, a gap in MOA's data, a closure)
- * would otherwise lean to that week; it is not 「去年此時」. Only board
- * items are kept, rounded to the hundredth: the property holding them has a
- * size limit, and `diag` counts what the board can apply.
+ * the nearest ones — plus the day itself if archived (`yearAgoFromPrices`).
+ * Only board items are kept, rounded to the hundredth: the property holding
+ * them has a size limit, and `diag` counts what the board can apply.
  */
 function yearAgoMedians(spreadsheet, span, liveYear) {
-  var from = span.from;
-  var to = span.to;
-  var zone = spreadsheet.getSpreadsheetTimeZone();
-  var years = from.substring(0, 4) === to.substring(0, 4) ? [from.substring(0, 4)] : [from.substring(0, 4), to.substring(0, 4)];
-
   var prices = {};
-  for (var y = 0; y < years.length; y++) {
-    var sheet = spreadsheet.getSheetByName(years[y]);
-    if (!sheet) continue;
-    // The live year's tab under the history lock, and only it: the live path
-    // deletes and rewrites its day there, which would move rows between the
-    // two reads. Older tabs are only ever appended to.
-    var scattered = years[y] === liveYear
-      ? withHistoryLock(function () { return readYearAgoTab(sheet, span, zone, prices); })
-      : readYearAgoTab(sheet, span, zone, prices);
-    if (scattered) {
-      Logger.log('yearAgoMedians: ' + years[y] + ' is not in date order; not read');
-      return { items: {}, scattered: true };
-    }
-  }
+  var scattered = scanSpan(spreadsheet, span, liveYear, function (cells, date) {
+    if (cells[3] !== '' && cells[3] !== null) return; // a variety row
+    var price = Number(cells[4]);
+    if (!(price > 0)) return;
+    // One value per day: a day archived twice must not weigh twice. The row
+    // written last wins, since a later write is the likelier correction.
+    var name = String(cells[1]);
+    (prices[name] = prices[name] || {})[date] = price;
+  });
+  if (scattered) return { items: {}, scattered: true };
   return { items: yearAgoFromPrices(prices, span) };
 }
 
 /**
- * One year tab's rows in the span, added to `prices` (item → date → price).
- * @returns {boolean} true when the tab is out of date order and was not read.
+ * Every archived row dated in `span`, handed to `onRow(cells, isoDate)`, from
+ * each year tab it touches. The live year's tab is read under the history
+ * lock, and only it: the live path deletes and rewrites its day there, which
+ * would move rows between the two reads; older tabs are only ever appended
+ * to. The one way the archive's readers walk it.
+ * @returns {boolean} true when a tab is too spread to read (`scanTab`), and was not.
  */
-function readYearAgoTab(sheet, span, zone, prices) {
-  var runs = findRuns(sheet, span.from, span.to, zone);
-  if (runs.length > YOY_MAX_RUNS) return true;
-  // Runs close together are read in one call — the dates are checked row by
-  // row anyway — so a week split by a few live days is one round trip.
-  if (runs.length > 1) {
-    var wanted = 0;
-    for (var q = 0; q < runs.length; q++) wanted += runs[q].last - runs[q].first + 1;
-    var spanRows = runs[runs.length - 1].last - runs[0].first + 1;
-    if (spanRows <= wanted * 2 + YOY_MERGE_SLACK_ROWS) runs = [{ first: runs[0].first, last: runs[runs.length - 1].last }];
+function scanSpan(spreadsheet, span, liveYear, onRow) {
+  var zone = spreadsheet.getSpreadsheetTimeZone();
+  var first = span.from.substring(0, 4);
+  var last = span.to.substring(0, 4);
+  var years = first === last ? [first] : [first, last];
+  for (var y = 0; y < years.length; y++) {
+    var sheet = spreadsheet.getSheetByName(years[y]);
+    if (!sheet) continue;
+    var read = scanTab.bind(null, sheet, span, zone, onRow);
+    if (years[y] === liveYear ? withHistoryLock(read, READER_LOCK_WAIT_MS) : read()) {
+      Logger.log('scanSpan: ' + years[y] + ' holds the span too spread to read (sorted by another column?); not read');
+      return true;
+    }
   }
+  return false;
+}
+
+/**
+ * Runs close together read in one call — the dates are checked row by row
+ * anyway: each with the one before when at most `YOY_MERGE_SLACK_ROWS` rows
+ * lie between, so a span split by a few live days is one or two round trips
+ * under the lock, not one a day. Chained, that may read many rows of other
+ * days in one call; one read of a few thousand rows is still quicker than a
+ * round trip a day.
+ */
+function mergeRuns(runs) {
+  if (runs.length < 2) return runs;
+  var out = [{ first: runs[0].first, last: runs[0].last }];
+  for (var r = 1; r < runs.length; r++) {
+    var prev = out[out.length - 1];
+    if (runs[r].first - prev.last - 1 <= YOY_MERGE_SLACK_ROWS) prev.last = runs[r].last;
+    else out.push({ first: runs[r].first, last: runs[r].last });
+  }
+  return out;
+}
+
+/**
+ * One year tab's rows in the span, handed to `onRow`.
+ * @returns {boolean} true when the span would take more than `ARCHIVE_MAX_READS` reads, and was not read.
+ */
+function scanTab(sheet, span, zone, onRow) {
+  // Order is not what matters here — every row's date is checked on the second
+  // read, and the row written last per date wins — but what reading costs,
+  // under the lock: a tab sorted by another column spreads the span over a
+  // block per item, too far apart to read together.
+  var runs = mergeRuns(findRuns(sheet, span.from, span.to, zone));
+  if (runs.length > ARCHIVE_MAX_READS) return true;
   for (var r = 0; r < runs.length; r++) {
     var values = sheet.getRange(runs[r].first, 1, runs[r].last - runs[r].first + 1, SHEET_HEADER.length).getValues();
     for (var v = 0; v < values.length; v++) {
@@ -1636,13 +1671,7 @@ function readYearAgoTab(sheet, span, zone, prices) {
       // between the two would put other days on these rows.
       var date = cellDate(cells8[0], zone);
       if (!ISO_DAY.test(date) || date < span.from || date > span.to) continue;
-      if (cells8[3] !== '' && cells8[3] !== null) continue; // a variety row
-      var price = Number(cells8[4]);
-      if (!(price > 0)) continue;
-      var name = String(cells8[1]);
-      // One value per day: a day archived twice must not weigh twice. The row
-      // written last wins, since a later write is the likelier correction.
-      (prices[name] = prices[name] || {})[date] = price;
+      onRow(cells8, date);
     }
   }
   return false;
@@ -1687,17 +1716,13 @@ function publicYearAgo(raw, sheetId, skippedAt, boardRoc, jobRaw) {
     // Whether the board is being compared with these at all: kept medians too
     // far from its date are not applied (`keptYearAgo`).
     out.applied = !!boardRoc && keptApplies(kept, boardRoc);
-    // The tab was sorted by another column, and the week could not be found.
+    // The window lay too spread over the tab to read (`ARCHIVE_MAX_READS`):
+    // sorted by another column, most likely — a re-sort by date mends it.
     if (kept.scattered) out.scattered = true;
   }
-  // Held back while a backfill writes the window: without this, a long
-  // backfill would leave the comparison off with nothing saying why.
   var job = parseSheetBackfill(jobRaw);
   var span = boardRoc ? yearAgoWindow(boardRoc) : null;
-  if (span && backfillHoldsWindow(job, sheetId, span)) {
-    out = out || { date: null, at: null, items: 0, applied: false };
-    out.waiting_for_backfill = true;
-  }
+  out = noteReaderState(out, { date: null, at: null, items: 0, applied: false }, sheetId, span, job, skippedAt);
   // The last backfill finished short of today's year-ago window — started
   // before its reach took in the week before a year back. Asking again for
   // the same months adds only what is missing.
@@ -1705,13 +1730,249 @@ function publicYearAgo(raw, sheetId, skippedAt, boardRoc, jobRaw) {
     out = out || { date: null, at: null, items: 0, applied: false };
     out.backfill_short = true;
   }
-  // A read the last refresh left undone for time, for this spreadsheet and
-  // not since made good: refreshes that are always that slow show here, not
-  // as a silence. Cleared by the next read that happens.
-  var skipped = parseJson(skippedAt);
+  return out;
+}
+
+/**
+ * What a reader's `diag` entry adds about reads the refresh did not make:
+ * held back while a backfill writes the span (without this, a long backfill
+ * would leave the comparison off with nothing saying why), and a read left
+ * undone (`noteUnread`) for this spreadsheet and not since made good —
+ * refreshes that are always too slow show here, not as a silence. `blank` is
+ * the entry when nothing is kept.
+ */
+function noteReaderState(out, blank, sheetId, span, job, skippedRaw) {
+  if (span && backfillHoldsWindow(job, sheetId, span)) {
+    out = out || blank;
+    out.waiting_for_backfill = true;
+  }
+  // Shown next to a wait too: what failed, was not kept or ran late will
+  // likely go the same way once the backfill has passed.
+  var skipped = parseJson(skippedRaw);
   if (skipped && skipped.sheet === sheetId && (!out || !out.at || skipped.at > out.at)) {
-    out = out || { date: null, at: null, items: 0, applied: false };
+    out = out || blank;
     out.skipped_at = skipped.at;
+    out.skipped = skipped.why || 'late';
   }
   return out;
+}
+
+
+// --- Per-variety baselines (#22 §3) ---
+//
+// The drawer decomposes a blended price into its varieties, and until now
+// could say what each costs today but not whether that is cheap FOR THAT
+// VARIETY: the 28-day baseline is the blend's, and 綠竹筍 at twice 麻竹筍 is
+// not "expensive". The archive keeps each variety's own row a day, so each can
+// have its own median — over the item's baseline days, and read the same way
+// as the year-ago medians: last in the refresh, kept per trading date, applied
+// by the next build.
+
+/**
+ * Attaches `vs_baseline_percent` to each variety with a median kept for it:
+ * today's variety price against that variety's own 28-day median. Wholesale
+ * against wholesale; the percentage only — the drawer's row has no room for a
+ * second price, and the payload no need of one.
+ */
+function applyVarietyBaselines(items, medians) {
+  if (!medians) return;
+  for (var i = 0; i < items.length; i++) {
+    var bases = medians[items[i].name];
+    var varieties = items[i].varieties;
+    if (!bases || !varieties) continue;
+    for (var v = 0; v < varieties.length; v++) {
+      var base = bases[varieties[v].name];
+      if (!(base > 0)) continue;
+      // In 元/公斤, and from exactly the value the archive holds for today's
+      // row (`historyRowsFor`): comparing the rounded 元/台斤 with an unrounded
+      // median would show a variety that has not moved as 「低 1%」.
+      varieties[v].vs_baseline_percent = percentAgainst(round1(varieties[v].catty_price / CATTY_PER_KG), base);
+    }
+  }
+}
+
+/** The kept variety medians, for a board of `boardRoc`, or null. Cheap: properties. */
+function keptVarietyBaselines(boardRoc) {
+  try {
+    var sheetId = PropertiesService.getScriptProperties().getProperty(HISTORY_SHEET_ID_PROP);
+    if (!sheetId || !boardRoc) return null;
+    return keptItemsFor(parseJson(readChunkedProp(VARIETY_BASE_PREFIX, VARIETY_BASE_COUNT)), sheetId, boardRoc);
+  } catch (err) {
+    Logger.log('keptVarietyBaselines: ' + err);
+    return null;
+  }
+}
+
+/**
+ * The span a variety's baseline is read from: the horizon before the board's
+ * date, the day itself left out — a price must not vouch for itself, as
+ * `applyBaselines` has it. Counted back from the board's trading date, where
+ * the rolling history is pruned by the clock (`rocDateDaysAgo`): the two agree
+ * on a trading day, and over a closure this one keeps its 45 days.
+ */
+function varietySpan(boardRoc) {
+  return {
+    from: rocToISO(shiftROC(boardRoc, -BASELINE_HORIZON_DAYS)),
+    to: rocToISO(shiftROC(boardRoc, -1))
+  };
+}
+
+/**
+ * Reads the Sheet for this trading date's variety medians when what is kept no
+ * longer stands (`keptStillFresh`). The refresh's last step, after the
+ * year-ago read; never throws, and a failed read is not kept.
+ * @returns {Object|null} the medians now kept (item → variety → 元/公斤).
+ */
+function refreshVarietyBaselines(boardRoc, startedAt) {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
+    if (!sheetId || !boardRoc) return null;
+    var kept = parseJson(readChunkedProp(VARIETY_BASE_PREFIX, VARIETY_BASE_COUNT));
+    var job = parseSheetBackfill(props.getProperty(SHEET_BACKFILL_PROP));
+    var span = varietySpan(boardRoc);
+    if (kept && kept.items && keptStillFresh(kept, boardRoc, sheetId, job, span)) return kept.items;
+    if (backfillHoldsWindow(job, sheetId, span)) {
+      // As for the year-ago read: a backfill walking newest-first through the
+      // span has written only its later days, and 28 days' median would be
+      // taken over a fortnight. Not read, not kept; the medians of an earlier
+      // date stand meanwhile, and `diag` says it waits.
+      return null;
+    }
+    if (startedAt && Date.now() - startedAt > YOY_START_BY_MS) {
+      // As for the year-ago read: the execution limit would end the run before
+      // its caller's cleanup. Said in `diag`, and read by the next refresh.
+      Logger.log('refreshVarietyBaselines: skipped, the refresh has run ' + Math.round((Date.now() - startedAt) / 1000) + ' s');
+      noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'late');
+      return null;
+    }
+    var found = varietyMedians(SpreadsheetApp.openById(sheetId), span, rocToISO(boardRoc).substring(0, 4));
+    var stored = writeChunkedProp(VARIETY_BASE_PREFIX, VARIETY_BASE_COUNT, JSON.stringify({
+      date: boardRoc, sheet: sheetId, at: new Date().toISOString(),
+      items: found.items, scattered: found.scattered || undefined
+    }));
+    if (!stored) {
+      // Read, and not kept — a full property store, most likely. Said in
+      // `diag`, or every refresh would read again with nothing showing why.
+      noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'not kept');
+      return found.items;
+    }
+    clearUnread(props, VARIETY_BASE_SKIPPED_PROP);
+    return found.items;
+  } catch (err) {
+    // The lock busy past its short wait, the Sheet unreachable: not kept, and
+    // read again by the next refresh — and said in `diag` meanwhile.
+    Logger.log('refreshVarietyBaselines failed: ' + err);
+    noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'failed');
+    return null;
+  }
+}
+
+/**
+ * Records that a read of the archive was left undone, when and why — `late`
+ * (the refresh had run too long), `failed` or `not kept` — for `diag`. Never
+ * throws: a note that cannot be written must not turn a skipped read into a
+ * failed one. It clears the older note instead, which must not stand for
+ * this read, and tries once more in the room that frees.
+ */
+function noteUnread(props, key, sheetId, why) {
+  if (!sheetId) return;
+  var note = JSON.stringify({ at: new Date().toISOString(), sheet: sheetId, why: why });
+  try {
+    props.setProperty(key, note);
+  } catch (err) {
+    Logger.log('noteUnread (' + key + ', ' + why + '): ' + err);
+    clearUnread(props, key);
+    try {
+      props.setProperty(key, note);
+    } catch (err2) {
+      Logger.log('noteUnread (' + key + ', ' + why + '), again: ' + err2);
+    }
+  }
+}
+
+/**
+ * …and clears it: once a read is kept, or when a newer note could not be
+ * written. Never throws, so a failure here is never noted as the read's.
+ */
+function clearUnread(props, key) {
+  try {
+    props.deleteProperty(key);
+  } catch (err) {
+    Logger.log('clearUnread (' + key + '): ' + err);
+  }
+}
+
+/**
+ * Each board item's varieties' medians over the item's most recent
+ * `BASELINE_WINDOW` archived trading days in the span — the days its own
+ * baseline takes — one value per day.
+ *
+ * A variety's rows are archived only on days the board broke the item down,
+ * which takes two varieties past the share and volume floors
+ * (`varietyBreakdown`). A crop that is nearly all one variety has rows for
+ * it only on its few contested days, and their median is not its month. So a
+ * variety is given one only when it was listed on at least
+ * `VARIETY_MIN_COVERAGE` of those days, and on `BASELINE_MIN_DAYS` at least.
+ * A variety just in season waits until it has half of them: from these rows
+ * it cannot be told from a dominant one only lately broken down, and no
+ * comparison is better than one taken over a fortnight of contested days.
+ * A day the item traded is one with any priced row for it.
+ */
+function varietyMedians(spreadsheet, span, liveYear) {
+  var prices = {}; // item → variety → date → 元/公斤
+  var traded = {}; // item → date → true, from the blend row
+  var scattered = scanSpan(spreadsheet, span, liveYear, function (cells, date) {
+    var item = String(cells[1]);
+    var variety = cells[3];
+    var price = Number(cells[4]);
+    if (!(price > 0)) return;
+    (traded[item] = traded[item] || {})[date] = true;
+    if (variety === '' || variety === null) return; // the blend row
+    var byVariety = (prices[item] = prices[item] || {});
+    (byVariety[variety] = byVariety[variety] || {})[date] = price;
+  });
+  if (scattered) return { items: {}, scattered: true };
+
+  var known = {};
+  for (var b = 0; b < BOARD_ITEMS.length; b++) known[BOARD_ITEMS[b].name] = true;
+  var out = {};
+  Object.keys(prices).forEach(function (item) {
+    if (!known[item]) return;
+    var days = Object.keys(traded[item]).sort().slice(-BASELINE_WINDOW);
+    var need = Math.max(BASELINE_MIN_DAYS, Math.ceil(days.length * VARIETY_MIN_COVERAGE));
+    Object.keys(prices[item]).forEach(function (variety) {
+      var byDate = prices[item][variety];
+      var listed = days.filter(function (d) { return byDate[d] !== undefined; });
+      if (listed.length < need) return;
+      var base = median(listed.map(function (d) { return byDate[d]; }));
+      (out[item] = out[item] || {})[variety] = Math.round(base * 100) / 100;
+    });
+  });
+  return { items: out };
+}
+
+/**
+ * The kept variety medians as `diag` publishes them: when, and how many —
+ * from the property map `diag` already read.
+ */
+function publicVarietyBaselines(props, boardRoc) {
+  var sheetId = props[HISTORY_SHEET_ID_PROP];
+  if (!sheetId) return null;
+  var kept = parseJson(chunkedFrom(props, VARIETY_BASE_PREFIX, VARIETY_BASE_COUNT));
+  var out = null;
+  if (kept && kept.items && kept.sheet === sheetId) {
+    var varieties = 0;
+    Object.keys(kept.items).forEach(function (item) { varieties += Object.keys(kept.items[item]).length; });
+    out = {
+      date: kept.date,
+      at: kept.at,
+      items: Object.keys(kept.items).length,
+      varieties: varieties,
+      applied: !!boardRoc && keptApplies(kept, boardRoc)
+    };
+    if (kept.scattered) out.scattered = true;
+  }
+  return noteReaderState(out, { date: null, at: null, items: 0, varieties: 0, applied: false }, sheetId,
+    boardRoc ? varietySpan(boardRoc) : null, parseSheetBackfill(props[SHEET_BACKFILL_PROP]), props[VARIETY_BASE_SKIPPED_PROP]);
 }

@@ -86,6 +86,7 @@ function buildBoard() {
   // The medians kept from the last read: a Sheets read has no place before
   // the board is stored (`refreshYearAgo` runs last in the refresh).
   applyYearOverYear(items, keptYearAgo(dates.latest));
+  applyVarietyBaselines(items, keptVarietyBaselines(dates.latest));
 
   return {
     type: 'board',
@@ -153,42 +154,76 @@ function readDurableBoard() {
 function writeChunkedProp(prefix, countKey, json) {
   try {
     var props = PropertiesService.getScriptProperties();
-    var chunks = Math.ceil(json.length / PROP_CHUNK_SIZE) || 1;
+    var pieces = propChunks(json);
+    var chunks = pieces.length;
     var write = {};
-    for (var i = 0; i < chunks; i++) {
-      write[prefix + i] = json.substring(i * PROP_CHUNK_SIZE, (i + 1) * PROP_CHUNK_SIZE);
-    }
+    for (var i = 0; i < chunks; i++) write[prefix + i] = pieces[i];
     write[countKey] = String(chunks);
     props.setProperties(write);
-
+  } catch (err) {
+    Logger.log('writeChunkedProp error (' + prefix + '): ' + err);
+    return false;
+  }
+  // Written, whatever the cleanup does: a leftover chunk past the count is
+  // never read, and costs only quota until the next write removes it.
+  try {
     var existing = props.getProperties();
     for (var key in existing) {
       if (key.indexOf(prefix) !== 0) continue;
       var idx = parseInt(key.substring(prefix.length), 10);
       if (!isNaN(idx) && idx >= chunks) props.deleteProperty(key);
     }
-  } catch (err) {
-    Logger.log('writeChunkedProp error (' + prefix + '): ' + err);
+  } catch (err2) {
+    Logger.log('writeChunkedProp cleanup error (' + prefix + '): ' + err2);
   }
+  return true;
+}
+
+/**
+ * `json` cut into pieces of at most `PROP_CHUNK_SIZE` UTF-8 bytes: a property
+ * value holds 9 KB, and a crop's or variety's name takes three bytes a
+ * character — 8000 characters of them would not fit. Never cut inside a
+ * surrogate pair, whose halves count 4 and 0.
+ */
+function propChunks(json) {
+  var out = [];
+  var start = 0;
+  var bytes = 0;
+  for (var i = 0; i < json.length; i++) {
+    var c = json.charCodeAt(i);
+    var size = c < 0x80 ? 1 : c < 0x800 ? 2 : c >= 0xD800 && c <= 0xDBFF ? 4 : c >= 0xDC00 && c <= 0xDFFF ? 0 : 3;
+    if (bytes + size > PROP_CHUNK_SIZE) {
+      out.push(json.substring(start, i));
+      start = i;
+      bytes = 0;
+    }
+    bytes += size;
+  }
+  out.push(json.substring(start));
+  return out;
 }
 
 /** Reads a chunked JSON string back, or null when absent or torn. */
 function readChunkedProp(prefix, countKey) {
   try {
-    var all = PropertiesService.getScriptProperties().getProperties();
-    var chunks = parseInt(all[countKey] || '0', 10);
-    if (!chunks) return null;
-    var parts = [];
-    for (var i = 0; i < chunks; i++) {
-      var part = all[prefix + i];
-      if (part == null) return null; // torn write — treat as missing
-      parts.push(part);
-    }
-    return parts.join('');
+    return chunkedFrom(PropertiesService.getScriptProperties().getProperties(), prefix, countKey);
   } catch (err) {
     Logger.log('readChunkedProp error (' + prefix + '): ' + err);
     return null;
   }
+}
+
+/** The same, from a property map the caller already read. */
+function chunkedFrom(all, prefix, countKey) {
+  var chunks = parseInt(all[countKey] || '0', 10);
+  if (!chunks) return null;
+  var parts = [];
+  for (var i = 0; i < chunks; i++) {
+    var part = all[prefix + i];
+    if (part == null) return null; // torn write — treat as missing
+    parts.push(part);
+  }
+  return parts.join('');
 }
 
 /**
@@ -241,6 +276,7 @@ function refreshBoardCache() {
     // Sheets read here costs that comparison at most — the board is stored,
     // mirrored, archived and its outcome recorded.
     refreshYearAgo(board.roc_date, started);
+    refreshVarietyBaselines(board.roc_date, started);
   } else {
     var reason = verdict.reasons.join('; ');
     if (board.items && board.items.length) {

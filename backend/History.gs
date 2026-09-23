@@ -35,9 +35,9 @@ function writeHistory(history) {
  * backfill can genuinely overlap; without the lock, whichever writes last
  * silently discards the other's observations.
  */
-function withHistoryLock(fn) {
+function withHistoryLock(fn, waitMs) {
   var lock = LockService.getScriptLock();
-  lock.waitLock(HISTORY_LOCK_WAIT_MS);
+  lock.waitLock(waitMs || HISTORY_LOCK_WAIT_MS);
   try {
     return fn();
   } finally {
@@ -154,7 +154,12 @@ function applyBaselines(items, history, todayRoc) {
 function attachComparison(item, base, priceKey, pctKey) {
   if (!(base > 0)) return;
   item[priceKey] = round1(base * CATTY_PER_KG);
-  item[pctKey] = round1(((item.avg_price - base) / base) * 100);
+  item[pctKey] = percentAgainst(item.avg_price, base);
+}
+
+/** How far `today` is from `base`, both 元/公斤, in percent to one decimal. */
+function percentAgainst(today, base) {
+  return round1(((today - base) / base) * 100);
 }
 
 /** Cheap history overview for diag/backfill responses. */

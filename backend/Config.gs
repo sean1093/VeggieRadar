@@ -78,7 +78,7 @@ var BOARD_PROP_PREFIX = 'veggie_board_v2_chunk_';
 
 var BOARD_PROP_COUNT = 'veggie_board_v2_chunks';
 
-var PROP_CHUNK_SIZE = 8000;
+var PROP_CHUNK_SIZE = 8000; // UTF-8 bytes, under a property's 9 KB
 
 // Freshness. `date`/`roc_date` is the trading date of the prices — it legitimately
 // stays put over weekends, holidays and typhoon closures, when MOA publishes only
@@ -267,20 +267,44 @@ var YOY_PROP = 'veggie_yoy';
 // trading date for days, so this, not the date, is what makes it read again.
 // Six hours while a backfill is running, which may be adding to the window.
 var YOY_KEEP_MS = 24 * 60 * 60 * 1000;
-var YOY_SOON_MS = 6 * 60 * 60 * 1000;
-var ISO_DAY = /^\d{4}-\d{2}-\d{2}$/; // what a date cell in the archive reads as // …while a backfill may add to the window, or the tab needs re-sorting
+var YOY_SOON_MS = 6 * 60 * 60 * 1000; // …while a backfill may add to the window, or the tab needs re-sorting
 // Kept medians older than this many days are not applied at all: the window
 // they describe has moved too far from the board's date.
 var YOY_KEPT_MAX_DAYS = 7;
-// Runs of the window's rows past which the tab is taken as sorted by another
-// column: the backfill writes a week in at most a few runs.
-var YOY_MAX_RUNS = 20;
 // Rows of other days that may sit between runs read in one call.
 var YOY_MERGE_SLACK_ROWS = 400;
+// Reads of a tab, after runs close together are merged, past which a reader
+// takes it as sorted by another column (`scattered`) and does not read it:
+// in date order a span is a few blocks — the live days, a backfill's windows,
+// holes filled later — and sorted by item, a block an item.
+var ARCHIVE_MAX_READS = 20;
 // The year-ago read is the refresh's last step; past this far into the run it
 // is left to the next refresh, well inside the 6-minute execution limit.
 var YOY_START_BY_MS = 4 * 60 * 1000;
-var YOY_SKIPPED_PROP = 'veggie_yoy_skipped_at'; // when a read was last left for time
+// A read left undone — `late`, `failed`, or read and `not kept` — as JSON
+// with its sheet and reason, for `diag` (`noteUnread`); cleared once a read
+// is kept.
+var YOY_SKIPPED_PROP = 'veggie_yoy_skipped_at';
+// The archive's readers wait this long for the history lock, not the 30 s a
+// write does: their read is optional — a busy lock costs a comparison until
+// the next refresh — and two of them run back to back at the end of one.
+var READER_LOCK_WAIT_MS = 5 * 1000;
+var ISO_DAY = /^\d{4}-\d{2}-\d{2}$/; // what a date cell in the archive reads as
+
+// Per-variety baselines (#22 §3): each variety's own median over the item's
+// baseline days — its `BASELINE_WINDOW` most recent archived trading days
+// within `BASELINE_HORIZON_DAYS` (counted back from the board's trading date:
+// see `varietySpan`) — where it was listed on `BASELINE_MIN_DAYS` and
+// `VARIETY_MIN_COVERAGE` of them at least (`varietyMedians`). Chunked: ~100 items with up to four
+// varieties each is more than one 9 KB property holds.
+var VARIETY_BASE_PREFIX = 'veggie_variety_base_chunk_';
+var VARIETY_BASE_COUNT = 'veggie_variety_base_chunks';
+// The share of the item's baseline days a variety must have been listed on
+// to get a median of its own: rows exist only on days the board broke the
+// item down, and a variety's few contested days are not its month.
+var VARIETY_MIN_COVERAGE = 0.5;
+// The same, for the variety read.
+var VARIETY_BASE_SKIPPED_PROP = 'veggie_variety_base_skipped_at';
 // What the archive holds, as the status request reports it. Counting it reads
 // column A of every year tab, and an operator watching a job polls.
 var SHEET_SUMMARY_CACHE_KEY = 'veggie_sheet_summary';

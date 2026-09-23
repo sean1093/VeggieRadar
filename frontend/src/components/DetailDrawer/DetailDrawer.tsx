@@ -10,7 +10,7 @@ import type { ProduceItem } from '../../types/produce';
 import { fetchProduceTrend } from '../../services/api';
 import { itemUrl } from '../../lib/urlState';
 import { marketPrice } from '../../lib/utils/market-price';
-import { relativePhrase, trustedBaseline, trustedLastYear } from '../../lib/utils/baseline';
+import { relativePhrase, trustedBaseline, trustedLastYear, trustedVarietyBaseline } from '../../lib/utils/baseline';
 import { track } from '../../lib/analytics';
 
 // recharts is ~half the initial JS and serves exactly one element inside this
@@ -336,13 +336,23 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({
             <div>
               <p className="mb-2 text-xs text-stone">今日品種行情（推估菜市場價・元/台斤）</p>
               <div className="space-y-1">
-                {varieties.map((v, i) => (
+                {varieties.map((v, i) => {
+                  // Against this variety's own month (#22 §3), not the
+                  // blend's: 綠竹筍 at twice 麻竹筍 is not "expensive". Said
+                  // as WHOLESALE, as the item's baseline sentence is: the row
+                  // leads with a retail estimate, and the markup added to
+                  // both makes the stall's change smaller than this one.
+                  const vsOwn = trustedVarietyBaseline(item, v);
+                  return (
                   <div key={v.name} className="flex items-baseline justify-between gap-3 text-sm">
                     <span className="min-w-0 break-words text-ink">
                       {v.name}
                       {/* Rows are volume-sorted, so the first is what a stall
                           most likely has today. */}
                       {i === 0 && <span className="ml-1 text-xs text-stone">主流</span>}
+                      {vsOwn !== null && (
+                        <span className="block text-xs text-stone">批發比近月{relativePhrase(vsOwn)}</span>
+                      )}
                     </span>
                     <span className="shrink-0 whitespace-nowrap text-right">
                       {v.retail_price != null ? (
@@ -360,7 +370,8 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({
                       )}
                     </span>
                   </div>
-                ))}
+                  );
+                })}
               </div>
               {/* Three separate honesty constraints, all learned the hard way:
                   the headline blends ALL varieties (not just the listed ones),
