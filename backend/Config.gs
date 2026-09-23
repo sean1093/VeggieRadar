@@ -260,6 +260,7 @@ var SHEET_FROZEN_CACHE_PREFIX = 'veggie_sheet_frozen_';
 // the one day, because a single day a year ago is one market's weather.
 var YOY_WINDOW_DAYS = 7;
 var YOY_MIN_DAYS = 3;            // fewer archived days than this → nothing published
+var YOY_MIN_SIDE_DAYS = 2;       // …nor with fewer than this on either side of the day
 // Computed once per trading date and kept here, so a refresh reads the Sheet
 // once a day rather than every four hours: "<roc date>" plus the medians.
 var YOY_PROP = 'veggie_yoy';
@@ -271,7 +272,8 @@ var YOY_EMPTY_RETRY_MS = 6 * 60 * 60 * 1000;
 // Kept medians older than this many days are not applied at all: the window
 // they describe has moved too far from the board's date.
 var YOY_KEPT_MAX_DAYS = 7;
-// Separate reads of the window's runs of rows before it is read in one span.
+// Runs of the window's rows past which the tab is taken as sorted by another
+// column: the backfill writes a week in at most a few runs.
 var YOY_MAX_RUNS = 20;
 // The year-ago read is the refresh's last step; past this far into the run it
 // is left to the next refresh, well inside the 6-minute execution limit.

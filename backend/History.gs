@@ -140,11 +140,21 @@ function applyBaselines(items, history, todayRoc) {
       prices.push(series[j][1]);
     }
     if (prices.length < BASELINE_MIN_DAYS) continue;
-    var base = median(prices);
-    if (!(base > 0)) continue;
-    items[i].baseline_price = round1(base * CATTY_PER_KG);
-    items[i].vs_baseline_percent = round1(((items[i].avg_price - base) / base) * 100);
+    attachComparison(items[i], median(prices), 'baseline_price', 'vs_baseline_percent');
   }
+}
+
+/**
+ * Today's wholesale price against a reference median in 元/公斤: the
+ * reference in 元/台斤 under `priceKey`, today's distance from it under
+ * `pctKey`. One formula for every comparison the card carries — the 28-day
+ * baseline and the same weeks last year — so the drawer's two sentences
+ * cannot round or convert differently. Nothing without a positive reference.
+ */
+function attachComparison(item, base, priceKey, pctKey) {
+  if (!(base > 0)) return;
+  item[priceKey] = round1(base * CATTY_PER_KG);
+  item[pctKey] = round1(((item.avg_price - base) / base) * 100);
 }
 
 /** Cheap history overview for diag/backfill responses. */

@@ -435,7 +435,8 @@ this is the same step the `script.send_mail` scope needed.
 The archive starts empty on the day it is configured, and both of its readers
 need what came before — 「比去年同期」 a year of it, a per-variety baseline the
 last 45 days. `?action=backfill&sheet=1&months=12` (admin token) fills that in
-from MOA's range queries:
+from MOA's range queries — the months asked for, plus the week before them,
+which is the far half of the year-ago window the comparison reads for today:
 
 - **A chain of one-off triggers, one window a link.** A year is ~40 windows
   and one Apps Script execution stops at 6 minutes, so each link crawls one
@@ -535,11 +536,14 @@ from MOA's range queries:
 The archive's first reader is 「比去年同期」 (#22 §2). The refresh reads the
 archived blend rows within a week either side of the trading date a year
 back — column A of the year tab (two, across New Year) to find them, then
-only those rows, under the history lock — and takes each crop's median, one
-value per day. With at least three archived days, on both sides of the day
-itself (days on one side only are a half-filled window), a crop gets
+only those rows; under the history lock only late in December, when the
+window reaches the current year's tab, where the live path rewrites its day
+— and takes each crop's median, one value per day. With at least three
+archived days, two of them on each side of the day itself (fewer on one side
+is a half-filled window, whose median leans to one week), a crop gets
 `last_year_price` (元/台斤) and `vs_last_year_percent`, wholesale against
-wholesale like the baseline.
+wholesale like the baseline. A tab sorted by another column is reported as
+`scattered` in `diag` rather than read around.
 
 The read is the refresh's **last** step, after the board is stored and its
 outcome recorded — a slow Sheets read must never cost the board, and a
