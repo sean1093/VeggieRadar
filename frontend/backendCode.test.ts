@@ -4575,7 +4575,9 @@ describe('per-variety baselines (#22 §3)', () => {
     // than a week's worth, and a tab in date order all the same.
     const inOrder = archived([
       ...days(ROC, '高麗菜', '初秋', 20, 30).flatMap((r) => [r, varietyRow('2026-01-02', '高麗菜', '初秋', 99)]),
-      varietyRow(dayOf(ROC, -3), '高麗菜', '初秋', 20), // a day appended again by hand: two runs, let through
+      varietyRow(dayOf(ROC, -3), '高麗菜', '初秋', 20), // a day appended again by hand…
+      varietyRow('2026-01-02', '高麗菜', '初秋', 99),
+      varietyRow(dayOf(ROC, -3), '高麗菜', '初秋', 20), // …twice: one odd day in three runs, read around
     ]);
     expect(inOrder.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20 } });
     // Sorted by item, as Sheets sorts: each item's rows together, in their
@@ -4598,6 +4600,17 @@ describe('per-variety baselines (#22 §3)', () => {
     const back = archived(rows);
     expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20 } });
     expect(back.sheetReads).toHaveLength(1 + 6); // column A, then each pair
+  });
+
+  it('notes a read it could not keep as not kept, even when noting that fails', () => {
+    const back = archived(days(ROC, '高麗菜', '初秋', 20, 12));
+    back.breakProp(back.api.VARIETY_BASE_COUNT); // the medians cannot be kept…
+    const original = back.props.set.bind(back.props); // …nor the note written
+    back.props.set = (k: string, v: string) => {
+      if (k === 'veggie_variety_base_skipped_at') throw new Error('full');
+      return original(k, v);
+    };
+    expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20 } }); // not null, as a failed read is
   });
 
   it('never notes a kept read as failed when clearing the old note fails', () => {

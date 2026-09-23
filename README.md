@@ -594,8 +594,8 @@ header row is frozen (the backfill freezes tabs the live archive made before
 it did), so it stays on row 1, and a sort by date keeps each
 day's rows together, which is all the correction path and the readers rely
 on. (Sort by any other column and a later correction reports the day
-`scattered` and leaves it alone; a reader finds a date in more than two runs
-and reports the tab `scattered` rather than reading it.)
+`scattered` and leaves it alone; a reader finds most dates split across
+runs and reports the tab `scattered` rather than reading it.)
 
 
 ### Static board mirror

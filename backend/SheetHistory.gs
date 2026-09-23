@@ -1647,28 +1647,31 @@ function scanSpan(spreadsheet, span, liveYear, onRow) {
 /**
  * Whether the tab has been sorted by another column. Every writer keeps a
  * day's rows together, so in date order — however the days themselves were
- * written, backfill windows and live days in between — a date is in one run;
- * two are let through (a day appended again by hand: the readers take the row
- * written last). Sorted by item, a date is in a run per item. The number of
- * runs alone cannot tell the two apart: a long span in order may have one a
- * day, and a sort by item gives one an item.
+ * written, backfill windows and live days in between — a date is in one run,
+ * bar a day an edit by hand has split (appended again, a date mistyped inside
+ * its block). Sorted by item, nearly every date is in a run per item. So: most
+ * dates split. A few odd days are read around — the readers take the row
+ * written last — where the correction path, which deletes a day's block,
+ * refuses such a day (`readDay`). The number of runs alone cannot tell a sort
+ * from a long span in order, which may have one a day.
  */
 function scatteredRuns(runs) {
   var runsOf = {};
   for (var r = 0; r < runs.length; r++) {
-    for (var day in runs[r].days) {
-      runsOf[day] = (runsOf[day] || 0) + 1;
-      if (runsOf[day] > 2) return true;
-    }
+    for (var day in runs[r].days) runsOf[day] = (runsOf[day] || 0) + 1;
   }
-  return false;
+  var dates = Object.keys(runsOf);
+  var split = dates.filter(function (d) { return runsOf[d] > 1; }).length;
+  return split * 2 > dates.length;
 }
 
 /**
  * Runs close together read in one call — the dates are checked row by row
- * anyway: each with the one before when fewer than `YOY_MERGE_SLACK_ROWS`
- * rows lie between, so a span split by a few live days is one or two round
- * trips under the lock, not one a day.
+ * anyway: each with the one before when at most `YOY_MERGE_SLACK_ROWS` rows
+ * lie between, so a span split by a few live days is one or two round trips
+ * under the lock, not one a day. Chained, that may read many rows of other
+ * days in one call; one read of a few thousand rows is still quicker than a
+ * round trip a day.
  */
 function mergeRuns(runs) {
   if (runs.length < 2) return runs;
@@ -1879,7 +1882,11 @@ function refreshVarietyBaselines(boardRoc, startedAt) {
     if (!stored) {
       // Read, and not kept — a full property store, most likely. Said in
       // `diag`, or every refresh would read again with nothing showing why.
-      noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'not kept');
+      try {
+        noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'not kept');
+      } catch (err2) {
+        Logger.log('refreshVarietyBaselines: not noted: ' + err2); // not a failed read
+      }
       return found.items;
     }
     clearUnread(props, VARIETY_BASE_SKIPPED_PROP);
