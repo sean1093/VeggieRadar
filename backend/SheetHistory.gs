@@ -422,6 +422,10 @@ function startSheetBackfill(props, months) {
   }
   job.status = 'running';
   job.updated_at = new Date().toISOString();
+  // Any lease a link still holds on it is revoked: that link, if it is
+  // somehow still running, must not finish over the job resumed here.
+  job.link_id = null;
+  job.link_open = false;
   // Written before the trigger exists, so the first link cannot read the job
   // this replaces.
   writeSheetBackfill(props, job);
@@ -567,8 +571,15 @@ function mergeRanges(ranges, keep) {
  * One link of the chain: one window crawled and written, then the next link
  * queued. Never throws — a trigger that throws is just a stopped chain with
  * nothing recorded about why.
+ *
+ * A link holds a LEASE on the job, taken under the history lock when it
+ * begins (`link_id`). It appends only while it still holds it — checked under
+ * the lock the append runs in — and finishes only while it still holds it, so
+ * a link its own watchdog has taken over, or one a resume has revoked, can
+ * neither write a window twice nor write its state over the newer one.
+ * @param {Object=} e the trigger event, whose `triggerUid` is this link's own.
  */
-function sheetBackfillStep() {
+function sheetBackfillStep(e) {
   var props;
   try {
     props = PropertiesService.getScriptProperties();
@@ -578,10 +589,6 @@ function sheetBackfillStep() {
     Logger.log('sheetBackfillStep: properties unavailable: ' + err);
     return null;
   }
-  // Whether this link runs is decided under the lock. Two links deciding at
-  // once — a late trigger beside a resume — could each find the job free and
-  // write the same window twice, since which days are present is read
-  // outside the lock (`writeArchivedDays`).
   var begun;
   var ran = false;
   try {
@@ -591,145 +598,174 @@ function sheetBackfillStep() {
     });
   } catch (err) {
     Logger.log('sheetBackfillStep: not begun: ' + err);
-    if (!ran) {
-      // Busy. A spare link in a minute is harmless: whichever begins second
-      // finds the other in flight and leaves. Capped, so a lock held busy for
-      // a while cannot pile triggers up toward the project's limit of 20.
-      try {
-        var pending = ScriptApp.getProjectTriggers().filter(function (t) {
-          return t.getHandlerFunction() === SHEET_BACKFILL_FN;
-        }).length;
-        if (pending < 3) ScriptApp.newTrigger(SHEET_BACKFILL_FN).timeBased().after(60 * 1000).create();
-      } catch (err2) {
-        Logger.log('sheetBackfillStep: not requeued: ' + err2);
-      }
-    }
+    if (!ran) queueSpareLink(e);
     return null;
   }
   var job = begun.job;
-  if (begun.action === 'leave') return job;
-  if (begun.action === 'finish') {
-    finishBackfillStep(props, job);
-    return job;
-  }
+  if (begun.action !== 'work') return job;
+  var lease = job.link_id;
   try {
-    backfillWindow(job, job.sheet);
+    backfillWindow(job, job.sheet, lease);
   } catch (err) {
     job.last_error = String(err && err.message || err).substring(0, 200);
     Logger.log('sheetBackfillStep failed (' + job.failures + '): ' + err);
     if (job.failures >= SHEET_BACKFILL_MAX_FAILURES) job.status = 'failed';
   } finally {
-    finishBackfillStep(props, job);
+    finishBackfillStep(props, job, lease);
   }
   return job;
 }
 
 /**
- * The start of a link, under the lock: whether it runs, and if it does, the
- * job marked as having a link in flight.
- * @returns {{action: string, job: Object}} `leave` — another link of this job
- *   is running, touch nothing; `finish` — nothing to do but tidy up; `work`.
+ * The lock was busy: try again in a minute. A spare link is harmless —
+ * whichever begins second finds the other in flight and leaves. This link's
+ * own trigger is spent, so it is deleted by its id rather than counted, and
+ * the spare is capped against the others, so a lock held busy for a while can
+ * neither pile triggers up toward the project's limit of 20 nor, counting
+ * spent ones as pending, stop queueing altogether.
+ */
+function queueSpareLink(e) {
+  try {
+    var uid = e && e.triggerUid;
+    var triggers = ScriptApp.getProjectTriggers();
+    var pending = 0;
+    for (var i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction() !== SHEET_BACKFILL_FN) continue;
+      if (uid && triggers[i].getUniqueId() === uid) {
+        ScriptApp.deleteTrigger(triggers[i]);
+        continue;
+      }
+      pending++;
+    }
+    if (pending < (uid ? 2 : 3)) ScriptApp.newTrigger(SHEET_BACKFILL_FN).timeBased().after(60 * 1000).create();
+  } catch (err) {
+    Logger.log('sheetBackfillStep: not requeued: ' + err);
+  }
+}
+
+/**
+ * The start of a link, under the lock: whether it runs — and if it does, the
+ * lease and the job marked as having a link in flight. A link with nothing to
+ * do tidies up here, still under the lock.
+ * @returns {{action: string, job: Object}} `work`, or `done` for anything else.
  */
 function beginBackfillLink(props) {
   var job = readSheetBackfill(props);
   if (job && job.status === 'running' && linkInFlight(job)) {
     // A watchdog that fired beside a link that is alive after all. The
-    // triggers are that link's.
+    // triggers, and the job, are that link's.
     Logger.log('sheetBackfillStep: another link of this job is running');
-    return { action: 'leave', job: job };
+    return { action: 'done', job: job };
   }
-  if (!job || job.status !== 'running' || cancelRequested(props, job)) return { action: 'finish', job: job };
-  if (props.getProperty(HISTORY_SHEET_ID_PROP) !== job.sheet) {
+  var tidy = !job || job.status !== 'running' || cancelRequested(props, job);
+  if (!tidy && props.getProperty(HISTORY_SHEET_ID_PROP) !== job.sheet) {
     // Pointed elsewhere, or cleared, mid-job. Its cursor, its coverage and its
     // cached dates are all about the spreadsheet it started on; carrying on
     // into another would leave that one with holes the job calls covered.
     job.status = 'failed';
     job.last_error = 'HISTORY_SHEET_ID changed since this job started; start a new one';
-    return { action: 'finish', job: job };
+    tidy = true;
   }
-  if ((job.failures || 0) >= SHEET_BACKFILL_MAX_FAILURES) {
+  if (!tidy && (job.failures || 0) >= SHEET_BACKFILL_MAX_FAILURES) {
     // The previous links were counted and never reported back: killed by the
     // execution limit, most likely, which no `catch` survives.
     job.status = 'failed';
     job.last_error = job.last_error || 'the last ' + job.failures + ' links did not finish';
-    return { action: 'finish', job: job };
+    tidy = true;
+  }
+  if (tidy) {
+    finishLocked(props, job, job ? job.link_id : null);
+    return { action: 'done', job: job };
   }
   // Counted BEFORE the work, and cleared by a window that succeeds: a link
   // the 6-minute limit kills never reaches its `catch` or its `finally`.
   job.failures = (job.failures || 0) + 1;
   // Also the heartbeat: a link in flight must not look like a stalled chain
-  // to a `months=` request, nor be replaced by a job it could write back over.
+  // to a `months=` request, nor be taken over before it could have finished.
   job.updated_at = new Date().toISOString();
   job.link_started_at = job.updated_at;
   job.link_open = true;
+  job.link_id = job.updated_at + '-' + Math.random().toString(36).substring(2, 10);
   writeSheetBackfill(props, job);
   armBackfillWatchdog();
   return { action: 'work', job: job };
 }
 
 /**
- * Records the link and queues the next — unless the job was cancelled or
- * replaced while this link ran, in which case what is stored now is someone
- * else's decision and this link's progress is dropped with it.
+ * Records the link and queues the next, under the lock — so a resume cannot
+ * slip in between this link's "failed" and its dropping the triggers, and
+ * delete the link the resume just queued. Busy, it leaves the watchdog to
+ * retry past the limit.
  */
-function finishBackfillStep(props, job) {
-  var stored = null;
+function finishBackfillStep(props, job, lease) {
+  try {
+    withHistoryLock(function () { finishLocked(props, job, lease); });
+  } catch (err) {
+    Logger.log('finishBackfillStep: not finished; leaving the watchdog: ' + err);
+  }
+}
+
+function finishLocked(props, job, lease) {
+  var stored;
   try {
     stored = readSheetBackfill(props);
   } catch (err) {
     // Unknowable whose job is stored, so nothing is safe to drop or queue.
-    // The watchdog, if this link armed one, will retry past the limit.
     Logger.log('finishBackfillStep: job unreadable; leaving the triggers: ' + err);
     return;
   }
-  var ours = !!job && !!stored && stored.id === job.id;
-  if (ours && cancelRequested(props, job)) {
+  if (!stored) {
+    dropTriggersQuietly(); // no job: nothing for any link to do
+    return;
+  }
+  // Only the holder of the lease speaks for the job. Anyone else — a link
+  // whose watchdog took over, a link a resume revoked, a job replaced — has
+  // been superseded, and what is stored, triggers included, is someone else's.
+  if (!job || stored.id !== job.id || (stored.link_id || null) !== (lease || null)) {
+    Logger.log('finishBackfillStep: superseded; leaving the job to its current link');
+    return;
+  }
+  if (cancelRequested(props, job)) {
     // Keep the cancel — even over a window that just finished the job — and
     // drop this link's progress with it: the operator was told it stopped.
     // What the link wrote is in the Sheet all the same, and skipped next time.
     job = stored;
     job.status = 'cancelled';
   }
-  // Another job's link is queued: its trigger has this handler's name, so
-  // dropping ours would drop that one too.
-  var other = !!stored && !ours && stored.status === 'running' && !cancelRequested(props, stored);
-  var recorded = true;
-  if (ours) {
-    job.updated_at = new Date().toISOString();
-    job.link_open = false;
-    try {
-      writeSheetBackfill(props, job);
-    } catch (err) {
-      // The stored job still reads as a link in flight, so a next link queued
-      // now would take itself for a duplicate and stop. Leave the watchdog
-      // instead: by the time it fires that link is past the limit, and it
-      // retries the window, whose days are skipped if they were written.
-      recorded = false;
-      Logger.log('finishBackfillStep: job not recorded; leaving the watchdog: ' + err);
-    }
+  job.updated_at = new Date().toISOString();
+  job.link_open = false;
+  try {
+    writeSheetBackfill(props, job);
+  } catch (err) {
+    // The stored job still reads as a link in flight, so a next link queued
+    // now would take itself for a duplicate and stop. Leave the watchdog
+    // instead: by the time it fires that link is past the limit, and it
+    // retries the window, whose days are skipped if they were written.
+    Logger.log('finishBackfillStep: job not recorded; leaving the watchdog: ' + err);
+    return;
   }
-  if (!recorded) return;
-  if (!other) {
-    try {
-      dropTriggers(SHEET_BACKFILL_FN);
-    } catch (err) {
-      Logger.log('finishBackfillStep: trigger not dropped: ' + err);
-    }
+  dropTriggersQuietly();
+  if (job.status !== 'running') return;
+  try {
+    // A failed window waits before it is retried, longer each time — by the
+    // failures or by MOA's repeated answers, whichever is further along —
+    // and never as long as the stall window, which it must not look like.
+    var v = job.verdict && job.verdict.cursor === job.cursor ? job.verdict.tries : 0;
+    var tries = Math.min(Math.max(job.failures || 0, v), 2);
+    var wait = tries ? SHEET_BACKFILL_RETRY_MS * tries : 1000;
+    ScriptApp.newTrigger(SHEET_BACKFILL_FN).timeBased().after(wait).create();
+  } catch (err) {
+    // The chain stops here, and `months=` resumes it once it reads as
+    // stalled. Nothing is lost: the cursor already says where it got to.
+    Logger.log('finishBackfillStep: next link not queued: ' + err);
   }
-  if (ours && job.status === 'running') {
-    try {
-      // A failed window waits before it is retried, longer each time — by the
-      // failures or by MOA's repeated answers, whichever is further along —
-      // and never as long as the stall window, which it must not look like.
-      var v = job.verdict && job.verdict.cursor === job.cursor ? job.verdict.tries : 0;
-      var tries = Math.min(Math.max(job.failures || 0, v), 2);
-      var wait = tries ? SHEET_BACKFILL_RETRY_MS * tries : 1000;
-      ScriptApp.newTrigger(SHEET_BACKFILL_FN).timeBased().after(wait).create();
-    } catch (err) {
-      // The chain stops here, and `months=` resumes it once it reads as
-      // stalled. Nothing is lost: the cursor already says where it got to.
-      Logger.log('finishBackfillStep: next link not queued: ' + err);
-    }
+}
+
+function dropTriggersQuietly() {
+  try {
+    dropTriggers(SHEET_BACKFILL_FN);
+  } catch (err) {
+    Logger.log('finishBackfillStep: trigger not dropped: ' + err);
   }
 }
 
@@ -763,7 +799,7 @@ function cancelRequested(props, job) {
  * past it. Throws on anything that should be retried: a crawl MOA did not
  * fully answer, an unset or unreachable Sheet.
  */
-function backfillWindow(job, sheetId) {
+function backfillWindow(job, sheetId, lease) {
   if (!sheetId) throw new Error('HISTORY_SHEET_ID is not set');
   var from = isoToROC(job.from);
   var end = isoToROC(job.cursor);
@@ -830,13 +866,7 @@ function backfillWindow(job, sheetId) {
     return;
   }
 
-  // A link that has run this long could be overlapped by its own watchdog;
-  // giving up before the write keeps two links from appending the same days,
-  // whatever limit the account's executions actually have.
-  if (Date.now() - Date.parse(job.link_started_at || '') > SHEET_BACKFILL_LINK_MAX_MS - 60 * 1000) {
-    throw new Error('link ran too long to write safely; retried');
-  }
-  var written = writeArchivedDays(sheetId, built.days, job.id);
+  var written = writeArchivedDays(sheetId, built.days, job.id, lease);
   job.windows += 1;
   job.days_written += written.days;
   job.days_skipped += written.skipped;
@@ -878,8 +908,8 @@ function settledAnswer(job, kind) {
   }
   v.count += 1;
   v.tries += 1;
-  if (v.count >= SHEET_BACKFILL_MAX_FAILURES) return true;
-  if (v.tries < 2 * SHEET_BACKFILL_MAX_FAILURES) job.failures = Math.max(0, (job.failures || 0) - 1);
+  if (v.count >= SHEET_BACKFILL_SETTLE_ANSWERS) return true;
+  if (v.tries < 2 * SHEET_BACKFILL_SETTLE_ANSWERS) job.failures = Math.max(0, (job.failures || 0) - 1);
   return false;
 }
 
@@ -991,7 +1021,13 @@ function backfillDays(rowsByRoot, rocStart, rocEnd, dropped) {
       if (unjudged[board.items[i].official_name]) board.items[i].suspect = true;
     }
     var rows = historyRowsFor(board);
-    if (rows.length) days.push({ date: board.date, rows: rows });
+    if (rows.length) {
+      days.push({ date: board.date, rows: rows });
+    } else {
+      // Let through, but every item withheld: nothing is written, and the day
+      // must stay a hole a later job looks at again, not pass for covered.
+      rejected.push({ date: board.date, reasons: ['every item withheld as suspect or unjudged'] });
+    }
   }
   return { days: days, deferred: deferred, rejected: rejected };
 }
@@ -1034,7 +1070,7 @@ function judgeDay(boards, t) {
  * write, where reading a year's column under it would hold up the refresh.
  * @returns {{days: number, skipped: number, rows: number}}
  */
-function writeArchivedDays(sheetId, days, jobId) {
+function writeArchivedDays(sheetId, days, jobId, lease) {
   var spreadsheet = SpreadsheetApp.openById(sheetId);
   var zone = spreadsheet.getSpreadsheetTimeZone();
   var cache = CacheService.getScriptCache();
@@ -1070,8 +1106,20 @@ function writeArchivedDays(sheetId, days, jobId) {
   var ran = false;
   var append = function () {
     ran = true;
+    // Still this link's to write? Checked under the same lock a takeover
+    // takes, so a link its watchdog has replaced — or a resume has revoked —
+    // cannot append a window the new link is writing too.
+    if (lease) {
+      var current = readSheetBackfill(PropertiesService.getScriptProperties());
+      if (!current || current.id !== jobId || current.link_id !== lease) {
+        throw new Error('superseded: another link holds this job now');
+      }
+    }
     for (var b = 0; b < blocks.length; b++) {
       var sheet = yearSheet(spreadsheet, blocks[b].year);
+      // Tabs the live archive made before the header was frozen get it
+      // frozen here, so the README's "sort column A freely" holds for them.
+      sheet.setFrozenRows(1);
       var from = appendRow(sheet);
       growFor(sheet, from + blocks[b].rows.length - 1);
       sheet.getRange(from, 1, blocks[b].rows.length, SHEET_HEADER.length).setValues(blocks[b].rows);
@@ -1145,7 +1193,9 @@ function archivedDates(sheet, zone) {
   var cells = sheet.getRange(2, 1, last - 1, 1).getValues();
   for (var i = 0; i < cells.length; i++) {
     var day = cellDate(cells[i][0], zone);
-    if (day) present[day] = true; // a blank cell is not a date
+    // Only a date is a day: not a blank cell, nor a header that a sort by
+    // hand moved into the data.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(day)) present[day] = true;
   }
   return present;
 }

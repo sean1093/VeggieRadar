@@ -46,6 +46,7 @@ var FETCH_BATCH = 13;            // concurrent UrlFetchApp requests; a 70+ burst
 var TREND_CACHE_PREFIX = 'veggie_trend_';
 
 var TREND_CACHE_TTL = 60 * 60;   // seconds; bounds staleness once closing prices publish
+var TREND_UNANSWERED_TTL = 2 * 60; // seconds; see `handleTrend`
 var TREND_MAX_DAYS = 14;         // MOA caps one response near 1000 rows; 14 days stays under it
 var TRADE_DATES_CACHE_KEY = 'veggie_trade_dates';
 
@@ -237,6 +238,10 @@ var SHEET_BACKFILL_RETRY_MS = 3 * 60 * 1000;
 // More is a throttle, which drops a whole batch and clears on its own, and
 // keeps failing the window instead.
 var SHEET_BACKFILL_MAX_REFUSED = 2;
+// How many times MOA must answer a window the same way before that answer is
+// acted on (a gap, or a window written without a refused crop). Its own knob:
+// tolerating flakier links must not also mean crawling a hole more times.
+var SHEET_BACKFILL_SETTLE_ANSWERS = 3;
 // Days a job moved past without writing, kept so coverage can leave them out.
 // Past this the job stops claiming coverage (`addHoles`), rather than forget.
 var SHEET_BACKFILL_MAX_HOLES = 40;

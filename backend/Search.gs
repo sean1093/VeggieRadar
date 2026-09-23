@@ -397,8 +397,10 @@ function handleTrend(params) {
   }
 
   var payload = { cropName: cropName, days: days, trend: trend };
-  // Only an answer is shared for an hour: a throttled request would otherwise
-  // show every visitor a crop with no trades until the cache expired.
-  if (page.answered) cache.put(cacheKey, JSON.stringify(payload), TREND_CACHE_TTL);
+  // An answer is shared for an hour. A request MOA did not answer is shared
+  // for a couple of minutes only: long enough that visitors do not hammer a
+  // throttled MOA from the same IP, short enough not to show them a crop with
+  // no trades for an hour.
+  cache.put(cacheKey, JSON.stringify(payload), page.answered ? TREND_CACHE_TTL : TREND_UNANSWERED_TTL);
   return payload;
 }

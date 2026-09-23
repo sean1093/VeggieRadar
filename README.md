@@ -478,9 +478,12 @@ from MOA's range queries:
   writes that date or a later one. A day already in the Sheet — live or from
   an earlier backfill — is left alone. That check runs *outside* the history
   lock, and is safe there only because nothing else writes a date in the
-  job's range and one link runs at a time — a link decides whether it runs
-  under the lock, so a late trigger beside a resume cannot run twice. The
-  append runs inside it, since the live archive appends too. The dates a tab
+  job's range and one link writes at a time: a link takes a **lease** on the
+  job under the lock when it begins, appends only while it still holds it
+  (checked under the lock the append runs in) and finishes only while it
+  still holds it — so a link its watchdog has taken over, or one a resume has
+  revoked, can neither write a window twice nor its state over the newer
+  one. The append runs inside the lock, since the live archive appends too. The dates a tab
   holds are read once per job and cached, not once per link.
 - **A truncated MOA response is refetched, not trusted.** Past ~1,000 rows MOA
   keeps the newest and sets `Next: true`; the oldest day left can be missing
@@ -527,7 +530,8 @@ from MOA's range queries:
 Rows land in the order they were written, not in date order — the live days,
 then each window newest-first. Nothing reads the tab in order (the readers
 group by date), so sorting column A in the Sheets UI is safe at any time: the
-header row is frozen, so it stays on row 1, and a sort by date keeps each
+header row is frozen (the backfill freezes tabs the live archive made before
+it did), so it stays on row 1, and a sort by date keeps each
 day's rows together, which is all the correction path relies on. (Sort by any
 other column and a later correction reports the day `scattered` and leaves
 it alone.)

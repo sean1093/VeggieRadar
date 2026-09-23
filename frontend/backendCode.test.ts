@@ -10,7 +10,7 @@
  *   - Closed markets (and today, before closing prices publish) come back as
  *     `CropName: "休市"` rows with zero price/quantity.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { BOARD_MIN_ITEMS, BOARD_HEALTHY_ITEMS, BoardResponseSchema } from './src/types/board.schema';
@@ -41,6 +41,12 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   const props = new Map<string, string>();
   const cache = new Map<string, string>();
   const triggers: { handler: string; kind: string }[] = [];
+  /** A unique id per created trigger, kept off the objects tests compare. */
+  const triggerIds = new WeakMap<object, string>();
+  let triggerSeq = 0;
+  const uidOf = (t: { handler: string; kind: string }) => triggerIds.get(t) ?? `${t.handler}:${t.kind}`;
+  /** The TTL each cache key was last put with. */
+  const cacheTtls = new Map<string, number | undefined>();
   const fetches: string[] = [];
   /** POSTs to GitHub's `/dispatches`, with their options — see `requestMirrorDeploy`. */
   const dispatches: { url: string; options: Record<string, unknown> }[] = [];
@@ -151,7 +157,10 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     CacheService: {
       getScriptCache: () => ({
         get: (k: string) => cache.get(k) ?? null,
-        put: (k: string, v: string) => void cache.set(k, v),
+        put: (k: string, v: string, ttl?: number) => {
+          cacheTtls.set(k, ttl);
+          cache.set(k, v);
+        },
         remove: (k: string) => {
           // What the trigger list looked like at that moment, so a test can
           // pin the ORDER of a cleanup rather than only its outcome.
@@ -221,11 +230,11 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
       getProjectTriggers: () =>
         triggers.map((t) => ({
           getHandlerFunction: () => t.handler,
-          getUniqueId: () => `${t.handler}:${t.kind}`,
+          getUniqueId: () => uidOf(t),
         })),
-      deleteTrigger: (t: { getHandlerFunction: () => string }) => {
+      deleteTrigger: (t: { getHandlerFunction: () => string; getUniqueId: () => string }) => {
         if (triggerDeleteThrows) throw new Error('Service unavailable: Script service');
-        const i = triggers.findIndex((x) => x.handler === t.getHandlerFunction());
+        const i = triggers.findIndex((x) => uidOf(x) === t.getUniqueId());
         if (i >= 0) triggers.splice(i, 1);
       },
       newTrigger: (handler: string) => {
@@ -233,7 +242,10 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
         const clock = {
           after: (ms: number) => ((spec.kind = `after:${ms}`), clock),
           everyHours: (h: number) => ((spec.kind = `everyHours:${h}`), clock),
-          create: () => void triggers.push(spec),
+          create: () => {
+            triggerIds.set(spec, `t${++triggerSeq}`);
+            triggers.push(spec);
+          },
         };
         return { timeBased: () => clock };
       },
@@ -282,7 +294,9 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     breakSheet: () => { sheetThrows = true; },
     formatZones, cacheRemovals, sheetReads,
     failWriteOnce: (tab: string) => { failingWrites.add(tab); },
-    cellsRead,
+    cellsRead, cacheTtls,
+    /** The id `ScriptApp` would pass a trigger's handler as `e.triggerUid`. */
+    uidOf,
     breakRead: (key: string) => { brokenReadKey = key; },
     setSheetZone: (zone: string) => { sheetZone = zone; },
     breakTriggerDelete: () => { triggerDeleteThrows = true; },
@@ -2701,6 +2715,75 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.job().partial).toHaveLength(1);
     });
 
+    it('writes nothing, and records nothing, once another link holds its lease', () => {
+      // Its watchdog took over while it was still crawling — possible where
+      // executions may outlive the watchdog's delay.
+      let during = () => {};
+      const back = backfill((root, roc) => (during(), market(root, roc)));
+      back.api.handleSheetBackfill({ months: '12' });
+      during = () => back.setJob({ link_id: 'the-watchdog', link_started_at: new Date().toISOString() });
+
+      back.api.sheetBackfillStep();
+      expect(back.tabs.size).toBe(0);
+      expect(back.job()).toMatchObject({ link_id: 'the-watchdog', link_open: true, windows: 0 });
+    });
+
+    it('does not delete the link a resume queued while it was finishing', () => {
+      // The resume revokes the lease, so the old link's finish cannot drop
+      // the triggers — the resume's among them — or write "failed" back.
+      let during = () => {};
+      const back = backfill((root, roc) => (during(), market(root, roc)));
+      back.api.handleSheetBackfill({ months: '12' });
+      during = () => {
+        during = () => {};
+        back.setJob({ status: 'failed' });
+        back.api.handleSheetBackfill({ months: '12' });
+      };
+
+      back.api.sheetBackfillStep();
+      expect(back.job()).toMatchObject({ status: 'running', link_id: null });
+      expect(back.links()).toBeGreaterThan(0);
+      expect(back.tabs.size).toBe(0); // and its crawl was not written either
+    });
+
+    it('replaces its own spent trigger when the lock is busy', () => {
+      // Counting spent triggers as pending would stop the chain after two
+      // busy firings; deleted by its id, the chain always has one link queued.
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.contendLock();
+      for (let i = 0; i < 5; i++) {
+        const [mine] = back.triggers.filter((t) => t.handler === back.api.SHEET_BACKFILL_FN);
+        back.api.sheetBackfillStep({ triggerUid: back.uidOf(mine) });
+        expect(back.links()).toBe(1);
+      }
+    });
+
+    it('keeps a day it let through but wrote nothing for as a hole', () => {
+      // Every root truncated on 09-15 alone, so every crop is left out of it
+      // and withheld from 09-16, which then has nothing to write.
+      const heavy = (root: string, roc: string): Row[] => {
+        const rows = market(root, roc);
+        if (roc !== '115.09.15') return rows;
+        return rows.flatMap((r) => Array.from({ length: 6 }, (_, i) => ({ ...r, MarketName: `市場${i}` })));
+      };
+      const back = backfill(heavy, { cap: 5 });
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      expect(back.datesOf('2026')).not.toContain('2026-09-16');
+      expect(back.job().holes).toContainEqual({ from: '2026-09-15', to: '2026-09-16' });
+      expect(back.job().rejected.join('\n')).toContain('2026-09-16: every item withheld');
+    });
+
+    it('freezes the header of a tab the live path made before it did', () => {
+      const back = backfill();
+      back.tabs.set('2026', { rows: [[...back.api.SHEET_HEADER]], maxRows: 1000, textColumnA: true });
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+      expect(back.tabs.get('2026')?.frozen).toBe(1);
+    });
+
     it('ends a job whose spreadsheet changed under it', () => {
       // Its cursor, coverage and cached dates are about the one it started on.
       const back = backfill();
@@ -2874,24 +2957,6 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
 
       back.api.sheetBackfillStep();
       expect(back.job().partial).toEqual(['2026-09-12…2026-09-20 without 番茄']);
-    });
-
-    it('gives up a link that has run too long, before it writes', () => {
-      // Past the limit its own watchdog may already be running the window.
-      const start = Date.now();
-      vi.useFakeTimers({ now: start, toFake: ['Date'] });
-      try {
-        let during = () => {};
-        const back = backfill((root, roc) => (during(), market(root, roc)));
-        back.api.handleSheetBackfill({ months: '12' });
-        during = () => vi.setSystemTime(start + 7 * 60_000);
-
-        back.api.sheetBackfillStep();
-        expect(back.tabs.size).toBe(0);
-        expect(back.job().last_error).toContain('ran too long');
-      } finally {
-        vi.useRealTimers();
-      }
     });
 
     it('writes no day the guard would have refused', () => {
@@ -3359,9 +3424,12 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       back.api.handleSheetBackfill({ months: '1' });
       runOut(back);
       back.tabs.get('2026')?.rows.push(['', '', '', '', '', '', '', '']);
+      back.tabs.get('2026')?.rows.push([...back.api.SHEET_HEADER]); // a header a hand sort moved
 
       back.cache.delete('veggie_sheet_summary');
-      expect(back.api.handleSheetBackfill({}).archive).toMatchObject({ days: 30, first_date: '2026-08-21' });
+      expect(back.api.handleSheetBackfill({}).archive).toMatchObject({
+        days: 30, first_date: '2026-08-21', last_date: '2026-09-20',
+      });
     });
 
     it('does not guess at a day whose rows are not one block', () => {
@@ -3547,11 +3615,14 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.moa.requests).toHaveLength(1);
     });
 
-    it('does not share a trend MOA did not answer', () => {
-      // An hour of "no trades" for every visitor, over one throttled request.
+    it('shares a trend MOA did not answer for minutes, not an hour', () => {
+      // An hour of "no trades" for every visitor over one throttled request is
+      // too long; not caching it at all would have every visitor hit a
+      // throttled MOA again from the same IP.
       const back = backfill(() => null);
       back.api.handleTrend({ cropName: '甘藍', days: '4' });
-      expect([...back.cache.keys()].some((k) => k.startsWith('veggie_trend_'))).toBe(false);
+      const key = [...back.cache.keys()].find((k) => k.startsWith('veggie_trend_')) as string;
+      expect(back.cacheTtls.get(key)).toBe(120);
     });
 
     it('asks MOA nothing for a blank trend term', () => {
