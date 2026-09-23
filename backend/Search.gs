@@ -376,7 +376,10 @@ function handleTrend(params) {
 
   var start = new Date(today);
   start.setDate(today.getDate() - (days - 1));
-  var rows = tradedRows(fetchCrop(term, dateToROC(start), dateToROC(today))).filter(function (r) {
+  // Whole, not as MOA may cut it: 14 days is sized to stay under its row cap,
+  // but a response it does cut drops the OLDEST rows, and the sparkline's
+  // first point would be an average of whichever markets were left.
+  var rows = tradedRows(fetchWhole(term, dateToROC(start), dateToROC(today)) || []).filter(function (r) {
     return rowRoot(r.CropName) === root;
   });
 

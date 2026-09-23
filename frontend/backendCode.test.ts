@@ -2134,7 +2134,7 @@ const rocIso = (roc: string): string => {
  * newest rows kept and `Next: true` set. A day answering `null` makes the
  * whole request come back as MOA answers a burst: an empty body.
  */
-function moaRange(daily: (root: string, roc: string) => Row[] | null, cap = Infinity) {
+function moaRange(daily: (root: string, roc: string) => Row[] | null | 'error', cap = Infinity) {
   const requests: { root: string; from: string; to: string }[] = [];
   const answer = (url: string) => {
     const q = new URL(url).searchParams;
@@ -2144,12 +2144,15 @@ function moaRange(daily: (root: string, roc: string) => Row[] | null, cap = Infi
     requests.push({ root, from, to });
     let rows: Row[] = [];
     let silent = false;
+    let error = false;
     for (let d = from; d <= to; d = rocShift(d, 1)) {
       const day = daily(root, d);
       if (day === null) silent = true;
+      else if (day === 'error') error = true;
       else rows = rows.concat(day);
     }
     if (silent) return { getResponseCode: () => 200, getContentText: () => '' };
+    if (error) return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ RS: 'ERROR', Message: 'busy' }) };
     const next = rows.length > cap;
     if (next) rows = [...rows].sort((a, b) => (b.TransDate ?? '').localeCompare(a.TransDate ?? '')).slice(0, cap);
     return {
@@ -2186,11 +2189,11 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
   const ROWS_A_DAY = 4;
 
   const backfill = (
-    daily: (root: string, roc: string) => Row[] | null = market,
-    { cap = Infinity, boardRoc = BOARD_ROC } = {},
+    daily: (root: string, roc: string) => Row[] | null | 'error' = market,
+    { cap = Infinity, boardRoc = BOARD_ROC, overrides = {} as Record<string, unknown> } = {},
   ) => {
     const moa = moaRange((root, roc) => daily(root, roc), cap);
-    const back = loadBackend({}, { UrlFetchApp: moa.UrlFetchApp });
+    const back = loadBackend({}, { UrlFetchApp: moa.UrlFetchApp, ...overrides });
     back.props.set(back.api.HISTORY_SHEET_ID_PROP, SHEET_ID);
     back.api.storeBoard({
       type: 'board', date: rocIso(boardRoc), roc_date: boardRoc,
@@ -2319,11 +2322,40 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       back.triggers.length = 0; // the next link never fired
       back.setJob({ updated_at: new Date(Date.now() - back.api.SHEET_BACKFILL_STALL_MS - 60_000).toISOString() });
 
-      const reply = back.api.handleSheetBackfill({ months: '3' });
+      const reply = back.api.handleSheetBackfill({ months: '12' });
       expect(reply.queued).toBe(true);
       expect(reply.message).toBe('已從 2026-09-11 繼續回填');
-      expect(back.job()).toMatchObject({ months: 12, cursor: '2026-09-11', windows: 1 }); // its own reach, kept
+      expect(back.job()).toMatchObject({ months: 12, cursor: '2026-09-11', windows: 1 });
       expect(back.links()).toBe(1);
+    });
+
+    it('replaces a failed job when asked for a different reach', () => {
+      // Resuming is for the same reach. Otherwise a failed job would swallow
+      // every later request, and only deleting the property would free it.
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep(); // 09-12 … 09-20 written
+      back.setJob({ status: 'failed' });
+      const old = back.job();
+
+      const reply = back.api.handleSheetBackfill({ months: '24' });
+      expect(reply.queued).toBe(true);
+      expect(back.job().id).not.toBe(old.id);
+      expect(back.job()).toMatchObject({ months: 24, cursor: '2026-09-20', skip: { from: '2026-09-12', to: '2026-09-20' } });
+    });
+
+    it('will not replace a job whose last link may still be running', () => {
+      // That link could finish and write its job back over the new one.
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.setJob({ status: 'cancelled', link_open: true, link_started_at: new Date().toISOString() });
+
+      expect(back.api.handleSheetBackfill({ months: '12' }).message).toBe('上一批次仍在執行，請數分鐘後再試');
+      expect(back.job().status).toBe('cancelled');
+
+      // Past the execution limit it cannot be running any more.
+      back.setJob({ link_started_at: new Date(Date.now() - 8 * 60_000).toISOString() });
+      expect(back.api.handleSheetBackfill({ months: '12' }).queued).toBe(true);
     });
 
     it('cancels a running job and its queued link', () => {
@@ -2465,6 +2497,49 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.job().failures).toBe(0); // cleared by the window succeeding
     });
 
+    it('waits longer before each retry of a failed window', () => {
+      // A per-IP throttle lasts minutes; retrying after a second would spend
+      // every retry inside it and stop the job over something that clears.
+      const back = backfill(() => []);
+      back.api.handleSheetBackfill({ months: '12' });
+      const waits = () => back.triggers.filter((t) => t.handler === back.api.SHEET_BACKFILL_FN).map((t) => t.kind);
+
+      back.api.sheetBackfillStep();
+      expect(waits()).toEqual(['after:180000']);
+      back.api.sheetBackfillStep();
+      expect(waits()).toEqual(['after:360000']);
+    });
+
+    it('queues the next window at once after one that worked', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+      expect(back.triggers.filter((t) => t.handler === back.api.SHEET_BACKFILL_FN).map((t) => t.kind))
+        .toEqual(['after:1000']);
+    });
+
+    it('tries the lock once more rather than throw a crawl away', () => {
+      // The live refresh holds it across its own Sheets round trip.
+      let waits = 0;
+      const lock = {
+        getScriptLock: () => ({
+          waitLock: () => {
+            waits += 1;
+            if (waits === 2) throw new Error('Could not obtain lock'); // the link's first try
+          },
+          tryLock: () => true,
+          releaseLock: () => {},
+        }),
+      };
+      const back = backfill(market, { overrides: { LockService: lock } });
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      expect(back.rowsOf('2026')).toHaveLength(8 * ROWS_A_DAY);
+      expect(back.job().failures).toBe(0);
+      expect(back.logs.some((l) => l.includes('retrying once'))).toBe(true);
+    });
+
     it('fails the window when MOA does not answer a root, and writes nothing', () => {
       // A day is skipped by date ever after it is written, so writing the
       // window without the crop would make the hole permanent.
@@ -2510,6 +2585,20 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
 
       back.api.sheetBackfillStep();
       expect(back.job()).toMatchObject({ status: 'cancelled', cursor: '2026-09-20', windows: 0 });
+      expect(back.links()).toBe(0);
+    });
+
+    it('keeps a cancel over a window that just finished the job', () => {
+      let during = () => {};
+      const back = backfill((root, roc) => (during(), market(root, roc)));
+      back.api.handleSheetBackfill({ months: '1' });
+      for (let i = 0; i < 3; i++) back.api.sheetBackfillStep(); // one window left
+      during = () => {
+        if (back.job().status === 'running') back.api.handleSheetBackfill({ cancel: '1' });
+      };
+
+      back.api.sheetBackfillStep();
+      expect(back.job().status).toBe('cancelled');
       expect(back.links()).toBe(0);
     });
 
@@ -2706,6 +2795,23 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.moa.requests.filter((r) => r.root === '番茄')).toHaveLength(2); // retried once first
     });
 
+    it('never takes back an answer when the retry goes silent', () => {
+      // Out-of-season roots answer "nothing traded" and are retried with the
+      // rest of the misses; a throttled retry says nothing about them.
+      const back = backfill((root, roc) => {
+        if (root !== '番茄') return market(root, roc);
+        return back.moa.requests.filter((r) => r.root === '番茄').length > 1 ? null : [];
+      });
+      const { rows, unanswered } = back.api.fetchCompleteRows(['甘藍', '番茄'], '115.09.01', '115.09.04');
+      expect(unanswered).toEqual([]);
+      expect(rows['番茄']).toEqual([]);
+    });
+
+    it('does not take an error object for "nothing traded"', () => {
+      const back = backfill((root, roc) => (root === '番茄' ? 'error' : market(root, roc)));
+      expect(back.api.fetchCompleteRows(['甘藍', '番茄'], '115.09.01', '115.09.04').unanswered).toEqual(['番茄']);
+    });
+
     it('reports a split that MOA stopped answering part-way', () => {
       const oneADay = (root: string, roc: string) => {
         if (root !== '甘藍') return [];
@@ -2714,6 +2820,26 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       const back = backfill(oneADay, { cap: 3 });
       const { unanswered } = back.api.fetchCompleteRows(['甘藍'], '115.09.01', '115.09.04');
       expect(unanswered).toEqual(['甘藍']);
+    });
+
+    /** Two markets a day at 20 and 40, so a day cut in half averages wrong. */
+    const twoMarkets = (root: string, roc: string) =>
+      root === '甘藍'
+        ? [trendRow(roc, '甘藍-初秋', 20, 60000), trendRow(roc, '甘藍-初秋', 40, 60000, '台中')]
+        : [];
+
+    it('keeps the trend\'s oldest point whole', () => {
+      // A cut response drops the OLDEST rows, and the sparkline's first point
+      // would be the average of whichever market was left.
+      const back = backfill(twoMarkets, { cap: 7 }); // 4 days × 2 rows, one over
+      const { trend } = back.api.handleTrend({ cropName: '甘藍', days: '4' });
+      expect(trend).toEqual([30, 30, 30, 30]);
+    });
+
+    it('keeps the rolling backfill\'s oldest day whole', () => {
+      const back = backfill(twoMarkets, { cap: 23 }); // 12 days × 2 rows, one over
+      back.api.backfillHistory();
+      for (const [, price] of back.api.readHistory().items['高麗菜']) expect(price).toBe(30);
     });
 
     it('costs nothing extra when nothing is cut', () => {

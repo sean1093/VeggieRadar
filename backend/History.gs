@@ -271,9 +271,12 @@ function backfillHistory() {
     end.setDate(today.getDate() - w * BACKFILL_WINDOW_DAYS);
     var start = new Date(end);
     start.setDate(end.getDate() - (BACKFILL_WINDOW_DAYS - 1));
-    // fetchRootRows retries empty roots once, so one throttled batch cannot
-    // silently strip a slice of roots from the one-time seed.
-    crawled.push(fetchRootRows(roots, dateToROC(start), dateToROC(end)));
+    // Retries empty roots once, so one throttled batch cannot silently strip
+    // a slice of roots from the one-time seed; and refetches a root MOA cut
+    // short, whose oldest day would otherwise be an average of some markets.
+    // A root still unanswered is simply missing, as it always was: the
+    // 4-hourly refresh tops the window up.
+    crawled.push(fetchCompleteRows(roots, dateToROC(start), dateToROC(end)).rows);
   }
 
   // Retried once, because losing this lock now costs more than it used to: the

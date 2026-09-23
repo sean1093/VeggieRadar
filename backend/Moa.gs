@@ -55,8 +55,11 @@ function parsePage(resp) {
   try {
     if (resp.getResponseCode() !== 200) return none;
     var json = JSON.parse(resp.getContentText());
-    if (!json || typeof json !== 'object') return none;
-    return { rows: json.Data || [], answered: true, next: json.Next === true };
+    // An answer carries `Data`, even when nothing traded. A JSON object
+    // without it is MOA saying something else — an error, a throttle — and
+    // counting it as "nothing traded" would archive the crop's absence.
+    if (!json || !Array.isArray(json.Data)) return none;
+    return { rows: json.Data, answered: true, next: json.Next === true };
   } catch (err) {
     return none;
   }
@@ -97,16 +100,23 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta) {
   return out;
 }
 
+/**
+ * Records what one response said about a root. An answer is never taken back:
+ * `fetchRootRows` retries every root that came back empty, out-of-season ones
+ * included, and a retry throttled into silence says nothing about a root that
+ * already answered "nothing traded".
+ */
 function notePage(meta, root, page) {
   if (page.answered) {
+    meta.answered[root] = true;
     delete meta.unanswered[root];
-  } else {
+    if (page.next) {
+      meta.truncated[root] = true;
+    } else {
+      delete meta.truncated[root];
+    }
+  } else if (!meta.answered[root]) {
     meta.unanswered[root] = true;
-  }
-  if (page.next) {
-    meta.truncated[root] = true;
-  } else {
-    delete meta.truncated[root];
   }
 }
 
@@ -146,7 +156,7 @@ function fetchRootRows(roots, rocStart, rocEnd, meta) {
  * @returns {{rows: Object, unanswered: string[]}}
  */
 function fetchCompleteRows(roots, rocStart, rocEnd) {
-  var meta = { truncated: {}, unanswered: {} };
+  var meta = { answered: {}, truncated: {}, unanswered: {} };
   var rows = fetchRootRows(roots, rocStart, rocEnd, meta);
   Object.keys(meta.truncated).forEach(function (root) {
     var whole = fetchSplit(root, rocStart, rocEnd);
@@ -171,16 +181,22 @@ function fetchSplit(root, rocStart, rocEnd) {
     return [];
   }
   var half = Math.ceil(span / 2);
+  // Sequential requests right after a truncated one: keep under the per-IP limit.
+  Utilities.sleep(120);
   var older = fetchWhole(root, rocStart, shiftROC(rocStart, half - 1));
   if (older === null) return null;
+  Utilities.sleep(120);
   var newer = fetchWhole(root, shiftROC(rocStart, half), rocEnd);
   return newer === null ? null : older.concat(newer);
 }
 
+/**
+ * One term across a range, split until MOA stops cutting it short — or null
+ * when MOA did not answer. One request when nothing is cut.
+ */
 function fetchWhole(root, rocStart, rocEnd) {
   var page;
   try {
-    Utilities.sleep(120); // sequential, right after a full batch: keep under the per-IP limit
     page = parsePage(UrlFetchApp.fetch(cropUrl(root, rocStart, rocEnd), { muteHttpExceptions: true }));
   } catch (err) {
     Logger.log('fetchWhole error (' + root + ' ' + rocStart + '): ' + err);

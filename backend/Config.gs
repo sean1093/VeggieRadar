@@ -220,8 +220,17 @@ var SHEET_BACKFILL_MAX_MONTHS = 24;
 // loop a crawl every few seconds for ever.
 var SHEET_BACKFILL_MAX_FAILURES = 3;
 // A running job that has not moved for this long has no chain behind it: one
-// link runs for at most 6 minutes and queues the next a second later.
+// link runs for at most 6 minutes and queues the next within minutes.
 var SHEET_BACKFILL_STALL_MS = 15 * 60 * 1000;
+// How long a link can possibly still be running: the execution limit, plus a
+// margin. A job whose last link started longer ago than this has nothing in
+// flight that could still write it back.
+var SHEET_BACKFILL_LINK_MAX_MS = 7 * 60 * 1000;
+// The wait before retrying a failed window, times the failures so far. A
+// per-IP throttle lasts minutes; retrying after a second would spend every
+// retry inside it and stop the job over something that clears on its own.
+// Kept well under the stall window, which it must not look like.
+var SHEET_BACKFILL_RETRY_MS = 3 * 60 * 1000;
 
 // Plausibility guard (`Validate.gs`). The refresh used to reject exactly one
 // thing — an EMPTY board — so a throttled crawl or a MOA unit change would

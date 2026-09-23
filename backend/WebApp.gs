@@ -177,7 +177,7 @@ function handleDiag(full, props) {
       last_write: parseSheetWrite(props[SHEET_LAST_WRITE_PROP]),
       // The MOA backfill (§4), as progress: where it has got to, not why it
       // last failed.
-      backfill: publicBackfill(props[SHEET_BACKFILL_PROP]),
+      backfill: publicBackfill(parseSheetBackfill(props[SHEET_BACKFILL_PROP])),
     },
     // Whether the mirror is being republished by the crawl or left to the
     // fallback cron: an expired PAT would 401 on every refresh and nothing

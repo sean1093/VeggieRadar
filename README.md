@@ -468,14 +468,17 @@ from MOA's range queries:
   until each piece is whole, and a single day that still truncates leaves that
   crop out of that day — missing is honest, wrong would be permanent.
   (`calibrate` has always done this; the rolling history's backfill and the
-  trend still read a truncated response as whole.)
+  trend now do too — both used to average an oldest day of whichever markets
+  MOA left in.)
 - **It survives stopping.** The job — reach, cursor, counts, last error — is
-  one property. A failed window is retried by the next link; three in a row
-  stop the chain as `failed`. A link is counted *before* it works, because one
+  one property. A failed window is retried by the next link, 3 then 6 minutes
+  later — a per-IP throttle lasts minutes, and retrying after a second would
+  spend every retry inside it; three in a row stop the chain as `failed`. A link is counted *before* it works, because one
   the 6-minute limit kills never reaches its `catch` — so a window that is
   always too slow ends as `failed` too, rather than stalling for ever. Asking
-  again with any `months=` resumes a failed job, or a running one that has not
-  moved for 15 minutes, from its cursor and with its original reach;
+  again with the same `months=` resumes a failed job, or a running one that
+  has not moved for 15 minutes, from its cursor; a different reach replaces
+  it (once its last link cannot still be running and write it back);
   `cancel=1` stops it after the current window, and is kept in a property of
   its own so the chain's next write cannot undo it. Requests are serialised
   under the history lock, so two at once cannot start two chains.
