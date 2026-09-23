@@ -550,8 +550,8 @@ outcome recorded — a slow Sheets read must never cost the board, and a
 timeout there costs only the comparison. The board is built with the
 medians kept from the last read, which after a new trading date are those of
 a window a day or two older: a ±7-day median barely moves. They are read
-again once a day, or every six hours while a backfill is running, since the
-archive may still be filling in — and
+again once a day, every six hours while a backfill that reaches the window
+runs, and as soon as one has finished since the last read — and
 nothing is published for a window a running backfill has not finished
 walking through, whose later days alone would pass for 「去年此時」. A
 refresh that has already run four minutes leaves the read to the next one,
@@ -1138,7 +1138,7 @@ wrapper, `src/lib/analytics.ts`. Each event exists to settle a decision:
 | `sort_changed` | `mode` | 划算優先 adoption → 「今日推薦」 (§9) |
 | `filter_changed` | `filter` | Which categories and 關注 get used |
 | `watch_toggled` | `on`, `count_bucket` | Whether a watchlist summary is worth building |
-| `drawer_opened` | `has_varieties`, `has_baseline`, `has_last_year`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen; `has_last_year` is how #22 decides whether 「比去年同期」 earns a place on the card (it is drawer-only until then) |
+| `drawer_opened` | `has_varieties`, `has_baseline`, `has_last_year`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen; `has_last_year` is how #22 decides whether 「比去年同期」 earns a place on the card (it is drawer-only until then). Sent once per open, once the board has settled — not while the cached copy is on screen, whose flags may be missing what the fresh board brings |
 | `share` | `method` (`web_share` / `clipboard`), `has_retail` | Whether sharing earns the per-item preview pages (§9), and how much of it goes through the native sheet |
 | `trend_result` | `outcome` (`ok` / `empty` / `failed`), `reason` | Whether the trend deadline is right; memo hits are not reported |
 | `chunk_failed` | `chunk` | Cost of the code split |

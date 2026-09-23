@@ -40,6 +40,13 @@ interface DetailDrawerProps {
    * that can reopen it for the recipient (`itemUrl`).
    */
   shareQuery?: string;
+  /**
+   * Whether the board behind the drawer is the one that will stay — fresh, or
+   * definitively degraded — rather than the cached copy painted while that
+   * one loads. An open is reported once the board has settled, so its flags
+   * describe what the user saw. Defaults to true for callers with no cache.
+   */
+  boardSettled?: boolean;
 }
 
 /**
@@ -65,7 +72,9 @@ function shareText(item: ProduceItem): string {
   return `今日菜價｜${item.name} ${price}${change}`;
 }
 
-const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allProduceItems, watched = false, onToggleWatch, shareQuery = '' }) => {
+const DetailDrawer: React.FC<DetailDrawerProps> = ({
+  isOpen, onClose, item, allProduceItems, watched = false, onToggleWatch, shareQuery = '', boardSettled = true,
+}) => {
   // The crop whose trend the drawer shows, or null while closed. The trend is
   // stored together with the key it answers, so a new item or a reopen reads
   // as "loading" until its own answer lands — nothing to reset in the effect,
@@ -98,35 +107,36 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
   // whether the variety breakdown and the baseline (§5) are being seen at all.
   const hasVarieties = (item.varieties?.length ?? 0) > 0;
   const vsBaseline = trustedBaseline(item);
-  const hasBaseline = vsBaseline !== null;
-  // Whether the baseline sentence renders: the year-ago line spaces itself
-  // off it, so the two read one condition.
+  // Whether the baseline sentence renders — which is also what `has_baseline`
+  // reports, and what the year-ago line spaces itself off.
   const showBaseline = vsBaseline !== null && item.baseline_price != null;
   const lastYear = trustedLastYear(item);
   const hasLastYear = lastYear !== null;
   const hasRetail = marketPrice(item) != null;
 
-  // Once per open. A fresh board replacing the cached one under an open
-  // drawer changes these flags — a cached board rarely has a baseline or a
-  // year-ago price yet — and reporting the open again would count it twice,
+  // Once per open, and once the board has settled. The cached board painted
+  // while the fresh one loads may lack a baseline or a year-ago price the
+  // fresh one has: reported at once, the open would be counted without them;
+  // reported again when they arrive, it would be counted twice — either way
   // in exactly the numbers these flags exist to measure.
   // Keyed by the item, not its root: 青椒 and 甜椒 share one, and moving from
-  // one to the other inside the drawer is a second open.
-  const openKey = isOpen && item ? item.name : null;
+  // one to the other inside the drawer is a second open. An item with no
+  // root name has no trend and has never been reported.
+  const openKey = isOpen && item.official_name ? item.name : null;
   const trackedKey = useRef<string | null>(null);
   useEffect(() => {
     if (!openKey) {
       trackedKey.current = null;
       return;
     }
-    if (trackedKey.current === openKey) return;
+    if (!boardSettled || trackedKey.current === openKey) return;
     trackedKey.current = openKey;
     // `has_last_year` is how #22 decides whether the comparison earns a place
     // on the card too: it is shown here only until that is measured.
     track('drawer_opened', {
-      has_varieties: hasVarieties, has_baseline: hasBaseline, has_last_year: hasLastYear, has_retail: hasRetail,
+      has_varieties: hasVarieties, has_baseline: showBaseline, has_last_year: hasLastYear, has_retail: hasRetail,
     });
-  }, [openKey, hasVarieties, hasBaseline, hasLastYear, hasRetail]);
+  }, [openKey, boardSettled, hasVarieties, showBaseline, hasLastYear, hasRetail]);
 
   // Phones hand the sentence to LINE through the native sheet; desktops, which
   // have no sheet, get the link on the clipboard. Only the completed path is

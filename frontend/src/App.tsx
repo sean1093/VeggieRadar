@@ -303,6 +303,7 @@ function App() {
           watched={watchlist.isWatched(view.selectedItem.official_name)}
           onToggleWatch={toggleWatch}
           shareQuery={view.shareQuery}
+          boardSettled={status.kind === 'degraded' || (status.kind === 'ready' && status.source !== 'cache')}
         />
       )}
     </div>

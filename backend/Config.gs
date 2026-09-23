@@ -274,6 +274,8 @@ var YOY_KEPT_MAX_DAYS = 7;
 // Runs of the window's rows past which the tab is taken as sorted by another
 // column: the backfill writes a week in at most a few runs.
 var YOY_MAX_RUNS = 20;
+// Rows of other days that may sit between runs read in one call.
+var YOY_MERGE_SLACK_ROWS = 400;
 // The year-ago read is the refresh's last step; past this far into the run it
 // is left to the next refresh, well inside the 6-minute execution limit.
 var YOY_START_BY_MS = 4 * 60 * 1000;

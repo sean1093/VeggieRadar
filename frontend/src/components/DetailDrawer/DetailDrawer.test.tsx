@@ -228,28 +228,44 @@ describe('DetailDrawer', () => {
       expect(screen.queryByText(/去年此時/)).not.toBeInTheDocument();
     });
 
-    it('reports an open once, even when a fresh board fills the flags in after', () => {
-      // A cached board rarely has the year-ago price yet; the fresh one that
-      // replaces it under an open drawer must not count the open twice.
+    it('reports an open once the board settles, with what the settled board shows', () => {
+      // Opened on the cached board, which lacks the year-ago price: reported
+      // then, the open would be counted without it; reported again when the
+      // fresh board arrives, it would be counted twice.
       const gtag = vi.fn();
       vi.stubGlobal('gtag', gtag);
+      const opens = () => gtag.mock.calls.filter((c) => c[1] === 'drawer_opened');
       try {
         const { rerender } = render(
-          <DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />,
+          <DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} boardSettled={false} />,
         );
-        rerender(
-          <DetailDrawer
-            isOpen
-            onClose={() => {}}
-            item={{ ...withRetail, last_year_price: 16, vs_last_year_percent: 5, baseline_price: 18, vs_baseline_percent: 3 }}
-            allProduceItems={mockAllProduceItems}
-          />,
-        );
-        expect(gtag.mock.calls.filter((c) => c[1] === 'drawer_opened')).toHaveLength(1);
+        expect(opens()).toHaveLength(0);
+        const fresh = { ...withRetail, last_year_price: 16, vs_last_year_percent: 5, baseline_price: 18, vs_baseline_percent: 3 };
+        rerender(<DetailDrawer isOpen onClose={() => {}} item={fresh} allProduceItems={mockAllProduceItems} boardSettled />);
+        expect(opens()).toHaveLength(1);
+        expect(opens()[0][2]).toMatchObject({ has_last_year: true, has_baseline: true });
+
+        rerender(<DetailDrawer isOpen onClose={() => {}} item={{ ...fresh, vs_last_year_percent: 6 }} allProduceItems={mockAllProduceItems} />);
+        expect(opens()).toHaveLength(1); // not again for the same open
 
         rerender(<DetailDrawer isOpen={false} onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
         rerender(<DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />);
-        expect(gtag.mock.calls.filter((c) => c[1] === 'drawer_opened')).toHaveLength(2); // a new open
+        expect(opens()).toHaveLength(2); // a new open
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('reports has_baseline only when the baseline sentence shows', () => {
+      // A percentage without the price it is measured from renders nothing.
+      const gtag = vi.fn();
+      vi.stubGlobal('gtag', gtag);
+      try {
+        render(
+          <DetailDrawer isOpen onClose={() => {}} item={{ ...withRetail, vs_baseline_percent: -5 }} allProduceItems={mockAllProduceItems} />,
+        );
+        expect(screen.queryByText(/近一個月批發中位/)).not.toBeInTheDocument();
+        expect(gtag).toHaveBeenCalledWith('event', 'drawer_opened', expect.objectContaining({ has_baseline: false }));
       } finally {
         vi.unstubAllGlobals();
       }

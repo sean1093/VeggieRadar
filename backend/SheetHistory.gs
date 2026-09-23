@@ -1438,15 +1438,17 @@ function refreshYearAgo(boardRoc, startedAt) {
     var kept = parseYearAgo(props.getProperty(YOY_PROP));
     var job = parseSheetBackfill(props.getProperty(SHEET_BACKFILL_PROP));
     var span = yearAgoWindow(boardRoc);
-    var ours = !!job && job.sheet === sheetId;
+    // Only a backfill whose reach takes in the window can change what a read
+    // finds: one filling the last month for the variety baseline cannot.
+    var ours = !!job && job.sheet === sheetId && job.from <= span.to;
     var filling = ours && job.status === 'running' && !backfillStalled(job);
     if (kept && kept.date === boardRoc && kept.sheet === sheetId) {
-      // Six hours while a backfill may be adding to the archive, a day
-      // otherwise — unless a backfill has written since this was read, which
-      // is when the archive has something new to say: an empty answer read
-      // before a backfill must not outlive it by a day.
-      var writtenSince = ours && Date.parse(job.updated_at || '') > Date.parse(kept.at);
-      if (!writtenSince && Date.now() - Date.parse(kept.at) < (filling ? YOY_EMPTY_RETRY_MS : YOY_KEEP_MS)) {
+      // Six hours while such a backfill runs, a day otherwise — unless one has
+      // FINISHED since this was read: an empty answer read before a backfill
+      // must not outlive it by a day. (A running one bumps its clock every
+      // link, so "written since" would mean every refresh.)
+      var finishedSince = ours && job.status !== 'running' && Date.parse(job.updated_at || '') > Date.parse(kept.at);
+      if (!finishedSince && Date.now() - Date.parse(kept.at) < (filling ? YOY_EMPTY_RETRY_MS : YOY_KEEP_MS)) {
         return kept.items;
       }
     }
@@ -1465,7 +1467,7 @@ function refreshYearAgo(boardRoc, startedAt) {
       // `diag`, or refreshes that are always this slow would leave the
       // comparison off with nothing to show why.
       Logger.log('refreshYearAgo: skipped, the refresh has run ' + Math.round((Date.now() - startedAt) / 1000) + ' s');
-      props.setProperty(YOY_SKIPPED_PROP, new Date().toISOString());
+      props.setProperty(YOY_SKIPPED_PROP, JSON.stringify({ at: new Date().toISOString(), sheet: sheetId }));
       return null;
     }
     var read = function () { return yearAgoMedians(SpreadsheetApp.openById(sheetId), span); };
@@ -1480,6 +1482,7 @@ function refreshYearAgo(boardRoc, startedAt) {
         date: boardRoc, sheet: sheetId, at: new Date().toISOString(),
         items: found.items, scattered: found.scattered || undefined
       }));
+      props.deleteProperty(YOY_SKIPPED_PROP); // read after all: nothing left undone
     } catch (err) {
       Logger.log('refreshYearAgo: not kept: ' + err); // read again next refresh
     }
@@ -1535,8 +1538,11 @@ function parseYearAgo(raw) {
  * the week into hundreds of runs: that is reported as `scattered`, as
  * `readDay` does, rather than read around with a read of the whole tab.
  *
- * The caller holds the history lock (see `refreshYearAgo`). Dates are checked
- * again on the second read all the same, for a sort by hand in between.
+ * The caller holds the history lock only when the span reaches the board's
+ * own year (see `refreshYearAgo`); everywhere else the tab is only appended
+ * to. Dates are checked again on the second read all the same, for a sort by
+ * hand in between — and anything that writes or deletes here would need the
+ * lock taken for every span.
  *
  * An item needs `YOY_MIN_SIDE_DAYS` archived days on EACH side of the day a
  * year back — so at least four in all: days on one side only, or one stray
@@ -1560,6 +1566,14 @@ function yearAgoMedians(spreadsheet, span) {
     if (runs.length > YOY_MAX_RUNS) {
       Logger.log('yearAgoMedians: ' + years[y] + ' is not in date order (' + runs.length + ' runs); not read');
       return { items: {}, scattered: true };
+    }
+    // Runs close together are read in one call — the dates are checked row
+    // by row anyway — so a week split by a few live days is one round trip.
+    if (runs.length > 1) {
+      var wanted = 0;
+      for (var q = 0; q < runs.length; q++) wanted += runs[q].last - runs[q].first + 1;
+      var spanRows = runs[runs.length - 1].last - runs[0].first + 1;
+      if (spanRows <= wanted * 2 + YOY_MERGE_SLACK_ROWS) runs = [{ first: runs[0].first, last: runs[runs.length - 1].last }];
     }
     for (var r = 0; r < runs.length; r++) {
       var values = sheet.getRange(runs[r].first, 1, runs[r].last - runs[r].first + 1, SHEET_HEADER.length).getValues();
@@ -1621,11 +1635,18 @@ function publicYearAgo(raw, sheetId, skippedAt, boardRoc, jobRaw) {
     out = out || { date: null, at: null, items: 0, applied: false };
     out.waiting_for_backfill = true;
   }
-  // A read the last refresh left undone for time, if more recent than what is
-  // kept: refreshes that are always that slow show here, not as a silence.
-  if (skippedAt && (!out || skippedAt > out.at)) {
-    out = out || { date: null, at: null, items: 0 };
-    out.skipped_at = skippedAt;
+  // A read the last refresh left undone for time, for this spreadsheet and
+  // not since made good: refreshes that are always that slow show here, not
+  // as a silence. Cleared by the next read that happens.
+  var skipped = null;
+  try {
+    skipped = skippedAt ? JSON.parse(skippedAt) : null;
+  } catch (err) {
+    skipped = null;
+  }
+  if (skipped && skipped.sheet === sheetId && (!out || !out.at || skipped.at > out.at)) {
+    out = out || { date: null, at: null, items: 0, applied: false };
+    out.skipped_at = skipped.at;
   }
   return out;
 }
