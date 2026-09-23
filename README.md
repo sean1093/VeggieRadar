@@ -538,9 +538,11 @@ archived blend rows within a week either side of the trading date a year
 back — column A of the year tab (two, across New Year) to find them, then
 only those rows; under the history lock only late in December, when the
 window reaches the current year's tab, where the live path rewrites its day
-— and takes each crop's median, one value per day. With at least two
-archived days on each side of the day itself (fewer on one side is a
-half-filled window, whose median leans to one week), a crop gets
+— and takes each crop's median, one value per day, over the SAME number of
+days from each side of the day itself (the nearest ones, and the day if
+archived), so a window with more on one side — a backfill that stopped
+part-way, a gap, a closure — cannot lean to that week. With at least two on
+each side, a crop gets
 `last_year_price` (元/台斤) and `vs_last_year_percent`, wholesale against
 wholesale like the baseline. A tab sorted by another column is reported as
 `scattered` in `diag` rather than read around.
@@ -550,8 +552,9 @@ outcome recorded — a slow Sheets read must never cost the board, and a
 timeout there costs only the comparison. The board is built with the
 medians kept from the last read, which after a new trading date are those of
 a window a day or two older: a ±7-day median barely moves. They are read
-again once a day, every six hours while a backfill that reaches the window
-runs, and as soon as one has finished since the last read — and
+again once a day; every six hours while a backfill that reaches the window
+runs, or after a tab was found out of date order; and as soon as a backfill
+has finished since the last read — and
 nothing is published for a window a running backfill has not finished
 walking through, whose later days alone would pass for 「去年此時」. A
 refresh that has already run four minutes leaves the read to the next one,
@@ -1138,7 +1141,7 @@ wrapper, `src/lib/analytics.ts`. Each event exists to settle a decision:
 | `sort_changed` | `mode` | 划算優先 adoption → 「今日推薦」 (§9) |
 | `filter_changed` | `filter` | Which categories and 關注 get used |
 | `watch_toggled` | `on`, `count_bucket` | Whether a watchlist summary is worth building |
-| `drawer_opened` | `has_varieties`, `has_baseline`, `has_last_year`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen; `has_last_year` is how #22 decides whether 「比去年同期」 earns a place on the card (it is drawer-only until then). Sent once per open, once the board has settled — not while the cached copy is on screen, whose flags may be missing what the fresh board brings |
+| `drawer_opened` | `has_varieties`, `has_baseline`, `has_last_year`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen; `has_last_year` is how #22 decides whether 「比去年同期」 earns a place on the card (it is drawer-only until then). Sent once per open, once the board's read has finished (`useBoard().settled`) — not while a cached copy or a stale mirror is painted over a read still in flight, whose flags may be missing what the fresh board brings |
 | `share` | `method` (`web_share` / `clipboard`), `has_retail` | Whether sharing earns the per-item preview pages (§9), and how much of it goes through the native sheet |
 | `trend_result` | `outcome` (`ok` / `empty` / `failed`), `reason` | Whether the trend deadline is right; memo hits are not reported |
 | `chunk_failed` | `chunk` | Cost of the code split |

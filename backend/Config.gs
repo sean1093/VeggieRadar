@@ -267,7 +267,7 @@ var YOY_PROP = 'veggie_yoy';
 // trading date for days, so this, not the date, is what makes it read again.
 // Six hours while a backfill is running, which may be adding to the window.
 var YOY_KEEP_MS = 24 * 60 * 60 * 1000;
-var YOY_EMPTY_RETRY_MS = 6 * 60 * 60 * 1000;
+var YOY_SOON_MS = 6 * 60 * 60 * 1000; // …while a backfill may add to the window, or the tab needs re-sorting
 // Kept medians older than this many days are not applied at all: the window
 // they describe has moved too far from the board's date.
 var YOY_KEPT_MAX_DAYS = 7;

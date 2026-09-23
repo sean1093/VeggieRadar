@@ -33,7 +33,7 @@ function missSuggestion(query: string, status: SearchStatus): string {
  * has to be spelled out here.
  */
 function App() {
-  const { status, freshness, reload } = useBoard();
+  const { status, freshness, reload, settled } = useBoard();
   const board = boardItems(status);
   const { query, status: searchStatus, outcome, search: runQuery, preview, cancelPreview, clear } = useSearch(board);
   const watchlist = useWatchlist();
@@ -303,7 +303,7 @@ function App() {
           watched={watchlist.isWatched(view.selectedItem.official_name)}
           onToggleWatch={toggleWatch}
           shareQuery={view.shareQuery}
-          boardSettled={status.kind === 'degraded' || (status.kind === 'ready' && status.source !== 'cache')}
+          boardSettled={settled}
         />
       )}
     </div>

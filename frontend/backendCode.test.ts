@@ -282,7 +282,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'SHEET_LAST_WRITE_PROP', 'SHEET_CORRECTION_MS',
     'handleSheetBackfill', 'sheetBackfillStep', 'backfillDays', 'fetchCompleteRows', 'archiveSummary',
     'SHEET_BACKFILL_PROP', 'SHEET_BACKFILL_FN', 'SHEET_BACKFILL_MAX_FAILURES', 'SHEET_BACKFILL_STALL_MS',
-    'refreshYearAgo', 'keptYearAgo', 'applyYearOverYear', 'YOY_PROP', 'YOY_EMPTY_RETRY_MS', 'YOY_KEEP_MS',
+    'refreshYearAgo', 'keptYearAgo', 'applyYearOverYear', 'YOY_PROP', 'YOY_SOON_MS', 'YOY_KEEP_MS',
     'GH_DISPATCH_MIN_INTERVAL_MS', 'GH_DISPATCH_FAIL_BACKOFF_MS', 'GH_DISPATCH_PROP', 'GH_DISPATCH_OK_PROP',
     'validateBoard', 'markSuspects', 'readChunkedProp',
     'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
@@ -4100,6 +4100,39 @@ describe('same weeks last year (#22 §2)', () => {
     expect(back.api.refreshYearAgo(roc)).toEqual({ 高麗菜: 25 }); // 20, 10, 30, 40 — not 15
   });
 
+  it('takes as many days from each side, the nearest, so a lopsided window cannot lean', () => {
+    // Two archived days before the day and five after — a backfill that
+    // stopped part-way, or a gap: all seven would put the median in the later
+    // week.
+    const roc = '115.09.21';
+    const back = archived([
+      blend(yearAgo(roc, -5), '高麗菜', 10),
+      blend(yearAgo(roc, -2), '高麗菜', 20),
+      blend(yearAgo(roc, 0), '高麗菜', 25), // the day itself counts
+      blend(yearAgo(roc, 1), '高麗菜', 30),
+      blend(yearAgo(roc, 2), '高麗菜', 40),
+      ...[3, 4, 5].map((d) => blend(yearAgo(roc, d), '高麗菜', 90)),
+    ]);
+    expect(back.api.refreshYearAgo(roc)).toEqual({ 高麗菜: 25 }); // 20, 10, 30, 40 and 25 — not 30 of all eight
+  });
+
+  it('looks at a tab out of date order again within hours, not a day', () => {
+    // Its fix is a re-sort by hand, which nothing else here would notice.
+    const roc = '115.09.21';
+    const rows: unknown[][] = [];
+    for (let i = 0; i < 40; i++) {
+      rows.push(blend(yearAgo(roc, (i % 5) - 2), `品項${i}`, 20));
+      rows.push(blend('2025-03-01', '番茄', 1));
+    }
+    const back = archived(rows);
+    back.api.refreshYearAgo(roc);
+    const kept = JSON.parse(back.props.get(back.api.YOY_PROP) as string);
+    back.props.set(back.api.YOY_PROP, JSON.stringify({ ...kept, at: new Date(Date.now() - 7 * 3_600_000).toISOString() }));
+    const reads = back.sheetReads.length;
+    back.api.refreshYearAgo(roc);
+    expect(back.sheetReads.length).toBeGreaterThan(reads);
+  });
+
   it('keeps the median unrounded, as the 28-day one is', () => {
     const roc = '115.09.21';
     const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 10.04)));
@@ -4138,7 +4171,7 @@ describe('same weeks last year (#22 §2)', () => {
       back.props.set(back.api.YOY_PROP, JSON.stringify(kept));
     };
 
-    age(back.api.YOY_EMPTY_RETRY_MS + 60_000);
+    age(back.api.YOY_SOON_MS + 60_000);
     back.api.refreshYearAgo(roc);
     expect(back.sheetReads).toHaveLength(reads);
 
