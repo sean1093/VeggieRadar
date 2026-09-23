@@ -397,6 +397,8 @@ function handleTrend(params) {
   }
 
   var payload = { cropName: cropName, days: days, trend: trend };
-  cache.put(cacheKey, JSON.stringify(payload), TREND_CACHE_TTL);
+  // Only an answer is shared for an hour: a throttled request would otherwise
+  // show every visitor a crop with no trades until the cache expired.
+  if (page.answered) cache.put(cacheKey, JSON.stringify(payload), TREND_CACHE_TTL);
   return payload;
 }

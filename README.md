@@ -445,11 +445,13 @@ from MOA's range queries:
   each — mind the consumer account's 90 minutes of trigger runtime a day,
   which the 4-hourly refresh also draws on.
 - **A day is built by the same code as a crawled one, and judged by the
-  same guard** — `boardCards`, then `validateBoard` against the last day it
-  let through (what the live path would have had stored), then
-  `historyRowsFor` — so a backfilled day is the day the board would have
-  shown. A day the guard refuses (too few items, a board-wide price shift) is
-  not written, and listed under the job's `rejected`. Each window fetches three
+  same guard** — `boardCards`, `validateBoard`, `historyRowsFor`. The guard's
+  board-level rules compare a day with another, and the live path has the
+  board it stored; the past has no such anchor, so a day is judged against
+  **both of its neighbours** and refused only when it disagrees with each —
+  a broken day disagrees with both, a good day beside one agrees with the
+  other. A refused day (too few items, a board-wide price shift) is not
+  written, and is listed under the job's `rejected`. Each window fetches three
   extra leading days that are never written: they are the *previous trading
   day* rule (e) judges the first day against, and without them one day in
   every nine would go into the archive unjudged. After a longer closure
@@ -505,7 +507,9 @@ from MOA's range queries:
   `cancel=1` stops it after the current window, and is kept in a property of
   its own so the chain's next write cannot undo it. Requests are serialised
   under the history lock, so two at once cannot start two chains.
-- **A new job skips what earlier ones finished** — on the same spreadsheet;
+- **A new job skips what earlier ones finished** — but not what they moved
+  past without writing whole (refused days, gaps, partial windows: the job's
+  `holes`), which a later job crawls again; and only on the same spreadsheet;
   pointed at a new one, nothing is skipped, and a running job whose
   `HISTORY_SHEET_ID` changes under it ends itself as `failed` rather than
   carry its cursor into another sheet (`cancel=1` works with the id cleared). Re-running a year would crawl ~40
