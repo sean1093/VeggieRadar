@@ -236,6 +236,10 @@ var SHEET_BACKFILL_RETRY_MS = 3 * 60 * 1000;
 // only dates that can appear in it are its own, which it adds as it goes.
 var SHEET_PRESENT_CACHE_PREFIX = 'veggie_sheet_present_';
 var SHEET_PRESENT_CACHE_TTL = 6 * 60 * 60; // seconds; the platform maximum
+// What the archive holds, as the status request reports it. Counting it reads
+// column A of every year tab, and an operator watching a job polls.
+var SHEET_SUMMARY_CACHE_KEY = 'veggie_sheet_summary';
+var SHEET_SUMMARY_CACHE_TTL = 10 * 60; // seconds
 
 // Plausibility guard (`Validate.gs`). The refresh used to reject exactly one
 // thing — an EMPTY board — so a throttled crawl or a MOA unit change would

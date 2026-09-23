@@ -169,9 +169,11 @@ function historyRowsFor(board) {
  * range — and keeps any single tab far from the 10 M cell ceiling.
  */
 function yearSheet(spreadsheet, year) {
-  var sheet = spreadsheet.getSheetByName(year);
-  if (sheet) return sheet;
-  sheet = spreadsheet.insertSheet(year);
+  var sheet = spreadsheet.getSheetByName(year) || spreadsheet.insertSheet(year);
+  // An empty tab gets its header and its text column even when it already
+  // existed: a write that failed right after `insertSheet` leaves one behind,
+  // and every reader here takes row 1 to be the header.
+  if (sheet.getLastRow() > 0) return sheet;
   sheet.getRange(1, 1, 1, SHEET_HEADER.length).setValues([SHEET_HEADER]);
   // The date column is written and read as text. Left as a date, Sheets parses
   // `2026-09-21` into a value it hands back as a `Date`, and `readDay` — which
@@ -367,7 +369,7 @@ function startSheetBackfill(props, months) {
   } else {
     var board = parseStoredBoard(readDurableBoard());
     if (!board || !board.roc_date) return backfillReply(job, false, '尚無看板，無法決定回填終點');
-    job = newSheetBackfill(board.roc_date, months, job);
+    job = newSheetBackfill(board.roc_date, months, job, props.getProperty(HISTORY_SHEET_ID_PROP));
   }
   job.status = 'running';
   job.updated_at = new Date().toISOString();
@@ -393,7 +395,7 @@ function startSheetBackfill(props, months) {
  * it is already written, and re-crawling a year to learn that would spend
  * most of a day's trigger runtime on nothing.
  */
-function newSheetBackfill(boardRoc, months, previous) {
+function newSheetBackfill(boardRoc, months, previous, sheetId) {
   var n = backfillMonths(months);
   var last = rocToISO(shiftROC(boardRoc, -1));
   var now = new Date().toISOString();
@@ -404,7 +406,10 @@ function newSheetBackfill(boardRoc, months, previous) {
     from: rocToISO(monthsBefore(boardRoc, n)),
     to: last,
     cursor: last, // the newest day not yet done; the next window ends here
-    skip: coveredBy(previous),
+    // Coverage is a fact about ONE spreadsheet: pointed at a new one, the
+    // previous job's range was never written there.
+    sheet: sheetId,
+    skip: previous && previous.sheet === sheetId ? coveredBy(previous) : null,
     started_at: now,
     updated_at: now,
     link_started_at: null,
@@ -412,9 +417,12 @@ function newSheetBackfill(boardRoc, months, previous) {
     windows: 0,
     days_written: 0,
     days_skipped: 0,
+    days_rejected: 0,
     rows_written: 0,
     failures: 0,
-    last_error: null
+    last_error: null,
+    rejected: [], // the last few days the guard refused, with its reasons
+    gaps: [] // windows MOA kept answering with nothing at all
   };
 }
 
@@ -551,15 +559,22 @@ function finishBackfillStep(props, job) {
   // Another job's link is queued: its trigger has this handler's name, so
   // dropping ours would drop that one too.
   var other = !!stored && !ours && stored.status === 'running' && !cancelRequested(props, stored);
+  var recorded = true;
   if (ours) {
     job.updated_at = new Date().toISOString();
     job.link_open = false;
     try {
       writeSheetBackfill(props, job);
     } catch (err) {
-      Logger.log('finishBackfillStep: job not recorded: ' + err);
+      // The stored job still reads as a link in flight, so a next link queued
+      // now would take itself for a duplicate and stop. Leave the watchdog
+      // instead: by the time it fires that link is past the limit, and it
+      // retries the window, whose days are skipped if they were written.
+      recorded = false;
+      Logger.log('finishBackfillStep: job not recorded; leaving the watchdog: ' + err);
     }
   }
+  if (!recorded) return;
   if (!other) {
     try {
       dropTriggers(SHEET_BACKFILL_FN);
@@ -631,19 +646,39 @@ function backfillWindow(job, sheetId) {
     throw new Error('MOA did not answer ' + fetched.unanswered.length + ' roots (' +
       fetched.unanswered.slice(0, 3).join('、') + (fetched.unanswered.length > 3 ? '…' : '') + ')');
   }
-  var built = backfillDays(fetched.rows, start, end, fetched.dropped[PROBE_ROOT]);
-  // MOA answers a closed market with `休市` rows, so a probe root with no rows
-  // at all is a crawl that failed, not a window without trading.
-  if (built === null) throw new Error('no ' + PROBE_ROOT + ' rows for ' + start + '–' + end);
+  var built = backfillDays(fetched.rows, start, end, fetched.dropped);
+  if (built === null) {
+    // MOA answered — a throttle is an empty body, and fails above as
+    // unanswered — yet has no probe rows at all, where even a closed market
+    // gets `休市` rows. Retried like any failure first; if it says the same
+    // after every retry, it is a hole in MOA's own data, and stepping past it
+    // on record is the only way the rest of the reach gets done.
+    if (job.failures < SHEET_BACKFILL_MAX_FAILURES) {
+      throw new Error('no ' + PROBE_ROOT + ' rows for ' + start + '–' + end);
+    }
+    job.gaps = recent(job.gaps, rocToISO(start) + '…' + rocToISO(end));
+    job.windows += 1;
+    job.failures = 0;
+    job.last_error = null;
+    moveBackfillCursor(job, shiftROC(start, -1));
+    return;
+  }
 
   var written = writeArchivedDays(sheetId, built.days, job.id);
   job.windows += 1;
   job.days_written += written.days;
   job.days_skipped += written.skipped;
+  job.days_rejected = (job.days_rejected || 0) + built.rejected.length;
+  for (var r = 0; r < built.rejected.length; r++) job.rejected = recent(job.rejected, built.rejected[r]);
   job.rows_written += written.rows;
   job.failures = 0;
   job.last_error = null;
   moveBackfillCursor(job, built.deferred || shiftROC(start, -1));
+}
+
+/** `list` with `entry` appended, keeping the last few: it lives in a property. */
+function recent(list, entry) {
+  return (list || []).concat([entry]).slice(-10);
 }
 
 function moveBackfillCursor(job, roc) {
@@ -653,9 +688,15 @@ function moveBackfillCursor(job, roc) {
 
 /**
  * The archive rows for each trading day in [rocStart, rocEnd], built from one
- * range crawl exactly as the live path builds a day: `aggregateGroup` against
- * the previous trading day, the guard's item rules, then `historyRowsFor`.
- * Rows dated before `rocStart` are only ever that previous day. Pure.
+ * range crawl exactly as the live path builds a day — `boardCards` against the
+ * previous trading day, then the whole plausibility guard, then
+ * `historyRowsFor`. Rows dated before `rocStart` are only ever context. Pure.
+ *
+ * The guard is applied the way the live path applies it, day after day: each
+ * day is judged against the last day it let through, which is what the live
+ * path would have had stored. A day it refuses is not written — the board
+ * would not have shown it — and the day after is judged against the one
+ * before. Its item rules mark suspects, which `historyRowsFor` leaves out.
  *
  * The oldest day in the window has no previous trading day in hand when a
  * closure longer than the context days sits right before it. It is not
@@ -664,19 +705,22 @@ function moveBackfillCursor(job, roc) {
  * never deferred — the next window would end on it again — and is judged
  * against nothing, as the live path does after a closure past its lookback.
  *
- * `probeDropped` are days the probe root truncated on alone, so they are
- * missing from its rows. More than a thousand rows of it is trading by any
- * measure, and leaving such a day out of the calendar would make the next
- * day's "previous trading day" the one before it.
- * @returns {{days: Array<{date: string, rows: Array}>, deferred: ?string}|null}
- *   null when the probe root answered nothing at all — a failed crawl, which
- *   must not pass for a week of closed markets.
+ * `dropped` maps a root to the days it truncated on alone (`fetchCompleteRows`)
+ * and so is missing from. For the probe root such a day is still a trading
+ * day — more than a thousand rows of 甘藍 is trading by any measure — and
+ * leaving it out of the calendar would judge the next day against the one
+ * before. For any root, the day after has nothing to judge that crop against,
+ * so the crop is withheld from it rather than written unjudged.
+ * @returns {{days: Array<{date: string, rows: Array}>, deferred: ?string,
+ *   rejected: string[]}|null} null when the probe root has nothing at all.
  */
-function backfillDays(rowsByRoot, rocStart, rocEnd, probeDropped) {
+function backfillDays(rowsByRoot, rocStart, rocEnd, dropped) {
+  dropped = dropped || {};
   var probeRows = rowsByRoot[PROBE_ROOT];
-  if ((!probeRows || !probeRows.length) && !(probeDropped && probeDropped.length)) return null;
+  var probeDropped = dropped[PROBE_ROOT] || [];
+  if ((!probeRows || !probeRows.length) && !probeDropped.length) return null;
   var trading = tradingDates(probeRows || []);
-  (probeDropped || []).forEach(function (day) {
+  probeDropped.forEach(function (day) {
     if (trading.indexOf(day) === -1) trading.push(day);
   });
   trading.sort();
@@ -688,25 +732,46 @@ function backfillDays(rowsByRoot, rocStart, rocEnd, probeDropped) {
       (byDay[day] = byDay[day] || {})[root] = grouped[day];
     });
   });
+  var droppedOn = {};
+  Object.keys(dropped).forEach(function (root) {
+    dropped[root].forEach(function (day) {
+      (droppedOn[day] = droppedOn[day] || {})[root] = true;
+    });
+  });
 
   var days = [];
+  var rejected = [];
   var deferred = null;
-  for (var t = 0; t < trading.length; t++) {
+  var accepted = null; // the last day the guard let through
+  for (var t = 0; t < trading.length && trading[t] <= rocEnd; t++) {
     var day = trading[t];
-    if (day < rocStart || day > rocEnd) continue;
     var prev = t > 0 ? trading[t - 1] : null;
-    if (!prev && day !== rocEnd) {
+    var inWindow = day >= rocStart;
+    if (inWindow && !prev && day !== rocEnd) {
       deferred = day;
       continue;
     }
-    var board = { date: rocToISO(day), items: boardCards(byDay[day] || {}, (prev && byDay[prev]) || {}) };
-    // Item rules only. The board-level rules judge a crawl against the board
-    // users are looking at, and there is no such board for a day in the past.
-    markSuspects(board, validateBoard(board, null).suspects);
+    var board = {
+      date: rocToISO(day),
+      roc_date: day,
+      items: boardCards(byDay[day] || {}, (prev && byDay[prev]) || {})
+    };
+    var verdict = validateBoard(board, accepted);
+    if (!verdict.ok) {
+      if (inWindow) rejected.push(board.date + ': ' + verdict.reasons.join('; '));
+      continue;
+    }
+    markSuspects(board, verdict.suspects);
+    var unjudged = (prev && droppedOn[prev]) || {};
+    for (var i = 0; i < board.items.length; i++) {
+      if (unjudged[board.items[i].official_name]) board.items[i].suspect = true;
+    }
+    accepted = board;
+    if (!inWindow) continue;
     var rows = historyRowsFor(board);
     if (rows.length) days.push({ date: board.date, rows: rows });
   }
-  return { days: days, deferred: deferred };
+  return { days: days, deferred: deferred, rejected: rejected };
 }
 
 /**
@@ -749,6 +814,11 @@ function writeArchivedDays(sheetId, days, jobId) {
   });
   if (!blocks.length) return written;
 
+  // Forgotten BEFORE the append, not updated after it: an append that fails
+  // part-way — one tab written, the next not, or the link killed in between —
+  // must leave the next link reading the Sheet, not a set that says those
+  // days are still missing.
+  for (var k = 0; k < blocks.length; k++) forgetPresent(cache, jobId, blocks[k].year);
   var ran = false;
   var append = function () {
     ran = true;
@@ -798,6 +868,18 @@ function presentDates(spreadsheet, year, zone, jobId, cache) {
   return present;
 }
 
+function forgetPresent(cache, jobId, year) {
+  if (!jobId) return;
+  try {
+    cache.remove(SHEET_PRESENT_CACHE_PREFIX + jobId + '_' + year);
+  } catch (err) {
+    // Then a stale set could outlive a failed append: fail the window rather
+    // than risk writing its days twice.
+    Logger.log('forgetPresent: could not forget ' + year + ': ' + err);
+    throw err;
+  }
+}
+
 function rememberPresent(cache, jobId, year, present) {
   if (!jobId) return;
   try {
@@ -823,6 +905,28 @@ function archivedDates(sheet, zone) {
  * reports the job from the properties alone.
  */
 function archiveSummary(sheetId) {
+  var cache = CacheService.getScriptCache();
+  try {
+    var hit = cache.get(SHEET_SUMMARY_CACHE_KEY);
+    if (hit) {
+      var cached = JSON.parse(hit);
+      if (cached.sheet === sheetId) return cached.summary;
+    }
+  } catch (err) {
+    Logger.log('archiveSummary: cache unreadable: ' + err);
+  }
+  var summary = countArchive(sheetId);
+  if (!summary.error) {
+    try {
+      cache.put(SHEET_SUMMARY_CACHE_KEY, JSON.stringify({ sheet: sheetId, summary: summary }), SHEET_SUMMARY_CACHE_TTL);
+    } catch (err) {
+      Logger.log('archiveSummary: not cached: ' + err);
+    }
+  }
+  return summary;
+}
+
+function countArchive(sheetId) {
   try {
     var spreadsheet = SpreadsheetApp.openById(sheetId);
     var zone = spreadsheet.getSpreadsheetTimeZone();
@@ -842,7 +946,8 @@ function archiveSummary(sheetId) {
       rows: rows,
       days: sorted.length,
       first_date: sorted[0] || null,
-      last_date: sorted[sorted.length - 1] || null
+      last_date: sorted[sorted.length - 1] || null,
+      as_of: new Date().toISOString() // cached for ten minutes: polling is free
     };
   } catch (err) {
     Logger.log('archiveSummary failed: ' + err);
@@ -886,6 +991,8 @@ function publicBackfill(job) {
     cursor: job.cursor,
     windows: job.windows,
     days_written: job.days_written,
+    days_rejected: job.days_rejected || 0,
+    gaps: (job.gaps || []).length,
     rows_written: job.rows_written,
     failures: job.failures,
     updated_at: job.updated_at

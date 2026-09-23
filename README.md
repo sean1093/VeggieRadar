@@ -444,9 +444,12 @@ from MOA's range queries:
   minutes, the year-old days last. A year costs ~40 links of about a minute
   each — mind the consumer account's 90 minutes of trigger runtime a day,
   which the 4-hourly refresh also draws on.
-- **A day is built by the same code as a crawled one** — the item
-  definitions, `aggregateGroup`, the guard's item rules, `historyRowsFor` — so
-  the two cannot drift into different archives. Each window fetches three
+- **A day is built by the same code as a crawled one, and judged by the
+  same guard** — `boardCards`, then `validateBoard` against the last day it
+  let through (what the live path would have had stored), then
+  `historyRowsFor` — so a backfilled day is the day the board would have
+  shown. A day the guard refuses (too few items, a board-wide price shift) is
+  not written, and listed under the job's `rejected`. Each window fetches three
   extra leading days that are never written: they are the *previous trading
   day* rule (e) judges the first day against, and without them one day in
   every nine would go into the archive unjudged. After a longer closure
@@ -456,7 +459,9 @@ from MOA's range queries:
   after it is written, so a hole would be permanent. MOA answers a burst with
   an *empty body* — not an empty `Data` — so a root it did not answer, even
   after the retry, is told apart from one that did not trade, and fails the
-  window; the next link tries again.
+  window; the next link tries again. A window MOA *answers* with no probe rows
+  at all, after every retry, is a hole in MOA's own data: it is stepped past
+  and listed under the job's `gaps`, or nothing older could ever be reached.
 - **It never writes a day the live path can.** The job ends the day before
   the board's trading date, fixed when it starts; the live archive only ever
   writes that date or a later one. A day already in the Sheet — live or from
@@ -470,7 +475,8 @@ from MOA's range queries:
   until each piece is whole, and a single day that still truncates leaves that
   crop out of that day — missing is honest, wrong would be permanent.
   If the probe root loses a day that way it still counts as trading, so the
-  next day is not judged against the one before it. (`calibrate` has always
+  next day is not judged against the one before it; any crop left out of a
+  day is withheld from the next one too, which has nothing to judge it by. (`calibrate` has always
   refetched; the rolling history's backfill now does too. The trend, on the
   public path where one request is the budget, leaves a cut oldest point out
   instead — both used to average whichever markets MOA left in.)
@@ -488,9 +494,10 @@ from MOA's range queries:
   `cancel=1` stops it after the current window, and is kept in a property of
   its own so the chain's next write cannot undo it. Requests are serialised
   under the history lock, so two at once cannot start two chains.
-- **A new job skips what earlier ones finished.** Re-running a year would
-  crawl ~40 windows to write nothing; a new `months=` steps over the range
-  the jobs before it covered without a request, so extending 12 months to 24
+- **A new job skips what earlier ones finished** — on the same spreadsheet;
+  pointed at a new one, nothing is skipped. Re-running a year would crawl ~40
+  windows to write nothing; a new `months=` steps over the range the jobs
+  before it covered without a request, so extending 12 months to 24
   crawls only the new year. `months` must be a whole number (1–24; more is
   clamped) — `months=0` is refused rather than read as a year. To redo a range
   on purpose — after deleting rows by hand — delete the `veggie_sheet_backfill`
@@ -817,9 +824,10 @@ GET {WEB_APP_URL}/exec?action=backfill&sheet=1&token=…[&months=12 | &cancel=1]
      "job": { "status": "running", "months": 12, "from": "2025-09-21", "to": "2026-09-20",
               "cursor": "2026-09-20", "windows": 0, "days_written": 0, "days_skipped": 0,
               "rows_written": 0, "failures": 0, "last_error": null, ... } }
-→ without `months` — status only, nothing crawled or queued, plus what the Sheet holds:
-   { ..., "queued": false, "archive": { "rows": 61234, "days": 249,
-                                        "first_date": "2025-09-22", "last_date": "2026-09-22" } }
+→ without `months` — status only, nothing crawled or queued, plus what the Sheet holds
+   (counted at most every ten minutes; `as_of` says when):
+   { ..., "queued": false, "archive": { "rows": 61234, "days": 249, "first_date": "2025-09-22",
+                                        "last_date": "2026-09-22", "as_of": "…" } }
 
 GET {WEB_APP_URL}/exec?action=diag[&token=…]
 → { "type": "diag", "board": { "generated_at": ..., "stale": false },

@@ -187,6 +187,9 @@ function fetchCompleteRows(roots, rocStart, rocEnd) {
     var days = [];
     var whole = fetchSplit(root, rocStart, rocEnd, days);
     if (whole === null) {
+      // Not the truncated page either: its oldest day is the partial one this
+      // exists to keep out, and a caller that ignores `unanswered` would use it.
+      rows[root] = [];
       meta.unanswered[root] = true;
     } else {
       rows[root] = whole;
