@@ -580,7 +580,9 @@ suspect day like everything that compares days. It is read exactly as the
 year-ago medians are: the refresh's last step, kept per trading date (chunked
 — a hundred items' varieties are more than one property holds), applied by
 the next build, read again on the same terms, the live year's tab under the
-lock. `diag.sheet_history.variety_baseline` reports what it covers, and a
+lock — and not read while a backfill is still walking through the span, whose
+later days alone would give a fortnight's median as the month's
+(`waiting_for_backfill`). `diag.sheet_history.variety_baseline` reports what it covers, and a
 read left undone the same way — `skipped` also `not kept` when the property
 store would not take the result.
 

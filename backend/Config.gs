@@ -288,7 +288,8 @@ var ISO_DAY = /^\d{4}-\d{2}-\d{2}$/; // what a date cell in the archive reads as
 
 // Per-variety baselines (#22 §3): each variety's own 28-trading-day median,
 // read from the archive's variety rows the way the item baseline reads the
-// rolling history — `BASELINE_WINDOW` days within `BASELINE_HORIZON_DAYS`,
+// rolling history — `BASELINE_WINDOW` days within `BASELINE_HORIZON_DAYS`
+// (counted back from the board's trading date: see `varietySpan`),
 // `BASELINE_MIN_DAYS` of them at least. Chunked: ~100 items with up to four
 // varieties each is more than one 9 KB property holds.
 var VARIETY_BASE_PREFIX = 'veggie_variety_base_chunk_';

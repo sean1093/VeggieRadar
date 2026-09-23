@@ -1417,9 +1417,7 @@ function keptYearAgo(boardRoc) {
     var props = PropertiesService.getScriptProperties();
     var sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
     if (!sheetId || !boardRoc) return null;
-    var kept = parseYearAgo(props.getProperty(YOY_PROP));
-    if (!kept || kept.sheet !== sheetId) return null;
-    return keptApplies(kept, boardRoc) ? kept.items : null;
+    return keptItemsFor(parseYearAgo(props.getProperty(YOY_PROP)), sheetId, boardRoc);
   } catch (err) {
     Logger.log('keptYearAgo: ' + err);
     return null;
@@ -1449,7 +1447,10 @@ function refreshYearAgo(boardRoc, startedAt) {
       // newer days, and a median of those would be published as 「去年此時」.
       // Nothing is read, and nothing kept: kept, an empty answer would
       // outlive the backfill. Every refresh asks again, which costs a
-      // property; the kept medians of an earlier date stand meanwhile.
+      // property; the kept medians of an earlier date stand meanwhile. `diag`
+      // says it waits (`waiting_for_backfill`), and no longer that a read
+      // was left undone: none is due until the backfill has passed.
+      props.deleteProperty(YOY_SKIPPED_PROP);
       return {};
     }
     if (startedAt && Date.now() - startedAt > YOY_START_BY_MS) {
@@ -1472,7 +1473,14 @@ function refreshYearAgo(boardRoc, startedAt) {
       }));
       props.deleteProperty(YOY_SKIPPED_PROP); // read after all: nothing left undone
     } catch (err) {
-      Logger.log('refreshYearAgo: not kept: ' + err); // read again next refresh
+      // Read again by the next refresh — and said in `diag`, or a full
+      // property store would have every refresh read with nothing showing why.
+      Logger.log('refreshYearAgo: not kept: ' + err);
+      try {
+        noteUnread(props, YOY_SKIPPED_PROP, sheetId, 'not kept');
+      } catch (err2) {
+        Logger.log('refreshYearAgo: not noted: ' + err2);
+      }
     }
     return found.items;
   } catch (err) {
@@ -1490,7 +1498,7 @@ function refreshYearAgo(boardRoc, startedAt) {
 }
 
 /**
- * Whether a running backfill has yet to write part of the year-ago span: its
+ * Whether a running backfill has yet to write part of a reader's span: its
  * reach includes some of it, its cursor has not passed it, and that part is
  * not a range it skips as already written.
  */
@@ -1508,6 +1516,15 @@ function walking(job, span) {
 function yearAgoWindow(boardRoc) {
   var iso = rocToISO(monthsBefore(boardRoc, 12));
   return { from: shiftISO(iso, -YOY_WINDOW_DAYS), to: shiftISO(iso, YOY_WINDOW_DAYS), day: iso };
+}
+
+/**
+ * What a reader kept, if it may be applied to a board of `boardRoc`: read
+ * from this spreadsheet, for a trading date near enough (`keptApplies`).
+ */
+function keptItemsFor(kept, sheetId, boardRoc) {
+  if (!kept || !kept.items || kept.sheet !== sheetId) return null;
+  return keptApplies(kept, boardRoc) ? kept.items : null;
 }
 
 /** Whether medians kept for one trading date may be applied to a board of another. */
@@ -1697,14 +1714,9 @@ function publicYearAgo(raw, sheetId, skippedAt, boardRoc, jobRaw) {
     // The tab was sorted by another column, and the week could not be found.
     if (kept.scattered) out.scattered = true;
   }
-  // Held back while a backfill writes the window: without this, a long
-  // backfill would leave the comparison off with nothing saying why.
   var job = parseSheetBackfill(jobRaw);
   var span = boardRoc ? yearAgoWindow(boardRoc) : null;
-  if (span && backfillHoldsWindow(job, sheetId, span)) {
-    out = out || { date: null, at: null, items: 0, applied: false };
-    out.waiting_for_backfill = true;
-  }
+  out = noteReaderState(out, { date: null, at: null, items: 0, applied: false }, sheetId, span, job, skippedAt);
   // The last backfill finished short of today's year-ago window — started
   // before its reach took in the week before a year back. Asking again for
   // the same months adds only what is missing.
@@ -1712,12 +1724,25 @@ function publicYearAgo(raw, sheetId, skippedAt, boardRoc, jobRaw) {
     out = out || { date: null, at: null, items: 0, applied: false };
     out.backfill_short = true;
   }
-  // A read the last refresh left undone for time, for this spreadsheet and
-  // not since made good: refreshes that are always that slow show here, not
-  // as a silence. Cleared by the next read that happens.
-  var skipped = parseJson(skippedAt);
+  return out;
+}
+
+/**
+ * What a reader's `diag` entry adds about reads the refresh did not make:
+ * held back while a backfill writes the span (without this, a long backfill
+ * would leave the comparison off with nothing saying why), and a read left
+ * undone (`noteUnread`) for this spreadsheet and not since made good —
+ * refreshes that are always too slow show here, not as a silence. `blank` is
+ * the entry when nothing is kept.
+ */
+function noteReaderState(out, blank, sheetId, span, job, skippedRaw) {
+  if (span && backfillHoldsWindow(job, sheetId, span)) {
+    out = out || blank;
+    out.waiting_for_backfill = true;
+  }
+  var skipped = parseJson(skippedRaw);
   if (skipped && skipped.sheet === sheetId && (!out || !out.at || skipped.at > out.at)) {
-    out = out || { date: null, at: null, items: 0, applied: false };
+    out = out || blank;
     out.skipped_at = skipped.at;
     out.skipped = skipped.why || 'late';
   }
@@ -1764,9 +1789,7 @@ function keptVarietyBaselines(boardRoc) {
   try {
     var sheetId = PropertiesService.getScriptProperties().getProperty(HISTORY_SHEET_ID_PROP);
     if (!sheetId || !boardRoc) return null;
-    var kept = parseJson(readChunkedProp(VARIETY_BASE_PREFIX, VARIETY_BASE_COUNT));
-    if (!kept || !kept.items || kept.sheet !== sheetId) return null;
-    return keptApplies(kept, boardRoc) ? kept.items : null;
+    return keptItemsFor(parseJson(readChunkedProp(VARIETY_BASE_PREFIX, VARIETY_BASE_COUNT)), sheetId, boardRoc);
   } catch (err) {
     Logger.log('keptVarietyBaselines: ' + err);
     return null;
@@ -1776,13 +1799,14 @@ function keptVarietyBaselines(boardRoc) {
 /**
  * The span a variety's baseline is read from: the horizon before the board's
  * date, the day itself left out — a price must not vouch for itself, as
- * `applyBaselines` has it.
+ * `applyBaselines` has it. Counted back from the board's trading date, where
+ * the rolling history is pruned by the clock (`rocDateDaysAgo`): the two agree
+ * on a trading day, and over a closure this one keeps its 45 days.
  */
 function varietySpan(boardRoc) {
   return {
     from: rocToISO(shiftROC(boardRoc, -BASELINE_HORIZON_DAYS)),
-    to: rocToISO(shiftROC(boardRoc, -1)),
-    day: rocToISO(boardRoc)
+    to: rocToISO(shiftROC(boardRoc, -1))
   };
 }
 
@@ -1801,6 +1825,14 @@ function refreshVarietyBaselines(boardRoc, startedAt) {
     var job = parseSheetBackfill(props.getProperty(SHEET_BACKFILL_PROP));
     var span = varietySpan(boardRoc);
     if (kept && kept.items && keptStillFresh(kept, boardRoc, sheetId, job, span)) return kept.items;
+    if (backfillHoldsWindow(job, sheetId, span)) {
+      // As for the year-ago read: a backfill walking newest-first through the
+      // span has written only its later days, and 28 days' median would be
+      // taken over a fortnight. Not read, not kept; the medians of an earlier
+      // date stand meanwhile, and `diag` says it waits.
+      props.deleteProperty(VARIETY_BASE_SKIPPED_PROP);
+      return null;
+    }
     if (startedAt && Date.now() - startedAt > YOY_START_BY_MS) {
       // As for the year-ago read: the execution limit would end the run before
       // its caller's cleanup. Said in `diag`, and read by the next refresh.
@@ -1809,11 +1841,11 @@ function refreshVarietyBaselines(boardRoc, startedAt) {
       return null;
     }
     var found = varietyMedians(SpreadsheetApp.openById(sheetId), span, rocToISO(boardRoc).substring(0, 4));
-    var kept = writeChunkedProp(VARIETY_BASE_PREFIX, VARIETY_BASE_COUNT, JSON.stringify({
+    var stored = writeChunkedProp(VARIETY_BASE_PREFIX, VARIETY_BASE_COUNT, JSON.stringify({
       date: boardRoc, sheet: sheetId, at: new Date().toISOString(),
       items: found.items, scattered: found.scattered || undefined
     }));
-    if (!kept) {
+    if (!stored) {
       // Read, and not kept — a full property store, most likely. Said in
       // `diag`, or every refresh would read again with nothing showing why.
       noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'not kept');
@@ -1885,7 +1917,6 @@ function varietyMedians(spreadsheet, span, liveYear) {
 function publicVarietyBaselines(props, boardRoc) {
   var sheetId = props[HISTORY_SHEET_ID_PROP];
   if (!sheetId) return null;
-  var skippedAt = props[VARIETY_BASE_SKIPPED_PROP];
   var kept = parseJson(chunkedFrom(props, VARIETY_BASE_PREFIX, VARIETY_BASE_COUNT));
   var out = null;
   if (kept && kept.items && kept.sheet === sheetId) {
@@ -1900,11 +1931,6 @@ function publicVarietyBaselines(props, boardRoc) {
     };
     if (kept.scattered) out.scattered = true;
   }
-  var skipped = parseJson(skippedAt);
-  if (skipped && skipped.sheet === sheetId && (!out || !out.at || skipped.at > out.at)) {
-    out = out || { date: null, at: null, items: 0, varieties: 0, applied: false };
-    out.skipped_at = skipped.at;
-    out.skipped = skipped.why || 'late';
-  }
-  return out;
+  return noteReaderState(out, { date: null, at: null, items: 0, varieties: 0, applied: false }, sheetId,
+    boardRoc ? varietySpan(boardRoc) : null, parseSheetBackfill(props[SHEET_BACKFILL_PROP]), props[VARIETY_BASE_SKIPPED_PROP]);
 }

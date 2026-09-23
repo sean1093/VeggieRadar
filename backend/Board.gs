@@ -161,18 +161,23 @@ function writeChunkedProp(prefix, countKey, json) {
     }
     write[countKey] = String(chunks);
     props.setProperties(write);
-
+  } catch (err) {
+    Logger.log('writeChunkedProp error (' + prefix + '): ' + err);
+    return false;
+  }
+  // Written, whatever the cleanup does: a leftover chunk past the count is
+  // never read, and costs only quota until the next write removes it.
+  try {
     var existing = props.getProperties();
     for (var key in existing) {
       if (key.indexOf(prefix) !== 0) continue;
       var idx = parseInt(key.substring(prefix.length), 10);
       if (!isNaN(idx) && idx >= chunks) props.deleteProperty(key);
     }
-    return true;
-  } catch (err) {
-    Logger.log('writeChunkedProp error (' + prefix + '): ' + err);
-    return false;
+  } catch (err2) {
+    Logger.log('writeChunkedProp cleanup error (' + prefix + '): ' + err2);
   }
+  return true;
 }
 
 /** Reads a chunked JSON string back, or null when absent or torn. */
