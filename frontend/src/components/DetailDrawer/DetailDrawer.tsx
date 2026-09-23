@@ -99,6 +99,9 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
   const hasVarieties = (item.varieties?.length ?? 0) > 0;
   const vsBaseline = trustedBaseline(item);
   const hasBaseline = vsBaseline !== null;
+  // Whether the baseline sentence renders: the year-ago line spaces itself
+  // off it, so the two read one condition.
+  const showBaseline = vsBaseline !== null && item.baseline_price != null;
   const lastYear = trustedLastYear(item);
   const hasLastYear = lastYear !== null;
   const hasRetail = marketPrice(item) != null;
@@ -338,7 +341,7 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
           <div>
             <p className="mb-2 text-xs text-stone">近 7 日價格趨勢（元/公斤）</p>
             {chartArea}
-            {vsBaseline !== null && item.baseline_price != null && (
+            {showBaseline && (
               <p className="mt-2 text-xs text-stone">
                 近一個月批發中位約 {item.baseline_price} 元/台斤，今日批發
                 {relativePhrase(vsBaseline)}
@@ -346,7 +349,7 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
               </p>
             )}
             {lastYear !== null && (
-              <p className={`${vsBaseline !== null && item.baseline_price != null ? 'mt-1' : 'mt-2'} text-xs text-stone`}>
+              <p className={`${showBaseline ? 'mt-1' : 'mt-2'} text-xs text-stone`}>
                 去年此時批發約 {lastYear.price} 元/台斤（今日{relativePhrase(lastYear.percent)}）。
               </p>
             )}

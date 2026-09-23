@@ -265,8 +265,7 @@ var YOY_MIN_DAYS = 3;            // fewer archived days than this → nothing pu
 var YOY_PROP = 'veggie_yoy';
 // How long a read is good for. A day, normally — and a long closure keeps one
 // trading date for days, so this, not the date, is what makes it read again.
-// Six hours while the archive may still be filling in: the last read found
-// nothing, or a backfill is running and may be walking through that window.
+// Six hours while a backfill is running, which may be adding to the window.
 var YOY_KEEP_MS = 24 * 60 * 60 * 1000;
 var YOY_EMPTY_RETRY_MS = 6 * 60 * 60 * 1000;
 // Kept medians older than this many days are not applied at all: the window
@@ -277,6 +276,7 @@ var YOY_MAX_RUNS = 20;
 // The year-ago read is the refresh's last step; past this far into the run it
 // is left to the next refresh, well inside the 6-minute execution limit.
 var YOY_START_BY_MS = 4 * 60 * 1000;
+var YOY_SKIPPED_PROP = 'veggie_yoy_skipped_at'; // when a read was last left for time
 // What the archive holds, as the status request reports it. Counting it reads
 // column A of every year tab, and an operator watching a job polls.
 var SHEET_SUMMARY_CACHE_KEY = 'veggie_sheet_summary';

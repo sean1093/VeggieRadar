@@ -535,20 +535,23 @@ from MOA's range queries:
 The archive's first reader is 「比去年同期」 (#22 §2). The refresh reads the
 archived blend rows within a week either side of the trading date a year
 back — column A of the year tab (two, across New Year) to find them, then
-only those rows — and takes each crop's median, one value per day. With at
-least three archived days a crop gets `last_year_price` (元/台斤) and
-`vs_last_year_percent`, wholesale against wholesale like the baseline.
+only those rows, under the history lock — and takes each crop's median, one
+value per day. With at least three archived days, on both sides of the day
+itself (days on one side only are a half-filled window), a crop gets
+`last_year_price` (元/台斤) and `vs_last_year_percent`, wholesale against
+wholesale like the baseline.
 
 The read is the refresh's **last** step, after the board is stored and its
 outcome recorded — a slow Sheets read must never cost the board, and a
 timeout there costs only the comparison. The board is built with the
 medians kept from the last read, which after a new trading date are those of
 a window a day or two older: a ±7-day median barely moves. They are read
-again once a day, or every six hours while a backfill is running or the
-last read found nothing, since the archive may still be filling in — and
+again once a day, or every six hours while a backfill is running, since the
+archive may still be filling in — and
 nothing is published for a window a running backfill has not finished
 walking through, whose later days alone would pass for 「去年此時」. A
-refresh that has already run four minutes leaves the read to the next one. It is shown as one line in the drawer and on no
+refresh that has already run four minutes leaves the read to the next one,
+and `diag.sheet_history.year_ago.skipped_at` says so. It is shown as one line in the drawer and on no
 card: `drawer_opened` carries `has_last_year`, and whether it earns a badge
 is for those numbers to say. `diag.sheet_history.year_ago` reports which
 trading date it compares and how many crops it covers.
