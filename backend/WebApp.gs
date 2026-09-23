@@ -156,10 +156,11 @@ function handleWarm(params) {
 function handleDiag(full, props) {
   props = props || PropertiesService.getScriptProperties().getProperties();
   var handlers = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
+  var board = boardSummary();
   return {
     type: 'diag',
     now: new Date().toISOString(),
-    board: boardSummary(),
+    board: board,
     board_items_configured: BOARD_ITEMS.length,
     triggers: handlers,
     refresh_queued: !!CacheService.getScriptCache().get(REFRESH_LOCK_KEY),
@@ -178,6 +179,10 @@ function handleDiag(full, props) {
       // The MOA backfill (§4), as progress: where it has got to, not why it
       // last failed.
       backfill: publicBackfill(parseSheetBackfill(props[SHEET_BACKFILL_PROP])),
+      // The year-ago reference (§2) the board is being compared with: for
+      // which trading date, and how many items it covers.
+      year_ago: publicYearAgo(props[YOY_PROP], props[HISTORY_SHEET_ID_PROP], props[YOY_SKIPPED_PROP],
+        (board || {}).roc_date, props[SHEET_BACKFILL_PROP]),
     },
     // Whether the mirror is being republished by the crawl or left to the
     // fallback cron: an expired PAT would 401 on every refresh and nothing

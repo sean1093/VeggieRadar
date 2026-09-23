@@ -76,6 +76,12 @@ export const ProduceItemSchema = z.object({
   // 便宜）。歷史不足（新品項、剛回產季、尚未回填）時後端不送這兩個欄位。
   baseline_price: z.optional(z.number()),
   vs_baseline_percent: z.optional(z.number()),
+  // 「比去年同期」（批發基準，#22 §2）：去年同一天前後一週、長期封存裡的批發
+  // 中位數。last_year_price 為元/台斤；vs_last_year_percent 為今日批發價相對它
+  // 的百分比。封存未設定、還沒回填到一年前、或該品項去年那天前、後各不足 2 個
+  // 交易日時，後端不送這兩個欄位。
+  last_year_price: z.optional(z.number()),
+  vs_last_year_percent: z.optional(z.number()),
   // 當日品種分解（批發）。只有 ≥2 個具意義品種（各佔量 ≥10%）時後端才送，
   // 依成交量排序、至多 4 筆。混合均價偏離個別攤位時，抽屜用它拆解。
   varieties: z.optional(z.array(ProduceVarietySchema)),

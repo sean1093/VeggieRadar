@@ -36,6 +36,13 @@ export interface Board {
   status: BoardStatus;
   freshness: FreshnessNotice;
   reload: () => void;
+  /**
+   * Whether the read has finished, however it ended — the board on screen is
+   * the one that will stay until the next retry. False while a cached board
+   * or a stale mirror is painted over a read still in flight, whose status
+   * alone (`ready`) does not say so.
+   */
+  settled: boolean;
 }
 
 // Says what a shopper needs to know: these are the last prices we got, not
@@ -98,6 +105,7 @@ export function useBoard(): Board {
   const [status, setStatus] = useState<BoardStatus>(() =>
     initialCache ? { kind: 'ready', board: initialCache, source: 'cache' } : { kind: 'loading' },
   );
+  const [settled, setSettled] = useState(false);
 
   // Lands GAS's answer on top of whatever is on screen. `fallback` is the
   // older board the paint came from, and it decides how a failure degrades:
@@ -144,6 +152,7 @@ export function useBoard(): Board {
           writeCachedBoard(mirror);
           track('board_loaded', { source: 'static', stale: false, age_bucket: ageBucket(mirror.generated_at) });
           setStatus({ kind: 'ready', board: mirror, source: 'static' });
+          setSettled(true);
           return;
         }
 
@@ -165,6 +174,7 @@ export function useBoard(): Board {
         const res = await fetchBoard();
         if (mine !== generation.current) return;
         settle(res, fallback);
+        setSettled(true);
       });
     },
     [settle],
@@ -206,6 +216,7 @@ export function useBoard(): Board {
     const cached = onScreen ? null : readCachedBoard();
     const held: Fallback = onScreen ?? (cached ? { board: cached, source: 'cache' } : null);
     setStatus(held ? { kind: 'ready', board: held.board, source: held.source } : { kind: 'loading' });
+    setSettled(false);
     load(held);
   }, [load, status]);
 
@@ -215,5 +226,5 @@ export function useBoard(): Board {
     return describeFreshness({ date, generatedAt, stale });
   }, [status]);
 
-  return { status, freshness, reload };
+  return { status, freshness, reload, settled };
 }

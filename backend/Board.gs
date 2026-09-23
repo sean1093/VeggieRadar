@@ -83,6 +83,9 @@ function buildBoard() {
 
   var items = boardCards(today, prev);
   applyBaselines(items, readHistory(), dates.latest);
+  // The medians kept from the last read: a Sheets read has no place before
+  // the board is stored (`refreshYearAgo` runs last in the refresh).
+  applyYearOverYear(items, keptYearAgo(dates.latest));
 
   return {
     type: 'board',
@@ -198,6 +201,7 @@ function readChunkedProp(prefix, countKey) {
  * can show that refreshes are running and what they decided.
  */
 function refreshBoardCache() {
+  var started = Date.now();
   var board = buildBoard();
   var props = PropertiesService.getScriptProperties();
   var verdict = board.items && board.items.length
@@ -233,6 +237,10 @@ function refreshBoardCache() {
       '交易日：' + board.roc_date + '\n' +
       '品項數：' + board.count + '\n' +
       '完成於：' + board.generated_at + '\n');
+    // Last of all: the year-ago medians the NEXT build compares with. A slow
+    // Sheets read here costs that comparison at most — the board is stored,
+    // mirrored, archived and its outcome recorded.
+    refreshYearAgo(board.roc_date, started);
   } else {
     var reason = verdict.reasons.join('; ');
     if (board.items && board.items.length) {

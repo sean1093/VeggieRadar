@@ -253,6 +253,34 @@ var SHEET_BACKFILL_MAX_HOLES = 40;
 var SHEET_PRESENT_CACHE_PREFIX = 'veggie_sheet_present_';
 var SHEET_PRESENT_CACHE_TTL = 6 * 60 * 60; // seconds; the platform maximum
 var SHEET_FROZEN_CACHE_PREFIX = 'veggie_sheet_frozen_';
+
+// 「比去年同期」 (#22 §2): each item against its own price in the same weeks a
+// year earlier, from the archive. The median over the trading days within
+// this many calendar days either side of the date a year back — a window, not
+// the one day, because a single day a year ago is one market's weather.
+var YOY_WINDOW_DAYS = 7;
+var YOY_MIN_SIDE_DAYS = 2;       // archived days needed on EACH side of the day; fewer → nothing published
+// Computed once per trading date and kept here, so a refresh reads the Sheet
+// once a day rather than every four hours: "<roc date>" plus the medians.
+var YOY_PROP = 'veggie_yoy';
+// How long a read is good for. A day, normally — and a long closure keeps one
+// trading date for days, so this, not the date, is what makes it read again.
+// Six hours while a backfill is running, which may be adding to the window.
+var YOY_KEEP_MS = 24 * 60 * 60 * 1000;
+var YOY_SOON_MS = 6 * 60 * 60 * 1000;
+var ISO_DAY = /^\d{4}-\d{2}-\d{2}$/; // what a date cell in the archive reads as // …while a backfill may add to the window, or the tab needs re-sorting
+// Kept medians older than this many days are not applied at all: the window
+// they describe has moved too far from the board's date.
+var YOY_KEPT_MAX_DAYS = 7;
+// Runs of the window's rows past which the tab is taken as sorted by another
+// column: the backfill writes a week in at most a few runs.
+var YOY_MAX_RUNS = 20;
+// Rows of other days that may sit between runs read in one call.
+var YOY_MERGE_SLACK_ROWS = 400;
+// The year-ago read is the refresh's last step; past this far into the run it
+// is left to the next refresh, well inside the 6-minute execution limit.
+var YOY_START_BY_MS = 4 * 60 * 1000;
+var YOY_SKIPPED_PROP = 'veggie_yoy_skipped_at'; // when a read was last left for time
 // What the archive holds, as the status request reports it. Counting it reads
 // column A of every year tab, and an operator watching a job polls.
 var SHEET_SUMMARY_CACHE_KEY = 'veggie_sheet_summary';

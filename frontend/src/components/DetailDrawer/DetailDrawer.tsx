@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -10,7 +10,7 @@ import type { ProduceItem } from '../../types/produce';
 import { fetchProduceTrend } from '../../services/api';
 import { itemUrl } from '../../lib/urlState';
 import { marketPrice } from '../../lib/utils/market-price';
-import { trustedBaseline } from '../../lib/utils/baseline';
+import { relativePhrase, trustedBaseline, trustedLastYear } from '../../lib/utils/baseline';
 import { track } from '../../lib/analytics';
 
 // recharts is ~half the initial JS and serves exactly one element inside this
@@ -40,6 +40,13 @@ interface DetailDrawerProps {
    * that can reopen it for the recipient (`itemUrl`).
    */
   shareQuery?: string;
+  /**
+   * Whether the board behind the drawer is the one that will stay — fresh, or
+   * definitively degraded — rather than the cached copy painted while that
+   * one loads. An open is reported once the board has settled, so its flags
+   * describe what the user saw. Defaults to true for callers with no cache.
+   */
+  boardSettled?: boolean;
 }
 
 /**
@@ -65,7 +72,9 @@ function shareText(item: ProduceItem): string {
   return `今日菜價｜${item.name} ${price}${change}`;
 }
 
-const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allProduceItems, watched = false, onToggleWatch, shareQuery = '' }) => {
+const DetailDrawer: React.FC<DetailDrawerProps> = ({
+  isOpen, onClose, item, allProduceItems, watched = false, onToggleWatch, shareQuery = '', boardSettled = true,
+}) => {
   // The crop whose trend the drawer shows, or null while closed. The trend is
   // stored together with the key it answers, so a new item or a reopen reads
   // as "loading" until its own answer lands — nothing to reset in the effect,
@@ -98,13 +107,52 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
   // whether the variety breakdown and the baseline (§5) are being seen at all.
   const hasVarieties = (item.varieties?.length ?? 0) > 0;
   const vsBaseline = trustedBaseline(item);
-  const hasBaseline = vsBaseline !== null;
+  // Whether the baseline sentence renders — which is also what `has_baseline`
+  // reports, and what the year-ago line spaces itself off.
+  const showBaseline = vsBaseline !== null && item.baseline_price != null;
+  const lastYear = trustedLastYear(item);
+  const hasLastYear = lastYear !== null;
   const hasRetail = marketPrice(item) != null;
 
+  // Once per open, with what the user saw: when the board settles, or when
+  // the drawer closes first, whichever comes first. The cached board painted
+  // while the fresh one loads may lack a baseline or a year-ago price the
+  // fresh one has — reported at once, an open that lasted into the fresh
+  // board would be counted without them; reported again, twice; reported only
+  // on settling, an open closed before it would not be counted at all.
+  // Keyed by the item, not its root: 青椒 and 甜椒 share one, and moving from
+  // one to the other inside the drawer is a second open. An item with no
+  // root name has no trend and has never been reported.
+  const openKey = isOpen && item.official_name ? item.name : null;
+  // `has_last_year` is how #22 decides whether the comparison earns a place
+  // on the card too: it is shown here only until that is measured.
+  const flags = useMemo(
+    () => ({ has_varieties: hasVarieties, has_baseline: showBaseline, has_last_year: hasLastYear, has_retail: hasRetail }),
+    [hasVarieties, showBaseline, hasLastYear, hasRetail],
+  );
+  const pending = useRef<{ key: string; flags: typeof flags } | null>(null);
+  const reportedKey = useRef<string | null>(null);
   useEffect(() => {
-    if (!trendKey) return;
-    track('drawer_opened', { has_varieties: hasVarieties, has_baseline: hasBaseline, has_retail: hasRetail });
-  }, [trendKey, hasVarieties, hasBaseline, hasRetail]);
+    const report = () => {
+      if (!pending.current) return;
+      reportedKey.current = pending.current.key;
+      track('drawer_opened', pending.current.flags);
+      pending.current = null;
+    };
+    if (!openKey) {
+      report(); // closed before the board settled: what it showed until then
+      reportedKey.current = null;
+      return;
+    }
+    if (reportedKey.current === openKey) return;
+    if (pending.current && pending.current.key !== openKey) report(); // moved to another item
+    pending.current = { key: openKey, flags };
+    if (boardSettled) report();
+  }, [openKey, boardSettled, flags]);
+  // Unmounted while open — App drops the drawer with its item.
+  useEffect(() => () => {
+    if (pending.current) track('drawer_opened', pending.current.flags);
+  }, []);
 
   // Phones hand the sentence to LINE through the native sheet; desktops, which
   // have no sheet, get the link on the clipboard. Only the completed path is
@@ -332,15 +380,16 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
           <div>
             <p className="mb-2 text-xs text-stone">近 7 日價格趨勢（元/公斤）</p>
             {chartArea}
-            {vsBaseline !== null && item.baseline_price != null && (
+            {showBaseline && (
               <p className="mt-2 text-xs text-stone">
                 近一個月批發中位約 {item.baseline_price} 元/台斤，今日批發
-                {vsBaseline < 0
-                  ? `低 ${Math.round(Math.abs(vsBaseline))}%`
-                  : vsBaseline > 0
-                    ? `高 ${Math.round(vsBaseline)}%`
-                    : '持平'}
+                {relativePhrase(vsBaseline)}
                 ；卡片徽章與「划算優先」排序以此為準。
+              </p>
+            )}
+            {lastYear !== null && (
+              <p className={`${showBaseline ? 'mt-1' : 'mt-2'} text-xs text-stone`}>
+                去年此時批發約 {lastYear.price} 元/台斤（今日{relativePhrase(lastYear.percent)}）。
               </p>
             )}
           </div>

@@ -70,6 +70,51 @@ describe('useBoard', () => {
     vi.unstubAllGlobals();
   });
 
+  describe('settled', () => {
+    // What the drawer waits on before it reports an open: a `ready` status is
+    // not enough, since a cached board or a stale mirror is `ready` too while
+    // the read is still in flight.
+    it('stays false over a stale mirror painted while GAS answers, and turns true after', async () => {
+      fetchStaticBoardMock.mockResolvedValue(agedBoard('2026-09-01', 10)); // past the authority window
+      const { promise, resolve } = Promise.withResolvers<ApiResponse>();
+      fetchBoardMock.mockReturnValue(promise);
+
+      const { result } = renderHook(() => useBoard());
+      await waitFor(() => expect(result.current.status).toMatchObject({ kind: 'ready', source: 'static' }));
+      expect(result.current.settled).toBe(false);
+
+      await act(async () => resolve(board('2026-09-02')));
+      expect(result.current.status).toMatchObject({ kind: 'ready', source: 'gas' });
+      expect(result.current.settled).toBe(true);
+    });
+
+    it('turns true on a fresh mirror, which ends the read', async () => {
+      fetchStaticBoardMock.mockResolvedValue(board('2026-09-02'));
+      const { result } = renderHook(() => useBoard());
+      await waitFor(() => expect(result.current.settled).toBe(true));
+      expect(fetchBoardMock).not.toHaveBeenCalled();
+    });
+
+    it('turns true when the read fails, however it degrades', async () => {
+      fetchBoardMock.mockResolvedValue(FAILURE);
+      const { result } = renderHook(() => useBoard());
+      await waitFor(() => expect(result.current.status.kind).toBe('error'));
+      expect(result.current.settled).toBe(true);
+    });
+
+    it('goes false again for a retry, until that read ends', async () => {
+      const { result } = renderHook(() => useBoard());
+      await waitFor(() => expect(result.current.settled).toBe(true));
+      const { promise, resolve } = Promise.withResolvers<ApiResponse>();
+      fetchBoardMock.mockReturnValue(promise);
+
+      act(() => result.current.reload());
+      expect(result.current.settled).toBe(false);
+      await act(async () => resolve(board('2026-09-03')));
+      expect(result.current.settled).toBe(true);
+    });
+  });
+
   it('paints the cached board first and swaps in the backend answer', async () => {
     const cached = board('2026-09-01');
     const fresh = board('2026-09-02');
