@@ -47,6 +47,15 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   let dispatchStatus = 204;
   let dispatchThrows = false;
   const locks = { waits: 0, tries: 0, releases: 0, contended: false };
+  /** The long-term history spreadsheet (#22), in memory: a grid, not a list. */
+  type Tab = { rows: unknown[][]; maxRows: number; textColumnA: boolean };
+  const tabs = new Map<string, Tab>();
+  const openedIds: string[] = [];
+  const cacheRemovals: { key: string; triggers: string[] }[] = [];
+  const formatZones: string[] = [];
+  let sheetThrows = false;
+  let sheetZone = 'Asia/Taipei';
+  let triggerDeleteThrows = false;
   const mails: { to: string; subject: string; body: string }[] = [];
   let mailThrows = false;
   let brokenPropKey: string | null = null;
@@ -68,7 +77,62 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     };
   };
 
+  /** The slice of the Sheets API `SheetHistory.gs` uses, and nothing more. */
+  const tabApi = (name: string) => {
+    const tab = () => tabs.get(name) as Tab;
+    const rows = () => tab().rows;
+    return {
+      getLastRow: () => rows().length,
+      // A real tab is a fixed grid: `setValues` past `getMaxRows()` throws
+      // rather than growing it, which is what killed the first version of the
+      // archive in review — a default 1000-row tab fills in about five days.
+      getMaxRows: () => tab().maxRows,
+      insertRowsAfter: (after: number, howMany: number) => {
+        tab().maxRows = Math.max(tab().maxRows, after) + howMany;
+      },
+      getRange: (row: number, col: number, numRows: number, numCols: number) => ({
+        setValues: (values: unknown[][]) => {
+          if (row + values.length - 1 > tab().maxRows) {
+            throw new Error('The coordinates or dimensions of the range are invalid.');
+          }
+          values.forEach((v, i) => {
+            // …and a date-looking string lands in a date cell unless the
+            // column says otherwise, coming back as a Date.
+            rows()[row - 1 + i] = v.map((cell, j) =>
+              j === 0 && tab().textColumnA === false && typeof cell === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(cell)
+                ? new Date(`${cell}T00:00:00`)
+                : cell);
+          });
+        },
+        getValues: () =>
+          rows().slice(row - 1, row - 1 + numRows).map((r) => (r ?? []).slice(col - 1, col - 1 + numCols)),
+        setNumberFormat: (format: string) => {
+          if (col === 1 && format === '@') tab().textColumnA = true;
+        },
+      }),
+      deleteRows: (start: number, count: number) => void rows().splice(start - 1, count),
+    };
+  };
+
   const services = {
+    SpreadsheetApp: {
+      openById: (id: string) => {
+        if (sheetThrows) throw new Error('Requested entity was not found');
+        openedIds.push(id);
+        return {
+          // The spreadsheet's own zone, which is what a date cell means —
+          // not the script's.
+          getSpreadsheetTimeZone: () => sheetZone,
+          getSheetByName: (name: string) => (tabs.has(name) ? tabApi(name) : null),
+          insertSheet: (name: string) => {
+            // Sheets' own default for a new tab, which is the whole point of
+            // `growFor`.
+            tabs.set(name, { rows: [], maxRows: 1000, textColumnA: false });
+            return tabApi(name);
+          },
+        };
+      },
+    },
     UrlFetchApp: {
       fetch: (url: string, options?: Record<string, unknown>) => respond(url, options),
       fetchAll: (reqs: { url: string }[]) => reqs.map((r) => respond(r.url)),
@@ -77,7 +141,12 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
       getScriptCache: () => ({
         get: (k: string) => cache.get(k) ?? null,
         put: (k: string, v: string) => void cache.set(k, v),
-        remove: (k: string) => void cache.delete(k),
+        remove: (k: string) => {
+          // What the trigger list looked like at that moment, so a test can
+          // pin the ORDER of a cleanup rather than only its outcome.
+          cacheRemovals.push({ key: k, triggers: triggers.map((t) => t.handler) });
+          cache.delete(k);
+        },
       }),
     },
     PropertiesService: {
@@ -95,7 +164,12 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     },
     LockService: {
       getScriptLock: () => ({
-        waitLock: (_ms: number) => void (locks.waits += 1),
+        waitLock: (_ms: number) => {
+          locks.waits += 1;
+          // The real one throws when it cannot acquire inside the timeout,
+          // which is what every `withHistoryLock` caller has to survive.
+          if (locks.contended) throw new Error('Could not obtain lock');
+        },
         tryLock: (_ms: number) => {
           locks.tries += 1;
           return !locks.contended;
@@ -110,7 +184,21 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
       },
     },
     Logger: { log: (m: unknown) => void logs.push(String(m)) },
-    Utilities: { sleep: () => {} },
+    Utilities: {
+      sleep: () => {},
+      // Only the one pattern `SheetHistory.gs` asks for, and it records the
+      // zone so a test can assert which one was used.
+      formatDate: (date: Date, zone: string, pattern: string) => {
+        formatZones.push(zone);
+        if (pattern !== 'yyyy-MM-dd') throw new Error(`unstubbed pattern ${pattern}`);
+        const shifted = zone === 'Pacific/Auckland' ? new Date(date.getTime() + 4 * 3_600_000) : date;
+        return [
+          shifted.getFullYear(),
+          String(shifted.getMonth() + 1).padStart(2, '0'),
+          String(shifted.getDate()).padStart(2, '0'),
+        ].join('-');
+      },
+    },
     ContentService: {
       MimeType: { JSON: 'json' },
       createTextOutput: (t: string) => ({ setMimeType: () => ({ body: t }) }),
@@ -122,6 +210,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
           getUniqueId: () => `${t.handler}:${t.kind}`,
         })),
       deleteTrigger: (t: { getHandlerFunction: () => string }) => {
+        if (triggerDeleteThrows) throw new Error('Service unavailable: Script service');
         const i = triggers.findIndex((x) => x.handler === t.getHandlerFunction());
         if (i >= 0) triggers.splice(i, 1);
       },
@@ -141,17 +230,19 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'tradedRows', 'selectRows', 'rowRoot', 'rowVariety', 'isTradingDate',
     'retailBand', 'aggregateGroup', 'boardRoots', 'BOARD_ITEMS',
     'RETAIL_MARKUP_ROOT', 'RETAIL_MARKUP_CATEGORY', 'storeBoard', 'readDurableBoard',
-    'readBoard', 'boardAgeMs', 'scheduleRefresh', 'dropTriggers', 'handleWarm',
+    'readBoard', 'boardAgeMs', 'scheduleRefresh', 'refreshBoardCacheOnce', 'dropTriggers', 'handleWarm',
     'handleDiag', 'BOARD_MAX_AGE_MS', 'REFRESH_ONCE_FN',
     'handleTrend', 'resolveTradeDates',
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
-    'applyBaselines', 'backfillHistory', 'handleBackfill', 'buildBoard',
+    'applyBaselines', 'backfillHistory', 'backfillHistoryOnce', 'mergeCrawled', 'handleBackfill', 'buildBoard',
     'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown', 'handleSearch', 'RETAIL_BAND_ROOT',
     'sendAlert', 'recordRefreshOutcome', 'withAlertLock', 'handleAlertTest',
     'ALERT_FAILURE_STREAK', 'ALERT_SILENCE_MS', 'ALERT_COOLDOWN_MS',
     'REFRESH_INTERVAL_HOURS', 'installDailyTrigger', 'refreshBoardCache',
     'doGet', 'isAdmin', 'alertRecipient', 'redactFailure', 'ADMIN_TOKEN_PROP', 'ALERT_EMAIL_PROP',
     'requestMirrorDeploy', 'GH_DISPATCH_TOKEN_PROP', 'GH_DISPATCH_EVENT', 'GH_DISPATCH_URL',
+    'appendDailyHistory', 'historyRowsFor', 'SHEET_HEADER', 'HISTORY_SHEET_ID_PROP',
+    'SHEET_LAST_WRITE_PROP', 'SHEET_CORRECTION_MS',
     'GH_DISPATCH_MIN_INTERVAL_MS', 'GH_DISPATCH_FAIL_BACKOFF_MS', 'GH_DISPATCH_PROP', 'GH_DISPATCH_OK_PROP',
     'validateBoard', 'markSuspects', 'readChunkedProp',
     'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
@@ -171,7 +262,11 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   props.set('ALERT_EMAIL', 'owner@example.com');
   return {
     api,
-    logs, props, cache, triggers, fetches, locks, mails, dispatches,
+    logs, props, cache, triggers, fetches, locks, mails, dispatches, tabs, openedIds,
+    breakSheet: () => { sheetThrows = true; },
+    formatZones, cacheRemovals,
+    setSheetZone: (zone: string) => { sheetZone = zone; },
+    breakTriggerDelete: () => { triggerDeleteThrows = true; },
     breakDispatch: () => { dispatchThrows = true; },
     rejectDispatch: (code: number) => { dispatchStatus = code; },
     breakMail: () => { mailThrows = true; },
@@ -890,6 +985,77 @@ describe('backfillHistory — one-time seeding', () => {
     api.backfillHistory();
     expect(locks.waits).toBe(1);
     expect(locks.releases).toBe(1);
+  });
+});
+
+describe('backfillHistory — losing the lock', () => {
+  it('retries the merge, and frees the queue when it still cannot write', () => {
+    // The archive now holds this lock across a Sheets round trip, so a 30 s
+    // wait can genuinely time out — and a thrown timeout would throw away a
+    // crawl that took minutes, behind an hour-long queue lock that stops
+    // anyone asking again.
+    const { api, cache, contendLock, locks, logs } = loadBackend(plausibleRows());
+    api.handleBackfill({});
+    expect(cache.get('veggie_backfill_queued')).toBe('1');
+    contendLock();
+
+    const result = api.backfillHistoryOnce();
+
+    expect(result.merged).toBe(false);
+    expect(locks.waits).toBe(2); // tried twice before giving the crawl up
+    expect(logs.some((l) => l.includes('history lock busy'))).toBe(true);
+    expect(logs.some((l) => l.includes('merged nothing (busy)'))).toBe(true);
+    expect(cache.has('veggie_backfill_queued')).toBe(false); // ask again whenever you like
+  });
+
+  it('tells a busy lock apart from a merge that threw', () => {
+    // Only the first is worth retrying: a lock someone else holds clears on
+    // its own, and a merge that threw would throw again the same way. They
+    // are told apart by whether the body ran at all.
+    const { api, locks, logs } = loadBackend();
+    expect(api.mergeCrawled([null])).toBe('failed'); // the body, not the lock
+    expect(locks.waits).toBe(1);
+    expect(logs.some((l) => l.includes('mergeCrawled failed'))).toBe(true);
+    expect(logs.some((l) => l.includes('history lock busy'))).toBe(false);
+  });
+
+  it('frees the queue even when the trigger will not drop', () => {
+    // Both cleanups are guarded, and the trigger goes first: freeing the lock
+    // before the trigger is gone leaves a window where a new backfill queues
+    // itself and has its trigger deleted by this very line.
+    const { api, cache, contendLock, breakTriggerDelete, logs } = loadBackend(plausibleRows());
+    api.handleBackfill({});
+    contendLock();
+    breakTriggerDelete();
+
+    expect(() => api.backfillHistoryOnce()).not.toThrow();
+    expect(cache.has('veggie_backfill_queued')).toBe(false);
+    expect(logs.some((l) => l.includes('trigger not dropped'))).toBe(true);
+  });
+
+  it('drops the trigger before it frees the lock, not after', () => {
+    // The order is the point, not just the outcome. Freeing the lock first
+    // leaves a window where a `handleBackfill` re-locks and installs a fresh
+    // trigger that this `finally` then deletes: it reports "queued", nothing
+    // runs, and plain retries are refused for the rest of the hour. With the
+    // trigger dropped first, the worst interleaving leaves the lock still
+    // held, and the next request simply declines to queue.
+    const { api, cacheRemovals, contendLock } = loadBackend(plausibleRows());
+    api.handleBackfill({});
+    contendLock(); // so the merge fails and the lock is freed
+
+    api.backfillHistoryOnce();
+
+    const freed = cacheRemovals.find((r) => r.key === 'veggie_backfill_queued');
+    expect(freed).toBeDefined();
+    expect(freed?.triggers).not.toContain('backfillHistoryOnce');
+  });
+
+  it('keeps the queue lock when the merge worked', () => {
+    const { api, cache } = loadBackend(plausibleRows());
+    api.handleBackfill({});
+    expect(api.backfillHistoryOnce().merged).toBe(true);
+    expect(cache.get('veggie_backfill_queued')).toBe('1'); // one queued backfill per hour
   });
 });
 
@@ -1615,6 +1781,337 @@ describe('mirror deploy dispatch', () => {
   });
 });
 
+/**
+ * The long-term history Sheet (#22).
+ *
+ * The rolling 28-day store in ScriptProperties is untouched and still what
+ * every baseline is measured against; this is one more copy, in a spreadsheet
+ * the deployer owns, for the comparisons that quota cannot hold. What has to
+ * hold: it is off until configured, it costs the board nothing when it fails,
+ * and a trading day lands in it exactly once.
+ */
+describe('long-term history in a Sheet', () => {
+  const goodRows = plausibleRows();
+  const SHEET_ID = '1AbCdEfGh_stub';
+
+  /** A board as `buildBoard` shapes one, crawled `hoursAgo` ago. */
+  const boardOf = (date: string, hoursAgo = 0, over: Record<string, unknown> = {}) => ({
+    type: 'board',
+    date,
+    roc_date: '115.09.21',
+    generated_at: new Date(Date.now() - hoursAgo * 3_600_000).toISOString(),
+    count: 2,
+    items: [
+      {
+        code: 'LA1', name: '高麗菜', official_name: '甘藍', category: '葉菜類',
+        avg_price: 22.1, catty_price: 13.3, change_percent: -1.5, trade_volume: 570700,
+        unit: '公斤', markets_count: 13,
+        varieties: [
+          { name: '初秋', catty_price: 12, retail_price: 20, share_percent: 61 },
+          { name: '雪翠', catty_price: 15, retail_price: 25, share_percent: 22 },
+        ],
+      },
+      {
+        code: 'FF2', name: '番茄', official_name: '番茄', category: '果菜類',
+        avg_price: 40, catty_price: 24, change_percent: 3, trade_volume: 12000,
+        unit: '公斤', markets_count: 6,
+      },
+    ],
+    ...over,
+  });
+
+  describe('historyRowsFor — what actually gets archived', () => {
+    it('writes one blend row per item and one per variety', () => {
+      const { api } = loadBackend();
+      const rows = api.historyRowsFor(boardOf('2026-09-21')) as unknown[][];
+
+      expect(rows).toHaveLength(4); // 2 items + 2 varieties on the first
+      expect(rows[0]).toEqual(['2026-09-21', '高麗菜', '甘藍', '', 22.1, 570700, 13, '']);
+      // The variety row carries the share, not a volume nobody measured: the
+      // breakdown publishes shares and prices and drops the volume it grouped
+      // by, so `share × total` would be an invented number in an archive.
+      expect(rows[1]).toEqual(['2026-09-21', '高麗菜', '甘藍', '初秋', 20, '', '', 61]);
+      expect(rows[3]).toEqual(['2026-09-21', '番茄', '番茄', '', 40, 12000, 6, '']);
+    });
+
+    it('converts the variety price back to the column\'s unit', () => {
+      // The card publishes 元/台斤; every price in this column is 元/公斤, so
+      // one unit reads down the whole archive.
+      const { api } = loadBackend();
+      const rows = api.historyRowsFor(boardOf('2026-09-21')) as unknown[][];
+      expect(rows[1][4]).toBe(20); // 12 元/台斤 ÷ 0.6
+      expect(rows[2][4]).toBe(25); // 15 元/台斤 ÷ 0.6
+    });
+
+    it('skips an item the plausibility guard flagged', () => {
+      // Same reason `updateHistory` skips it: an archive exists to be measured
+      // against later, and a flagged observation must not bend that.
+      const { api } = loadBackend();
+      const board = boardOf('2026-09-21');
+      board.items[0].suspect = true;
+      const rows = api.historyRowsFor(board) as unknown[][];
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0][1]).toBe('番茄');
+    });
+
+    it('matches the header it is written under', () => {
+      const { api } = loadBackend();
+      const rows = api.historyRowsFor(boardOf('2026-09-21')) as unknown[][];
+      for (const row of rows) expect(row).toHaveLength(api.SHEET_HEADER.length);
+    });
+  });
+
+  describe('appendDailyHistory', () => {
+    const configured = () => {
+      const back = loadBackend(goodRows);
+      back.props.set(back.api.HISTORY_SHEET_ID_PROP, SHEET_ID);
+      return back;
+    };
+
+    it('does nothing at all until a sheet is configured', () => {
+      // How this ships. Nothing is opened, nothing is written, and the refresh
+      // behaves exactly as it did.
+      const { api, openedIds, tabs } = loadBackend(goodRows);
+      expect(api.refreshBoardCache().count).toBeGreaterThan(0);
+
+      expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('unconfigured');
+      expect(openedIds).toEqual([]);
+      expect(tabs.size).toBe(0);
+      expect(api.handleDiag().sheet_history).toEqual({ configured: false, last_write: null });
+    });
+
+    it('creates the year tab with its header and appends the day', () => {
+      const { api, tabs, openedIds } = configured();
+      expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('appended');
+
+      expect(openedIds).toEqual([SHEET_ID]);
+      const rows = (tabs.get('2026') as { rows: unknown[][] }).rows;
+      expect(rows[0]).toEqual(api.SHEET_HEADER);
+      expect(rows).toHaveLength(5); // header + 4
+      expect(rows[1][0]).toBe('2026-09-21');
+    });
+
+    it('writes a trading day once, however often the refresh revisits it', () => {
+      // The refresh runs every 4 h and re-crawls the same day.
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21'));
+      expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('already written');
+      expect((tabs.get('2026') as { rows: unknown[][] }).rows).toHaveLength(5);
+    });
+
+    it('replaces the day when the numbers have moved on', () => {
+      // MOA completes a day's closing prices through the evening, so a crawl
+      // of the same date hours later is a correction, not a duplicate.
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+
+      const corrected = boardOf('2026-09-21');
+      corrected.items[1].avg_price = 41.5;
+      expect(api.appendDailyHistory(corrected)).toBe('replaced');
+
+      const rows = (tabs.get('2026') as { rows: unknown[][] }).rows;
+      expect(rows).toHaveLength(5); // still one day, not two
+      expect(rows[4][4]).toBe(41.5);
+    });
+
+    it('keeps other days intact when it replaces one', () => {
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-20', 30));
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+      const corrected = boardOf('2026-09-21');
+      corrected.items[1].avg_price = 41.5;
+      api.appendDailyHistory(corrected);
+
+      const rows = (tabs.get('2026') as { rows: unknown[][] }).rows;
+      const dates = rows.slice(1).map((r) => r[0]);
+      expect(dates.filter((d) => d === '2026-09-20')).toHaveLength(4);
+      expect(dates.filter((d) => d === '2026-09-21')).toHaveLength(4);
+    });
+
+    it('puts each year in its own tab', () => {
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-12-31', 30));
+      api.appendDailyHistory(boardOf('2027-01-02'));
+
+      expect([...tabs.keys()]).toEqual(['2026', '2027']);
+      expect((tabs.get('2027') as { rows: unknown[][] }).rows).toHaveLength(5);
+    });
+
+    it('keeps a malformed board inside its own failure, not the lock\'s', () => {
+      // `historyRowsFor` reads a board the crawl built. If that ever throws,
+      // it has to be caught where it happened: outside the try it would
+      // surface as lock contention and log the wrong cause.
+      const { api, logs } = configured();
+      const broken = boardOf('2026-09-21');
+      broken.items = [null] as unknown as typeof broken.items;
+
+      expect(api.appendDailyHistory(broken)).toBe('failed');
+      expect(logs.some((l) => l.includes('archiveDay failed'))).toBe(true);
+      expect(logs.some((l) => l.includes('appendDailyHistory skipped'))).toBe(false);
+    });
+
+    it('never lets a Sheets failure cost the board', () => {
+      const { api, breakSheet, logs, props } = configured();
+      breakSheet();
+
+      const board = api.refreshBoardCache();
+      expect(board.count).toBeGreaterThan(0);
+      expect(props.get('veggie_last_refresh_ok')).toBeTruthy();
+      expect(logs.some((l) => l.includes('archiveDay failed'))).toBe(true);
+      // And nothing is recorded, so the next refresh tries the same day again.
+      expect(props.has('veggie_sheet_last_write')).toBe(false);
+    });
+
+    it('grows the grid it is writing into', () => {
+      // A tab is a fixed grid and `setValues` does not expand it: at ~160 rows
+      // a trading day, a default 1000-row tab is full inside a week, and every
+      // write after that throws out of bounds — an archive that dies on about
+      // day five with nothing but a log line to show for it.
+      const { api, tabs } = configured();
+      const dayOf = (n: number) => {
+        const board = boardOf(`2026-09-${String(n).padStart(2, '0')}`, (9 - n) * 24);
+        board.items = Array.from({ length: 180 }, (_, i) => ({
+          ...board.items[1], code: `X${i}`, name: `菜${i}`, official_name: `菜${i}`,
+        }));
+        return board;
+      };
+      for (let day = 1; day <= 8; day++) expect(api.appendDailyHistory(dayOf(day))).toBe('appended');
+
+      const tab = tabs.get('2026') as { rows: unknown[][]; maxRows: number };
+      expect(tab.rows).toHaveLength(8 * 180 + 1); // 1441 rows, past the 1000 a new tab has
+      expect(tab.maxRows).toBeGreaterThanOrEqual(tab.rows.length);
+    });
+
+    it('keeps the date column text, so a replacement can find its own day', () => {
+      // Left as a date, Sheets parses `2026-09-21` into a value it hands back
+      // as a `Date`, `dropDay` matches nothing, and the "replacement"
+      // duplicates the day instead.
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+      const tab = tabs.get('2026') as { rows: unknown[][]; textColumnA: boolean };
+      expect(tab.textColumnA).toBe(true);
+      expect(tab.rows[1][0]).toBe('2026-09-21');
+
+      api.appendDailyHistory(boardOf('2026-09-21'));
+      expect(tab.rows).toHaveLength(5);
+    });
+
+    it('still finds the day when the column holds real dates', () => {
+      // A tab someone reformatted by hand, or one written before the format
+      // was set. The comparison normalises rather than trusting the cell type.
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+      const tab = tabs.get('2026') as { rows: unknown[][]; textColumnA: boolean };
+      tab.textColumnA = false;
+      tab.rows = tab.rows.map((row, i) => (i === 0 ? row : [new Date('2026-09-21T00:00:00'), ...row.slice(1)]));
+
+      const corrected = boardOf('2026-09-21');
+      corrected.items[1].avg_price = 41.5;
+      expect(api.appendDailyHistory(corrected)).toBe('replaced');
+      expect(tab.rows).toHaveLength(5);
+    });
+
+    it('rewrites a day only when its numbers have moved', () => {
+      // The board keeps a trading date until the next one publishes, so over a
+      // weekend the same unchanged Friday is re-crawled for days. What decides
+      // is the rows, not the clock — and the clock only keeps the comparison
+      // itself cheap.
+      const { api, tabs, props } = configured();
+      api.appendDailyHistory(boardOf('2026-09-18', 48));
+
+      // The evening completion: better numbers for the same day.
+      const completed = boardOf('2026-09-18', 40);
+      completed.items[1].avg_price = 41.5;
+      expect(api.appendDailyHistory(completed)).toBe('replaced');
+
+      // And then the same numbers, again and again, for the rest of the break.
+      expect(api.appendDailyHistory(boardOf('2026-09-18', 24, { items: completed.items }))).toBe('unchanged');
+      expect(api.appendDailyHistory(boardOf('2026-09-18', 8, { items: completed.items }))).toBe('unchanged');
+      // …with the crawl time recorded each time, so the next revisit inside
+      // the window is skipped without reading the sheet at all.
+      expect(api.appendDailyHistory(boardOf('2026-09-18', 6, { items: completed.items }))).toBe('already written');
+
+      expect((tabs.get('2026') as { rows: unknown[][] }).rows).toHaveLength(5);
+      expect(props.get('veggie_sheet_last_write')).toContain('2026-09-18');
+    });
+
+    it('reads a date cell in the spreadsheet\'s timezone, not the script\'s', () => {
+      // A date cell is an instant, and only a calendar date in some zone. Read
+      // in the wrong one, a sheet kept east of Asia/Taipei lands on the day
+      // before and the replacement finds nothing — the bug the text column
+      // exists to avoid, reintroduced by the fallback that tolerates it.
+      const { api, tabs, formatZones, setSheetZone } = configured();
+      setSheetZone('Pacific/Auckland');
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+
+      const tab = tabs.get('2026') as { rows: unknown[][]; textColumnA: boolean };
+      tab.textColumnA = false;
+      tab.rows = tab.rows.map((row, i) => (i === 0 ? row : [new Date('2026-09-20T20:00:00'), ...row.slice(1)]));
+
+      const corrected = boardOf('2026-09-21');
+      corrected.items[1].avg_price = 41.5;
+      expect(api.appendDailyHistory(corrected)).toBe('replaced');
+      expect(tab.rows).toHaveLength(5); // replaced, not duplicated
+      expect(formatZones).toContain('Pacific/Auckland');
+    });
+
+    it('sees an unchanged day on a date-formatted tab as unchanged', () => {
+      // The other half of reading those cells: if the comparison then treats
+      // the `Date` in column 0 as a difference, every day looks changed and
+      // the archive rewrites it every window for as long as the market is
+      // shut — which is what the comparison replaced.
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+      const tab = tabs.get('2026') as { rows: unknown[][]; textColumnA: boolean };
+      tab.textColumnA = false;
+      tab.rows = tab.rows.map((row, i) => (i === 0 ? row : [new Date('2026-09-21T00:00:00'), ...row.slice(1)]));
+
+      expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('unchanged');
+      expect(tab.rows).toHaveLength(5);
+    });
+
+    it('does not drop the day for a board it would write nothing for', () => {
+      // Every item flagged: the rows are built before anything is deleted, so
+      // a correction that has nothing to say leaves what is there alone.
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+      const allFlagged = boardOf('2026-09-21');
+      allFlagged.items.forEach((it: Record<string, unknown>) => { it.suspect = true; });
+
+      expect(api.appendDailyHistory(allFlagged)).toBe('nothing to write');
+      expect((tabs.get('2026') as { rows: unknown[][] }).rows).toHaveLength(5);
+    });
+
+    it('serialises with the other history write, and never throws on contention', () => {
+      // Two executions genuinely overlap — the 4-hourly trigger and a
+      // `?action=warm` rebuild — and a check-then-append race would archive
+      // the day twice.
+      const { api, contendLock, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+      contendLock();
+
+      expect(() => api.appendDailyHistory(boardOf('2026-09-20', 30))).not.toThrow();
+      expect((tabs.get('2026') as { rows: unknown[][] }).rows).toHaveLength(5); // nothing added
+    });
+
+    it('is driven by the refresh, and says so in diag without reading the sheet', () => {
+      const { api, tabs, openedIds } = configured();
+      api.refreshBoardCache();
+
+      expect(tabs.size).toBe(1);
+      const opens = openedIds.length;
+      const diag = api.handleDiag();
+      expect(diag.sheet_history.configured).toBe(true);
+      expect(diag.sheet_history.last_write.date).toBe(api.readBoard().date);
+      // `diag` is public: a spreadsheet read here would let anyone spend the
+      // deployment's Sheets quota.
+      expect(openedIds).toHaveLength(opens);
+      expect(JSON.stringify(diag)).not.toContain(SHEET_ID);
+    });
+  });
+});
+
 describe('refresh cadence vs staleness threshold', () => {
   it('leaves at least an hour of headroom above the cadence', () => {
     const { api } = loadBackend();
@@ -1697,6 +2194,31 @@ describe('alerting under contention and failure', () => {
     const board = api.refreshBoardCache();
     expect(board.count).toBeGreaterThan(0); // the board still shipped
     expect(logs.some((l) => l.includes('alert bookkeeping failed'))).toBe(true);
+  });
+
+  it('clears the refresh lock even when the trigger will not drop', () => {
+    // Same shape as the backfill's cleanup: a `ScriptApp` failure used to
+    // strand `REFRESH_LOCK_KEY` for its whole TTL, and that is the lock that
+    // stops `?action=warm` queueing another rebuild.
+    const { api, cache, breakTriggerDelete, logs } = loadBackend(plausibleRows());
+    api.scheduleRefresh();
+    expect(cache.get('veggie_refresh_queued')).toBe('1');
+    breakTriggerDelete();
+
+    expect(() => api.refreshBoardCacheOnce()).not.toThrow();
+    expect(cache.has('veggie_refresh_queued')).toBe(false);
+    expect(logs.some((l) => l.includes('trigger not dropped'))).toBe(true);
+  });
+
+  it('drops the refresh trigger before it frees its lock too', () => {
+    const { api, cacheRemovals } = loadBackend(plausibleRows());
+    api.scheduleRefresh();
+
+    api.refreshBoardCacheOnce();
+
+    const freed = cacheRemovals.find((r) => r.key === 'veggie_refresh_queued');
+    expect(freed).toBeDefined();
+    expect(freed?.triggers).not.toContain('refreshBoardCacheOnce');
   });
 
   it('keeps the probe limiter durable across cache eviction', () => {

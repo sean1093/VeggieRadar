@@ -382,6 +382,55 @@ overlap, and a read-modify-write race would silently drop observations. The
 backfill crawls every window *before* taking the lock, so the critical section
 lasts milliseconds.
 
+### Long-term history (optional)
+
+The rolling history above is 28 trading days, and that is a quota decision:
+ScriptProperties gives the project 500 KB, and the baseline every 「比近月便宜」
+claim is measured against has to fit in it. Anything longer — 「比去年同期」, a
+per-variety baseline — needs somewhere else, so a refresh can also append the
+day to a **Google Sheet the deployer owns** (#22).
+
+It is off unless `HISTORY_SHEET_ID` is set, and it is deliberately the least
+privileged thing in the backend that it can be:
+
+- it runs after the board is stored, never throws, and a day it misses costs
+  the archive rather than the board — the same contract the alerting and the
+  mirror dispatch honour;
+- a trading day is written **once**, and rewritten only when its numbers have
+  moved. MOA completes a day's closing prices through the evening, so a later
+  crawl can carry better ones — but the board keeps a trading date until the
+  next one publishes, so over a weekend the same unchanged Friday is re-crawled
+  for days. What decides is the rows: a revisit inside 6 h is skipped without
+  reading anything, and past that the archived day is compared with what the
+  crawl would write. Comparing crawl times instead would either spend a fixed
+  budget of corrections before the evening completion arrived, or rewrite an
+  unchanged day every few hours until Monday;
+- a date cell is read in the **spreadsheet's** timezone, not the script's. The
+  column is written as text so this does not normally arise; on a tab someone
+  reformatted, reading an instant in the wrong zone would put it on the day
+  before and the replacement would find nothing to replace;
+- it runs under the same lock as `updateHistory` — the same two executions
+  overlap (the 4-hourly trigger and a `?action=warm` rebuild), and a
+  check-then-append race would archive a day twice. That lock is now held
+  across a Sheets round trip rather than a property write, so `backfillHistory`
+  retries the merge once and reports `merged: false` rather than throwing away
+  a crawl that took minutes — and frees its queue lock, so the operator can
+  simply ask again;
+- one tab per calendar year, header `date, item, root, variety, avg_price_kg,
+  volume_kg, markets, share_percent`. A variety row carries the share and
+  leaves volume and markets empty: the breakdown publishes shares and prices
+  and drops the volume it grouped by, so `share × total` would be a number
+  nobody measured sitting in an archive;
+- `diag.sheet_history` reports `configured` and the last write **from the
+  properties alone**. `diag` is public and unauthenticated, and a spreadsheet
+  read there would let anyone spend the deployment's Sheets quota.
+
+Enabling it needs the `spreadsheets` OAuth scope, which is now in
+`appsscript.json` — **so the next deploy asks the deploying owner to
+re-consent before the Web App serves again**. §8 has the canary procedure;
+this is the same step the `script.send_mail` scope needed.
+
+
 ### Static board mirror
 
 `data/board.json` is published *inside the frontend's own Pages artifact* by
@@ -699,6 +748,7 @@ GET {WEB_APP_URL}/exec?action=diag[&token=…]
      "history": { "items": 97, "min_days": 1, "max_days": 24 },
      "mirror_dispatch": { "at": "2026-09-21T16:04:11.201Z", "outcome": "dispatched",
                           "last_ok": "2026-09-21T16:04:11.201Z" },
+     "sheet_history": { "configured": false, "last_write": null },
      "alert": { "failure_streak": 0, "incident_open": false, "last_attempt": null, "recipient_configured": true,
                 "last_send_failure": null } }
 
@@ -1074,6 +1124,13 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
      backend skips the POST and `deploy-pages.yml`'s 2-hourly schedule is the
      fallback (§2). Rotating it is one property: a stale token logs
      `requestMirrorDeploy: GitHub answered 401` and costs nothing else.
+   - `HISTORY_SHEET_ID` — optional: the id of a Google Sheet you own, and the
+     whole of the long-term archive's configuration (§2). Unset, nothing is
+     written and nothing is opened. **The `spreadsheets` scope is declared
+     whether or not you set this**, so the next deploy asks you to re-consent
+     either way — verify it on a canary deployment first, as with the mail
+     scope. `diag.sheet_history` says whether it is configured and what was
+     last written, from the properties alone.
 3. Run `installDailyTrigger()` once in the editor — it installs the refresh
    trigger on `REFRESH_INTERVAL_HOURS` and warms the board so the first visitor
    never hits a cold crawl. Confirm with `?action=diag`: `triggers` must list

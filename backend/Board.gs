@@ -214,6 +214,9 @@ function refreshBoardCache() {
     // store, never before it, and never in the rejected branch below: a deploy
     // publishes whatever `?action=board` answers at the time.
     requestMirrorDeploy();
+    // The long archive, if one is configured. Same contract: after the store,
+    // never throws, and a day it misses costs the archive, not the board.
+    appendDailyHistory(board);
     recordRefreshOutcome(true,
       '看板已重新建立。\n\n' +
       '交易日：' + board.roc_date + '\n' +
@@ -381,8 +384,19 @@ function refreshBoardCacheOnce() {
   try {
     refreshBoardCache();
   } finally {
-    dropTriggers(REFRESH_ONCE_FN);
-    CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
+    // Each guarded on its own, and the trigger first: a `ScriptApp` failure
+    // here used to strand `REFRESH_LOCK_KEY` for its whole TTL, which is the
+    // lock that stops `?action=warm` queueing another rebuild.
+    try {
+      dropTriggers(REFRESH_ONCE_FN);
+    } catch (err) {
+      Logger.log('refreshBoardCacheOnce: trigger not dropped: ' + err);
+    }
+    try {
+      CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
+    } catch (err) {
+      Logger.log('refreshBoardCacheOnce: refresh lock not cleared: ' + err);
+    }
   }
 }
 

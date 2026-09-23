@@ -188,10 +188,71 @@ function handleBackfill(params) {
 
 /** One-off trigger target; the lock keeps repeat taps cheap for its full TTL. */
 function backfillHistoryOnce() {
+  var result = null;
   try {
-    backfillHistory();
+    result = backfillHistory();
   } finally {
-    dropTriggers(BACKFILL_ONCE_FN);
+    // The trigger first, and each guarded on its own. Dropping the queue lock
+    // before this trigger is gone leaves a window where a `handleBackfill`
+    // re-locks and installs a new one, which this line then deletes: the
+    // backfill never runs and the hour-long lock blocks every retry. Guarding
+    // both is what keeps either failure from costing the other.
+    try {
+      dropTriggers(BACKFILL_ONCE_FN);
+    } catch (err) {
+      Logger.log('backfillHistoryOnce: trigger not dropped: ' + err);
+    }
+    // A run that merged nothing leaves no queue behind it: the crawl is gone
+    // either way, and making the operator wait out the hour to ask again
+    // would be a penalty for someone else's lock.
+    try {
+      if (!result || !result.merged) CacheService.getScriptCache().remove(BACKFILL_LOCK_KEY);
+    } catch (err) {
+      Logger.log('backfillHistoryOnce: queue lock not cleared: ' + err);
+    }
+  }
+  return result;
+}
+
+/**
+ * Merges the crawled windows into the history under the lock.
+ *
+ * `busy` and `failed` are told apart by whether the body ran at all, because
+ * only the first is worth retrying: a lock someone else holds clears on its
+ * own, and a merge that threw would throw again the same way.
+ * @returns {string} 'merged', 'busy' or 'failed'.
+ */
+function mergeCrawled(crawled) {
+  var ran = false;
+  try {
+    withHistoryLock(function () {
+      ran = true;
+      var history = readHistory();
+      for (var c = 0; c < crawled.length; c++) {
+        var rowsByRoot = crawled[c];
+        for (var i = 0; i < BOARD_ITEMS.length; i++) {
+          var def = BOARD_ITEMS[i];
+          var rows = selectRows(rowsByRoot[def.official], def);
+          var byDate = {};
+          for (var r = 0; r < rows.length; r++) {
+            var dateKey = rows[r].TransDate;
+            if (!dateKey) continue;
+            (byDate[dateKey] = byDate[dateKey] || []).push(rows[r]);
+          }
+          Object.keys(byDate).forEach(function (roc) {
+            var day = weightedAverage(byDate[roc]);
+            if (day.volume < MIN_TRADE_VOLUME || !(day.avg > 0)) return;
+            history.items[def.name] = appendObservation(history.items[def.name], roc, round1(day.avg));
+          });
+        }
+      }
+      pruneHistory(history);
+      writeHistory(history);
+    });
+    return 'merged';
+  } catch (err) {
+    Logger.log(ran ? 'mergeCrawled failed: ' + err : 'mergeCrawled: history lock busy: ' + err);
+    return ran ? 'failed' : 'busy';
   }
 }
 
@@ -218,31 +279,17 @@ function backfillHistory() {
     crawled.push(fetchRootRows(roots, dateToROC(start), dateToROC(end)));
   }
 
-  withHistoryLock(function () {
-    var history = readHistory();
-    for (var c = 0; c < crawled.length; c++) {
-      var rowsByRoot = crawled[c];
-      for (var i = 0; i < BOARD_ITEMS.length; i++) {
-        var def = BOARD_ITEMS[i];
-        var rows = selectRows(rowsByRoot[def.official], def);
-        var byDate = {};
-        for (var r = 0; r < rows.length; r++) {
-          var dateKey = rows[r].TransDate;
-          if (!dateKey) continue;
-          (byDate[dateKey] = byDate[dateKey] || []).push(rows[r]);
-        }
-        Object.keys(byDate).forEach(function (roc) {
-          var day = weightedAverage(byDate[roc]);
-          if (day.volume < MIN_TRADE_VOLUME || !(day.avg > 0)) return;
-          history.items[def.name] = appendObservation(history.items[def.name], roc, round1(day.avg));
-        });
-      }
-    }
-    pruneHistory(history);
-    writeHistory(history);
-  });
-
+  // Retried once, because losing this lock now costs more than it used to: the
+  // long-term archive (#22) holds the same lock across a Sheets round trip, so
+  // a 30 s wait can genuinely time out — and a thrown timeout here would throw
+  // away a crawl that took minutes, behind a one-hour queue lock that stops
+  // anyone simply asking again.
+  var outcome = mergeCrawled(crawled);
+  if (outcome === 'busy') outcome = mergeCrawled(crawled);
   var summary = historySummary();
-  Logger.log('Backfill complete: ' + summary.items + ' items with history');
+  summary.merged = outcome === 'merged';
+  Logger.log(summary.merged
+    ? 'Backfill complete: ' + summary.items + ' items with history'
+    : 'Backfill merged nothing (' + outcome + ')');
   return summary;
 }
