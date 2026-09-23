@@ -38,18 +38,27 @@ function parseRows(resp) {
 }
 
 /**
- * A response's rows, and whether MOA cut them short. Past roughly 1,000 rows
- * MOA keeps the NEWEST and drops the oldest, and says so with `Next: true` —
- * so the oldest date left in a truncated response can be missing markets, and
- * its average is then simply wrong rather than missing.
+ * A response's rows, whether MOA answered at all, and whether it cut the rows
+ * short.
+ *
+ *   - `answered` is false for a throttled or failed request. MOA answers a
+ *     burst with an EMPTY BODY, not an empty `Data`, so "nothing traded" and
+ *     "nothing was said" are told apart here — a distinction every caller but
+ *     the archive's backfill has so far been able to shrug off.
+ *   - `next` is MOA's `Next: true`. Past roughly 1,000 rows it keeps the
+ *     NEWEST and drops the oldest, so the oldest date left in a truncated
+ *     response can be missing markets, and its average is then wrong rather
+ *     than missing.
  */
 function parsePage(resp) {
+  var none = { rows: [], answered: false, next: false };
   try {
-    if (resp.getResponseCode() !== 200) return { rows: [], next: false };
+    if (resp.getResponseCode() !== 200) return none;
     var json = JSON.parse(resp.getContentText());
-    return { rows: (json && json.Data) ? json.Data : [], next: !!(json && json.Next === true) };
+    if (!json || typeof json !== 'object') return none;
+    return { rows: json.Data || [], answered: true, next: json.Next === true };
   } catch (err) {
-    return { rows: [], next: false };
+    return none;
   }
 }
 
@@ -58,10 +67,12 @@ function parsePage(resp) {
  * date, or across a closed range when `rocEnd` is given (backfill). A single
  * 70+ request burst trips MOA's per-IP limit and comes back empty, so
  * concurrency is capped and each batch pauses briefly.
- * @param {Object=} truncated optional; every root MOA cut short is set true.
+ * @param {Object=} meta optional; `meta.truncated[root]` is set for every root
+ *   MOA cut short and `meta.unanswered[root]` for every root it did not
+ *   answer, each cleared again by a later call that answers it whole.
  * @returns {Object} map of root → rows[]
  */
-function fetchAllRows(cropNames, rocStart, rocEnd, truncated) {
+function fetchAllRows(cropNames, rocStart, rocEnd, meta) {
   var out = {};
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
@@ -73,14 +84,30 @@ function fetchAllRows(cropNames, rocStart, rocEnd, truncated) {
       for (var i = 0; i < responses.length; i++) {
         var page = parsePage(responses[i]);
         out[slice[i]] = page.rows;
-        if (truncated && page.next) truncated[slice[i]] = true;
+        if (meta) notePage(meta, slice[i], page);
       }
     } catch (err) {
       Logger.log('fetchAllRows batch error (' + rocStart + '): ' + err);
+      if (meta) {
+        for (var j = 0; j < slice.length; j++) notePage(meta, slice[j], { answered: false, next: false });
+      }
     }
     if (start + FETCH_BATCH < cropNames.length) Utilities.sleep(120);
   }
   return out;
+}
+
+function notePage(meta, root, page) {
+  if (page.answered) {
+    delete meta.unanswered[root];
+  } else {
+    meta.unanswered[root] = true;
+  }
+  if (page.next) {
+    meta.truncated[root] = true;
+  } else {
+    delete meta.truncated[root];
+  }
 }
 
 /**
@@ -89,13 +116,13 @@ function fetchAllRows(cropNames, rocStart, rocEnd, truncated) {
  * genuinely out-of-season roots just stay empty. Accepts an optional range
  * end for the backfill path.
  */
-function fetchRootRows(roots, rocStart, rocEnd, truncated) {
-  var out = fetchAllRows(roots, rocStart, rocEnd, truncated);
+function fetchRootRows(roots, rocStart, rocEnd, meta) {
+  var out = fetchAllRows(roots, rocStart, rocEnd, meta);
   var misses = roots.filter(function (r) { return !out[r] || !out[r].length; });
   if (!misses.length) return out;
 
   Utilities.sleep(1500);
-  var retry = fetchAllRows(misses, rocStart, rocEnd, truncated);
+  var retry = fetchAllRows(misses, rocStart, rocEnd, meta);
   for (var i = 0; i < misses.length; i++) {
     var root = misses[i];
     if (retry[root] && retry[root].length) out[root] = retry[root];
@@ -104,24 +131,38 @@ function fetchRootRows(roots, rocStart, rocEnd, truncated) {
 }
 
 /**
- * Like `fetchRootRows` across a range, but never hands back a root MOA cut
- * short: a truncated root is refetched in halves until every piece is whole.
+ * Like `fetchRootRows` across a range, but for the long-term archive, where a
+ * wrong number is worse than a missing one and a missing one is permanent: a
+ * day is written once, and skipped by date ever after.
  *
- * For the long-term archive, where a wrong number is worse than a missing one
- * — a day written from a truncated response keeps its missing markets for as
- * long as the archive exists. A single day that still truncates cannot be made
- * whole by splitting, so that root is left out of that day.
+ *   - A root MOA cut short is refetched in halves until every piece is whole.
+ *     Halves rather than "keep what came back and fetch the rest": that would
+ *     trust MOA to cut strictly by date, and a response it cut is the one
+ *     thing here not to trust. A single day that still truncates cannot be
+ *     made whole by splitting, so that root is left out of that day.
+ *   - A root MOA did not answer, even after `fetchRootRows`' retry, is
+ *     REPORTED rather than returned empty, so the caller can retry the window
+ *     instead of archiving days without the crop.
+ * @returns {{rows: Object, unanswered: string[]}}
  */
 function fetchCompleteRows(roots, rocStart, rocEnd) {
-  var truncated = {};
-  var out = fetchRootRows(roots, rocStart, rocEnd, truncated);
-  Object.keys(truncated).forEach(function (root) {
-    out[root] = fetchSplit(root, rocStart, rocEnd);
+  var meta = { truncated: {}, unanswered: {} };
+  var rows = fetchRootRows(roots, rocStart, rocEnd, meta);
+  Object.keys(meta.truncated).forEach(function (root) {
+    var whole = fetchSplit(root, rocStart, rocEnd);
+    if (whole === null) {
+      meta.unanswered[root] = true;
+    } else {
+      rows[root] = whole;
+    }
   });
-  return out;
+  return { rows: rows, unanswered: Object.keys(meta.unanswered) };
 }
 
-/** Both halves of a truncated window, each fetched until it is whole. */
+/**
+ * Both halves of a truncated window, each fetched until it is whole, or null
+ * when MOA stopped answering part-way.
+ */
 function fetchSplit(root, rocStart, rocEnd) {
   var from = rocToDate(rocStart);
   var span = Math.round((rocToDate(rocEnd).getTime() - from.getTime()) / 86400000) + 1;
@@ -130,18 +171,22 @@ function fetchSplit(root, rocStart, rocEnd) {
     return [];
   }
   var half = Math.ceil(span / 2);
-  return fetchWhole(root, rocStart, shiftROC(rocStart, half - 1))
-    .concat(fetchWhole(root, shiftROC(rocStart, half), rocEnd));
+  var older = fetchWhole(root, rocStart, shiftROC(rocStart, half - 1));
+  if (older === null) return null;
+  var newer = fetchWhole(root, shiftROC(rocStart, half), rocEnd);
+  return newer === null ? null : older.concat(newer);
 }
 
 function fetchWhole(root, rocStart, rocEnd) {
   var page;
   try {
+    Utilities.sleep(120); // sequential, right after a full batch: keep under the per-IP limit
     page = parsePage(UrlFetchApp.fetch(cropUrl(root, rocStart, rocEnd), { muteHttpExceptions: true }));
   } catch (err) {
     Logger.log('fetchWhole error (' + root + ' ' + rocStart + '): ' + err);
-    return [];
+    return null;
   }
+  if (!page.answered) return null;
   return page.next ? fetchSplit(root, rocStart, rocEnd) : page.rows;
 }
 
@@ -192,12 +237,36 @@ function resolveTradeDates(fresh) {
  * it would pick a date on which every board item aggregates to nothing.
  */
 function isTradingDate(probe, rocDate) {
-  var rows = tradedRows(fetchCrop(probe, rocDate));
+  return tradedVolume(fetchCrop(probe, rocDate)) >= PROBE_MIN_VOLUME;
+}
+
+/**
+ * The dates on which the probe root really traded, oldest first — the
+ * `isTradingDate` test applied to a range already fetched.
+ */
+function tradingDates(probeRows) {
+  var byDate = groupByTransDate(probeRows);
+  return Object.keys(byDate).filter(function (day) {
+    return tradedVolume(byDate[day]) >= PROBE_MIN_VOLUME;
+  }).sort();
+}
+
+/** Kilograms really traded across rows, placeholders and zero rows excluded. */
+function tradedVolume(rows) {
+  var traded = tradedRows(rows);
   var volume = 0;
-  for (var i = 0; i < rows.length; i++) {
-    volume += parseFloat(rows[i].Trans_Quantity || 0);
+  for (var i = 0; i < traded.length; i++) volume += parseFloat(traded[i].Trans_Quantity || 0);
+  return volume;
+}
+
+/** Rows keyed by their ROC `TransDate`; a row without one is dropped. */
+function groupByTransDate(rows) {
+  var out = {};
+  for (var i = 0; i < (rows || []).length; i++) {
+    var day = rows[i].TransDate;
+    if (day) (out[day] = out[day] || []).push(rows[i]);
   }
-  return volume >= PROBE_MIN_VOLUME;
+  return out;
 }
 
 // --- Row filtering ---

@@ -199,17 +199,25 @@ var SHEET_CORRECTION_MS = 6 * 60 * 60 * 1000;
 // quota, a deploy, a trigger that never fired) be resumed rather than redone.
 var SHEET_BACKFILL_FN = 'sheetBackfillStep';
 var SHEET_BACKFILL_PROP = 'veggie_sheet_backfill';
+// The id of a job the operator cancelled. Its own property, because the chain
+// rewrites the job as it goes and could write "running" straight back over a
+// cancel that landed between its read and its write; nothing but a cancel
+// ever writes this one.
+var SHEET_BACKFILL_CANCEL_PROP = 'veggie_sheet_backfill_cancel';
 // Leading days fetched only to be the PREVIOUS trading day of the first day
 // written: `validateBoard`'s rule (e) judges a day against the one before it,
 // and without them the first day of every window would go unjudged. Taken out
 // of the same `BACKFILL_WINDOW_DAYS` request, which is what keeps it under
-// MOA's row cap: each link writes the other 9.
+// MOA's row cap: each link writes the other 9. A closure longer than this
+// (春節 runs 4–6 days) is handled by deferring that first day to the next
+// window, where it is the newest day and has the whole window behind it.
 var SHEET_BACKFILL_CONTEXT_DAYS = 3;
 var SHEET_BACKFILL_DEFAULT_MONTHS = 12;
 var SHEET_BACKFILL_MAX_MONTHS = 24;
 // Consecutive failed windows before the chain stops itself. A window that
 // failed is retried by the next link, but one that keeps failing — a revoked
-// share, a spent quota — must not loop a crawl every few seconds for ever.
+// share, a spent quota, a window too slow for the 6-minute limit — must not
+// loop a crawl every few seconds for ever.
 var SHEET_BACKFILL_MAX_FAILURES = 3;
 // A running job that has not moved for this long has no chain behind it: one
 // link runs for at most 6 minutes and queues the next a second later.

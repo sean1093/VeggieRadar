@@ -381,11 +381,7 @@ function handleTrend(params) {
   });
 
   // Group rows by trading date, then walk the calendar so closed days stay null.
-  var byDate = {};
-  for (var i = 0; i < rows.length; i++) {
-    var dateKey = rows[i].TransDate;
-    (byDate[dateKey] = byDate[dateKey] || []).push(rows[i]);
-  }
+  var byDate = groupByTransDate(rows);
 
   var trend = [];
   for (var offset = days - 1; offset >= 0; offset--) {

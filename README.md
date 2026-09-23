@@ -449,7 +449,14 @@ from MOA's range queries:
   the two cannot drift into different archives. Each window fetches three
   extra leading days that are never written: they are the *previous trading
   day* rule (e) judges the first day against, and without them one day in
-  every nine would go into the archive unjudged.
+  every nine would go into the archive unjudged. After a longer closure
+  (春節 runs 4–6 days) the first day still has none in reach, so it is
+  deferred: the next window ends on it, with its own days behind it.
+- **A window is written whole or not at all.** A day is skipped by date ever
+  after it is written, so a hole would be permanent. MOA answers a burst with
+  an *empty body* — not an empty `Data` — so a root it did not answer, even
+  after the retry, is told apart from one that did not trade, and fails the
+  window; the next link tries again.
 - **It never writes a day the live path can.** The job ends the day before
   the board's trading date, fixed when it starts; the live archive only ever
   writes that date or a later one. A day already in the Sheet — live or from
@@ -464,9 +471,19 @@ from MOA's range queries:
   trend still read a truncated response as whole.)
 - **It survives stopping.** The job — reach, cursor, counts, last error — is
   one property. A failed window is retried by the next link; three in a row
-  stop the chain as `failed`. Asking again with any `months=` resumes a failed
-  job, or a running one that has not moved for 15 minutes, from its cursor and
-  with its original reach; `cancel=1` stops it after the current window.
+  stop the chain as `failed`. A link is counted *before* it works, because one
+  the 6-minute limit kills never reaches its `catch` — so a window that is
+  always too slow ends as `failed` too, rather than stalling for ever. Asking
+  again with any `months=` resumes a failed job, or a running one that has not
+  moved for 15 minutes, from its cursor and with its original reach;
+  `cancel=1` stops it after the current window, and is kept in a property of
+  its own so the chain's next write cannot undo it. Requests are serialised
+  under the history lock, so two at once cannot start two chains.
+- **A new job skips what the last one finished.** Re-running a year would
+  crawl ~40 windows to write nothing; a new `months=` after a finished (or
+  cancelled) job steps over that job's range without a request, so extending
+  12 months to 24 crawls only the new year. To redo a range on purpose —
+  after deleting rows by hand — delete the `veggie_sheet_backfill` property.
 
 Rows land in the order they were written, not in date order — the live days,
 then each window newest-first. Nothing reads the tab in order (the readers

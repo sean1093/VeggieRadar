@@ -235,13 +235,7 @@ function mergeCrawled(crawled) {
         var rowsByRoot = crawled[c];
         for (var i = 0; i < BOARD_ITEMS.length; i++) {
           var def = BOARD_ITEMS[i];
-          var rows = selectRows(rowsByRoot[def.official], def);
-          var byDate = {};
-          for (var r = 0; r < rows.length; r++) {
-            var dateKey = rows[r].TransDate;
-            if (!dateKey) continue;
-            (byDate[dateKey] = byDate[dateKey] || []).push(rows[r]);
-          }
+          var byDate = groupByTransDate(selectRows(rowsByRoot[def.official], def));
           Object.keys(byDate).forEach(function (roc) {
             var day = weightedAverage(byDate[roc]);
             if (day.volume < MIN_TRADE_VOLUME || !(day.avg > 0)) return;

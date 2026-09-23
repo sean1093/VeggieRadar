@@ -2131,9 +2131,10 @@ const rocIso = (roc: string): string => {
 /**
  * MOA's range endpoint over a day-by-day world: `daily(root, roc)` says what
  * traded, and a response past `cap` rows is cut the way MOA cuts one — the
- * newest rows kept and `Next: true` set.
+ * newest rows kept and `Next: true` set. A day answering `null` makes the
+ * whole request come back as MOA answers a burst: an empty body.
  */
-function moaRange(daily: (root: string, roc: string) => Row[], cap = Infinity) {
+function moaRange(daily: (root: string, roc: string) => Row[] | null, cap = Infinity) {
   const requests: { root: string; from: string; to: string }[] = [];
   const answer = (url: string) => {
     const q = new URL(url).searchParams;
@@ -2142,7 +2143,13 @@ function moaRange(daily: (root: string, roc: string) => Row[], cap = Infinity) {
     const to = q.get('End_time') ?? from;
     requests.push({ root, from, to });
     let rows: Row[] = [];
-    for (let d = from; d <= to; d = rocShift(d, 1)) rows = rows.concat(daily(root, d));
+    let silent = false;
+    for (let d = from; d <= to; d = rocShift(d, 1)) {
+      const day = daily(root, d);
+      if (day === null) silent = true;
+      else rows = rows.concat(day);
+    }
+    if (silent) return { getResponseCode: () => 200, getContentText: () => '' };
     const next = rows.length > cap;
     if (next) rows = [...rows].sort((a, b) => (b.TransDate ?? '').localeCompare(a.TransDate ?? '')).slice(0, cap);
     return {
@@ -2178,7 +2185,10 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
   };
   const ROWS_A_DAY = 4;
 
-  const backfill = (daily = market, { cap = Infinity, boardRoc = BOARD_ROC } = {}) => {
+  const backfill = (
+    daily: (root: string, roc: string) => Row[] | null = market,
+    { cap = Infinity, boardRoc = BOARD_ROC } = {},
+  ) => {
     const moa = moaRange((root, roc) => daily(root, roc), cap);
     const back = loadBackend({}, { UrlFetchApp: moa.UrlFetchApp });
     back.props.set(back.api.HISTORY_SHEET_ID_PROP, SHEET_ID);
@@ -2243,6 +2253,24 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(backfill().api.handleSheetBackfill({ months: 'soon' }).job.months).toBe(12);
     });
 
+    it('reaches back whole months, even from a month\'s last day', () => {
+      // `setMonth` alone rolls 03-31 less one month on to 03-03.
+      const back = backfill(market, { boardRoc: '115.04.01' }); // ends 03-31
+      expect(back.api.handleSheetBackfill({ months: '1' }).job.from).toBe('2026-03-01');
+      const leap = backfill(market, { boardRoc: '115.03.31' });
+      expect(leap.api.handleSheetBackfill({ months: '1' }).job.from).toBe('2026-02-28');
+    });
+
+    it('answers "busy" rather than racing another request', () => {
+      // Two requests at once could each decide there is no job and start one
+      // apiece, leaving two chains on one cursor.
+      const back = backfill();
+      back.contendLock();
+      expect(back.api.handleSheetBackfill({ months: '12' }).message).toBe('系統忙碌中，請稍後再試');
+      expect(back.job()).toBeNull();
+      expect(back.links()).toBe(0);
+    });
+
     it('will not start without a board to measure the end from', () => {
       const back = backfill();
       back.props.clear();
@@ -2260,6 +2288,26 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(again).toMatchObject({ queued: false, message: '回填進行中' });
       expect(back.job()).toEqual(first);
       expect(back.links()).toBe(1);
+    });
+
+    it('keeps the count of a stalled chain, which a killed link may have stopped', () => {
+      // A link killed by the 6-minute limit never reaches its `catch`, so it
+      // was counted before it started. Resuming it must not forget that, or a
+      // window that always runs too long would be resumed for ever.
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.triggers.length = 0;
+      back.setJob({ failures: 2, updated_at: new Date(Date.now() - back.api.SHEET_BACKFILL_STALL_MS - 60_000).toISOString() });
+
+      back.api.handleSheetBackfill({ months: '12' });
+      expect(back.job().failures).toBe(2);
+
+      back.setJob({ failures: back.api.SHEET_BACKFILL_MAX_FAILURES }); // …and the resumed link dies too
+      back.api.sheetBackfillStep();
+      expect(back.job().status).toBe('failed');
+      expect(back.job().last_error).toContain('did not finish');
+      expect(back.moa.requests).toHaveLength(0);
+      expect(back.links()).toBe(0);
     });
 
     it('resumes a job whose chain stopped, from where it got to', () => {
@@ -2404,16 +2452,79 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.job().last_error).toContain('Requested entity was not found');
     });
 
+    it('counts a link before it does the work', () => {
+      let failuresDuring = -1;
+      const back = backfill((root, roc) => {
+        if (failuresDuring < 0) failuresDuring = back.job().failures;
+        return market(root, roc);
+      });
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      expect(failuresDuring).toBe(1); // what a killed link would leave behind
+      expect(back.job().failures).toBe(0); // cleared by the window succeeding
+    });
+
+    it('fails the window when MOA does not answer a root, and writes nothing', () => {
+      // A day is skipped by date ever after it is written, so writing the
+      // window without the crop would make the hole permanent.
+      const back = backfill((root, roc) => (root === '番茄' ? null : market(root, roc)));
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      expect(back.tabs.size).toBe(0);
+      expect(back.job()).toMatchObject({ status: 'running', failures: 1, cursor: '2026-09-20' });
+      expect(back.job().last_error).toContain('番茄');
+    });
+
+    it('defers a first day whose previous trading day is out of reach', () => {
+      // A closure longer than the context days: the first day after it has no
+      // previous trading day in the window, and would go in unjudged. The
+      // next window ends on it instead, with its own days behind it.
+      const shut = new Set(['115.09.06', '115.09.07', '115.09.08', '115.09.09', '115.09.10', '115.09.11', '115.09.12']);
+      const holiday = (root: string, roc: string): Row[] => {
+        if (shut.has(roc)) return root === '甘藍' ? [trendRow(roc, '休市', 0, 0)] : [];
+        if (root === '番茄' && roc === '115.09.05') return [trendRow(roc, '番茄-牛番茄', 10, 200000)];
+        return market(root, roc); // 09-14 onwards; 09-13 is in CLOSED
+      };
+      const back = backfill(holiday);
+      back.api.handleSheetBackfill({ months: '12' });
+
+      back.api.sheetBackfillStep();
+      expect(back.datesOf('2026')[0]).toBe('2026-09-15'); // 09-14 held back
+      expect(back.job().cursor).toBe('2026-09-14');
+
+      back.api.sheetBackfillStep();
+      const on14 = back.rowsOf('2026').filter((r) => r[0] === '2026-09-14').map((r) => r[1]);
+      expect(on14).toContain('高麗菜');
+      expect(on14).not.toContain('番茄'); // judged against 09-05, and flagged
+    });
+
     it('drops its result when the job is cancelled while it runs', () => {
       let during = () => {};
       const back = backfill((root, roc) => (during(), market(root, roc)));
       back.api.handleSheetBackfill({ months: '12' });
       during = () => {
-        if (back.job().status === 'running') back.setJob({ status: 'cancelled' });
+        if (back.job().status === 'running') back.api.handleSheetBackfill({ cancel: '1' });
       };
 
       back.api.sheetBackfillStep();
       expect(back.job()).toMatchObject({ status: 'cancelled', cursor: '2026-09-20', windows: 0 });
+      expect(back.links()).toBe(0);
+    });
+
+    it('keeps a cancel the chain wrote "running" back over', () => {
+      // The chain rewrites the job as it goes; a cancel landing between its
+      // read and its write would be overwritten. The cancel's own property is
+      // the one nothing else writes.
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.handleSheetBackfill({ cancel: '1' });
+      back.setJob({ status: 'running' }); // the lost write
+
+      back.api.sheetBackfillStep();
+      expect(back.moa.requests).toHaveLength(0);
+      expect(back.job().status).toBe('cancelled');
       expect(back.links()).toBe(0);
     });
 
@@ -2456,16 +2567,66 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       }
     });
 
-    it('writes nothing the second time over the same reach', () => {
+    it('does not crawl again what the previous job finished', () => {
+      // Every day in it is written, and re-crawling a year to learn that would
+      // spend most of a day's trigger runtime on nothing.
       const back = backfill();
       back.api.handleSheetBackfill({ months: '1' });
       runOut(back);
       const before = back.rowsOf('2026').length;
+      const crawled = back.moa.requests.length;
 
       back.api.handleSheetBackfill({ months: '1' });
+      expect(back.job().skip).toEqual({ from: '2026-08-21', to: '2026-09-20' });
       runOut(back);
+      expect(back.moa.requests).toHaveLength(crawled);
       expect(back.rowsOf('2026')).toHaveLength(before);
-      expect(back.job()).toMatchObject({ status: 'done', days_written: 0, days_skipped: 30 });
+      expect(back.job()).toMatchObject({ status: 'done', windows: 0, days_written: 0 });
+    });
+
+    it('extends a finished reach by crawling only the new part', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '1' });
+      runOut(back);
+      const crawled = back.moa.requests.length;
+
+      back.api.handleSheetBackfill({ months: '2' });
+      runOut(back);
+      const again = back.moa.requests.slice(crawled);
+      expect(again.length).toBeGreaterThan(0);
+      // Nothing it fetched reaches into the finished month, context days aside.
+      for (const r of again) expect(r.to < '115.08.21').toBe(true);
+      expect(back.datesOf('2026')[0]).toBe('2026-07-21');
+      expect(back.job()).toMatchObject({ status: 'done', days_skipped: 0 });
+    });
+
+    it('stops a window at the finished part when the board has moved on', () => {
+      // Days later the new job's top overlaps the old job's range: its first
+      // window must end its crawl where the finished range begins.
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '1' });
+      runOut(back);
+      back.api.storeBoard({
+        type: 'board', date: '2026-09-26', roc_date: '115.09.26',
+        generated_at: new Date().toISOString(), count: 0, items: [],
+      });
+      const crawled = back.moa.requests.length;
+
+      back.api.handleSheetBackfill({ months: '1' });
+      back.api.sheetBackfillStep();
+      const cabbage = back.moa.requests.slice(crawled).filter((r) => r.root === '甘藍');
+      expect(cabbage).toEqual([{ root: '甘藍', from: '115.09.18', to: '115.09.25' }]); // 09-21 … 09-25, plus context
+      expect(back.job()).toMatchObject({ days_written: 5, days_skipped: 0, cursor: '2026-09-20' });
+    });
+
+    it('resumes a cancelled job\'s remainder, not its finished part', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '1' });
+      back.api.sheetBackfillStep(); // 09-12 … 09-20
+      back.api.handleSheetBackfill({ cancel: '1' });
+
+      back.api.handleSheetBackfill({ months: '1' });
+      expect(back.job().skip).toEqual({ from: '2026-09-12', to: '2026-09-20' });
     });
 
     it('reports what the Sheet holds, behind the token', () => {
@@ -2511,9 +2672,10 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       // oldest days — or worse, part of one, whose average is then wrong.
       const oneADay = (root: string, roc: string) => (root === '甘藍' ? [trendRow(roc, '甘藍-初秋', 20, 60000)] : []);
       const back = backfill(oneADay, { cap: 3 });
-      const rows = back.api.fetchCompleteRows(['甘藍'], '115.09.01', '115.09.04');
+      const { rows, unanswered } = back.api.fetchCompleteRows(['甘藍'], '115.09.01', '115.09.04');
 
       expect(daysOf(rows['甘藍'])).toEqual(['115.09.01', '115.09.02', '115.09.03', '115.09.04']);
+      expect(unanswered).toEqual([]);
       expect(back.moa.requests.map((r) => `${r.from}–${r.to}`)).toEqual([
         '115.09.01–115.09.04', '115.09.01–115.09.02', '115.09.03–115.09.04',
       ]);
@@ -2526,10 +2688,32 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
         return Array.from({ length: n }, (_, i) => trendRow(roc, '甘藍-初秋', 20, 60000, `市場${i}`));
       };
       const back = backfill(heavy, { cap: 3 });
-      const rows = back.api.fetchCompleteRows(['甘藍'], '115.09.01', '115.09.04');
+      const { rows } = back.api.fetchCompleteRows(['甘藍'], '115.09.01', '115.09.04');
 
       expect(daysOf(rows['甘藍'])).toEqual(['115.09.01', '115.09.02', '115.09.04']);
       expect(back.logs.some((l) => l.includes('still truncates on 115.09.03'))).toBe(true);
+    });
+
+    it('reports a root MOA did not answer instead of returning it empty', () => {
+      // A throttled request is an empty body, not an empty `Data`. Returned as
+      // "no rows", the archive would write every day of the window without
+      // the crop — and skip those dates for good on every later run.
+      const back = backfill((root, roc) => (root === '番茄' ? null : market(root, roc)));
+      const { rows, unanswered } = back.api.fetchCompleteRows(['甘藍', '番茄'], '115.09.01', '115.09.04');
+
+      expect(unanswered).toEqual(['番茄']);
+      expect(rows['甘藍'].length).toBeGreaterThan(0);
+      expect(back.moa.requests.filter((r) => r.root === '番茄')).toHaveLength(2); // retried once first
+    });
+
+    it('reports a split that MOA stopped answering part-way', () => {
+      const oneADay = (root: string, roc: string) => {
+        if (root !== '甘藍') return [];
+        return roc === '115.09.04' && back.moa.requests.length > 1 ? null : [trendRow(roc, '甘藍-初秋', 20, 60000)];
+      };
+      const back = backfill(oneADay, { cap: 3 });
+      const { unanswered } = back.api.fetchCompleteRows(['甘藍'], '115.09.01', '115.09.04');
+      expect(unanswered).toEqual(['甘藍']);
     });
 
     it('costs nothing extra when nothing is cut', () => {

@@ -257,8 +257,12 @@ function parseSheetWrite(value) {
 //
 // A backfilled day is built by the SAME code as a crawled one — the board
 // item definitions, `aggregateGroup`, the plausibility guard's item rules and
-// `historyRowsFor` — so the two cannot drift into different archives. Three
-// rules keep it from disturbing the live path:
+// `historyRowsFor` — so the two cannot drift into different archives. And
+// since a day is written once and skipped by date ever after, a window is
+// written whole or not at all: a root MOA did not answer fails the window
+// (`fetchCompleteRows`), and the next link tries it again.
+//
+// Three rules keep it from disturbing the live path:
 //
 //   - **It stops the day before the board's trading date**, fixed when the job
 //     starts. The live archive only ever writes that date or a later one (the
@@ -281,49 +285,74 @@ function parseSheetWrite(value) {
  *
  *   - no `months`  → status: the job, and what the Sheet holds. Nothing is
  *                    crawled or queued, so asking is free.
- *   - `months=N`   → starts a job reaching N months back (1–24, default 12);
- *                    resumes one that failed or stalled, keeping its reach;
- *                    reports one that is running.
+ *   - `months=N`   → starts a job reaching N months back (1–24, default 12),
+ *                    skipping what the previous job covered; resumes one that
+ *                    failed or stalled, keeping its reach; reports one that is
+ *                    running.
  *   - `cancel=1`   → stops a running job after the window it is on.
  */
 function handleSheetBackfill(params) {
   var props = PropertiesService.getScriptProperties();
   var sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
-  var job = readSheetBackfill(props);
-  var reply = function (queued, message) {
-    return { type: 'backfill', sheet: true, queued: queued, message: message, job: job };
-  };
-  if (!sheetId) return reply(false, '尚未設定 HISTORY_SHEET_ID');
-
-  if (params.cancel) {
-    if (!job || job.status !== 'running') return reply(false, '沒有進行中的回填');
-    job.status = 'cancelled';
-    job.updated_at = new Date().toISOString();
-    writeSheetBackfill(props, job);
-    try {
-      dropTriggers(SHEET_BACKFILL_FN);
-    } catch (err) {
-      Logger.log('handleSheetBackfill: trigger not dropped: ' + err);
-    }
-    return reply(false, '已停止回填');
-  }
-
-  if (!params.months) {
-    var status = reply(false, job ? '回填狀態' : '尚未回填');
+  if (!sheetId) return backfillReply(readSheetBackfill(props), false, '尚未設定 HISTORY_SHEET_ID');
+  if (!params.months && !params.cancel) {
+    var job = readSheetBackfill(props);
+    var status = backfillReply(job, false, job ? '回填狀態' : '尚未回填');
     status.archive = archiveSummary(sheetId);
     return status;
   }
+  // Serialised, so two requests at once cannot each decide there is no job
+  // and start one apiece. Held for property writes and a trigger, never a
+  // crawl; it is the history lock because Apps Script has one script lock.
+  var ran = false;
+  try {
+    return withHistoryLock(function () {
+      ran = true;
+      return params.cancel ? cancelSheetBackfill(props) : startSheetBackfill(props, params.months);
+    });
+  } catch (err) {
+    if (ran) throw err;
+    Logger.log('handleSheetBackfill: lock busy: ' + err);
+    return backfillReply(readSheetBackfill(props), false, '系統忙碌中，請稍後再試');
+  }
+}
 
-  if (job && job.status === 'running' && !backfillStalled(job)) return reply(false, '回填進行中');
+function backfillReply(job, queued, message) {
+  return { type: 'backfill', sheet: true, queued: queued, message: message, job: job };
+}
+
+function cancelSheetBackfill(props) {
+  var job = readSheetBackfill(props);
+  if (!job || job.status !== 'running') return backfillReply(job, false, '沒有進行中的回填');
+  props.setProperty(SHEET_BACKFILL_CANCEL_PROP, job.id);
+  job.status = 'cancelled';
+  job.updated_at = new Date().toISOString();
+  writeSheetBackfill(props, job);
+  try {
+    dropTriggers(SHEET_BACKFILL_FN);
+  } catch (err) {
+    Logger.log('cancelSheetBackfill: trigger not dropped: ' + err);
+  }
+  return backfillReply(job, false, '已停止回填');
+}
+
+function startSheetBackfill(props, months) {
+  var job = readSheetBackfill(props);
+  if (job && job.status === 'running' && !backfillStalled(job)) return backfillReply(job, false, '回填進行中');
 
   var resuming = !!job && (job.status === 'running' || job.status === 'failed');
-  if (!resuming) {
+  if (resuming) {
+    // An operator retrying a chain that gave up starts its count again. A
+    // chain that merely stalled keeps it: the link that stalled it may have
+    // been killed by the 6-minute limit, and a window that always is has to
+    // reach `failed` rather than be resumed for ever.
+    if (job.status === 'failed') job.failures = 0;
+  } else {
     var board = parseStoredBoard(readDurableBoard());
-    if (!board || !board.roc_date) return reply(false, '尚無看板，無法決定回填終點');
-    job = newSheetBackfill(board.roc_date, params.months);
+    if (!board || !board.roc_date) return backfillReply(job, false, '尚無看板，無法決定回填終點');
+    job = newSheetBackfill(board.roc_date, months, job);
   }
   job.status = 'running';
-  job.failures = 0;
   job.updated_at = new Date().toISOString();
   // Written before the trigger exists, so the first link cannot read the job
   // this replaces.
@@ -332,31 +361,35 @@ function handleSheetBackfill(params) {
     dropTriggers(SHEET_BACKFILL_FN);
     ScriptApp.newTrigger(SHEET_BACKFILL_FN).timeBased().after(1000).create();
   } catch (err) {
-    Logger.log('handleSheetBackfill: not queued: ' + err);
+    Logger.log('startSheetBackfill: not queued: ' + err);
     job.status = 'failed';
     job.last_error = 'not queued: ' + String(err && err.message || err);
     writeSheetBackfill(props, job);
-    return reply(false, job.last_error);
+    return backfillReply(job, false, job.last_error);
   }
-  return reply(true, resuming ? '已從 ' + job.cursor + ' 繼續回填' : '已排入背景回填');
+  return backfillReply(job, true, resuming ? '已從 ' + job.cursor + ' 繼續回填' : '已排入背景回填');
 }
 
-/** A fresh job reaching `months` back from the day before `boardRoc`. */
-function newSheetBackfill(boardRoc, months) {
+/**
+ * A fresh job reaching `months` back from the day before `boardRoc`. What the
+ * `previous` job finished is skipped rather than crawled again: every day in
+ * it is already written, and re-crawling a year to learn that would spend
+ * most of a day's trigger runtime on nothing.
+ */
+function newSheetBackfill(boardRoc, months, previous) {
   var n = parseInt(months, 10);
   if (!(n >= 1)) n = SHEET_BACKFILL_DEFAULT_MONTHS;
   if (n > SHEET_BACKFILL_MAX_MONTHS) n = SHEET_BACKFILL_MAX_MONTHS;
-  var reach = rocToDate(boardRoc);
-  reach.setMonth(reach.getMonth() - n);
   var last = rocToISO(shiftROC(boardRoc, -1));
   var now = new Date().toISOString();
   return {
     id: now, // tells a link its job from one that replaced it while it ran
     status: 'running',
     months: n,
-    from: rocToISO(dateToROC(reach)),
+    from: rocToISO(monthsBefore(boardRoc, n)),
     to: last,
     cursor: last, // the newest day not yet done; the next window ends here
+    skip: coveredBy(previous),
     started_at: now,
     updated_at: now,
     windows: 0,
@@ -366,6 +399,29 @@ function newSheetBackfill(boardRoc, months) {
     failures: 0,
     last_error: null
   };
+}
+
+/**
+ * The same day `n` months earlier, or that month's last day when it is
+ * shorter: 03-31 less one month is 02-28, where `setMonth` alone would roll
+ * on to 03-03 and quietly shorten the reach.
+ */
+function monthsBefore(roc, n) {
+  var d = rocToDate(roc);
+  var day = d.getDate();
+  d.setDate(1);
+  d.setMonth(d.getMonth() - n);
+  var monthEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  d.setDate(Math.min(day, monthEnd));
+  return dateToROC(d);
+}
+
+/** The range a finished or cancelled job wrote in full, or null. */
+function coveredBy(job) {
+  if (!job || (job.status !== 'done' && job.status !== 'cancelled')) return null;
+  var cursorNext = rocToISO(shiftROC(isoToROC(job.cursor), 1));
+  var from = cursorNext > job.from ? cursorNext : job.from;
+  return from <= job.to ? { from: from, to: job.to } : null;
 }
 
 /**
@@ -385,18 +441,28 @@ function sheetBackfillStep() {
     Logger.log('sheetBackfillStep: properties unavailable: ' + err);
     return null;
   }
-  if (!job || job.status !== 'running') {
-    finishBackfillStep(props, null);
+  if (!job || job.status !== 'running' || cancelRequested(props, job)) {
+    finishBackfillStep(props, job);
+    return job;
+  }
+  if ((job.failures || 0) >= SHEET_BACKFILL_MAX_FAILURES) {
+    // The previous links were counted and never reported back: killed by the
+    // execution limit, most likely, which no `catch` survives.
+    job.status = 'failed';
+    job.last_error = job.last_error || 'the last ' + job.failures + ' links did not finish';
+    finishBackfillStep(props, job);
     return job;
   }
   try {
-    // A heartbeat: a link in flight must not look like a stalled chain to a
-    // `months=` request, which would queue a second one beside it.
+    // Counted BEFORE the work, and cleared by a window that succeeds: a link
+    // the 6-minute limit kills never reaches its `catch` or its `finally`.
+    job.failures = (job.failures || 0) + 1;
+    // Also the heartbeat: a link in flight must not look like a stalled chain
+    // to a `months=` request, which would queue a second one beside it.
     job.updated_at = new Date().toISOString();
     writeSheetBackfill(props, job);
     backfillWindow(job, props.getProperty(HISTORY_SHEET_ID_PROP));
   } catch (err) {
-    job.failures = (job.failures || 0) + 1;
     job.last_error = String(err && err.message || err).substring(0, 200);
     Logger.log('sheetBackfillStep failed (' + job.failures + '): ' + err);
     if (job.failures >= SHEET_BACKFILL_MAX_FAILURES) job.status = 'failed';
@@ -409,7 +475,7 @@ function sheetBackfillStep() {
 /**
  * Records the link and queues the next — unless the job was cancelled or
  * replaced while this link ran, in which case what is stored now is someone
- * else's decision and this link's result is dropped with it.
+ * else's decision and this link's progress is dropped with it.
  */
 function finishBackfillStep(props, job) {
   var stored = null;
@@ -418,11 +484,16 @@ function finishBackfillStep(props, job) {
   } catch (err) {
     Logger.log('finishBackfillStep: job unreadable: ' + err);
   }
-  var mine = !!job && !!stored && stored.id === job.id && stored.status === 'running';
+  var ours = !!job && !!stored && stored.id === job.id;
+  if (ours && job.status === 'running' && cancelRequested(props, job)) {
+    // Keep the cancel, drop the progress: the operator was told it stopped.
+    job = stored;
+    job.status = 'cancelled';
+  }
   // Another job's link is queued: its trigger has this handler's name, so
   // dropping ours would drop that one too.
-  var other = !!stored && (!job || stored.id !== job.id) && stored.status === 'running';
-  if (mine) {
+  var other = !!stored && !ours && stored.status === 'running' && !cancelRequested(props, stored);
+  if (ours) {
     job.updated_at = new Date().toISOString();
     try {
       writeSheetBackfill(props, job);
@@ -437,7 +508,7 @@ function finishBackfillStep(props, job) {
       Logger.log('finishBackfillStep: trigger not dropped: ' + err);
     }
   }
-  if (mine && job.status === 'running') {
+  if (ours && job.status === 'running') {
     try {
       ScriptApp.newTrigger(SHEET_BACKFILL_FN).timeBased().after(1000).create();
     } catch (err) {
@@ -448,33 +519,58 @@ function finishBackfillStep(props, job) {
   }
 }
 
+function cancelRequested(props, job) {
+  try {
+    return !!job && props.getProperty(SHEET_BACKFILL_CANCEL_PROP) === job.id;
+  } catch (err) {
+    return false;
+  }
+}
+
 /**
  * Crawls and writes the window ending at `job.cursor`, then moves the cursor
- * past it. Throws on anything that should be retried: a failed crawl, an
- * unset or unreachable Sheet.
+ * past it. Throws on anything that should be retried: a crawl MOA did not
+ * fully answer, an unset or unreachable Sheet.
  */
 function backfillWindow(job, sheetId) {
   if (!sheetId) throw new Error('HISTORY_SHEET_ID is not set');
   var from = isoToROC(job.from);
   var end = isoToROC(job.cursor);
+  var skip = job.skip ? { from: isoToROC(job.skip.from), to: isoToROC(job.skip.to) } : null;
+
+  if (skip && end >= skip.from && end <= skip.to) {
+    // Written by the job before this one: step over it without a crawl.
+    moveBackfillCursor(job, shiftROC(skip.from, -1));
+    job.failures = 0;
+    return;
+  }
   var start = shiftROC(end, -(BACKFILL_WINDOW_DAYS - SHEET_BACKFILL_CONTEXT_DAYS - 1));
   if (start < from) start = from;
+  if (skip && end > skip.to && start <= skip.to) start = shiftROC(skip.to, 1);
 
-  var rows = fetchCompleteRows(boardRoots(), shiftROC(start, -SHEET_BACKFILL_CONTEXT_DAYS), end);
-  var days = backfillDays(rows, start, end);
+  var fetched = fetchCompleteRows(boardRoots(), shiftROC(start, -SHEET_BACKFILL_CONTEXT_DAYS), end);
+  if (fetched.unanswered.length) {
+    throw new Error('MOA did not answer ' + fetched.unanswered.length + ' roots (' +
+      fetched.unanswered.slice(0, 3).join('、') + (fetched.unanswered.length > 3 ? '…' : '') + ')');
+  }
+  var built = backfillDays(fetched.rows, start, end);
   // MOA answers a closed market with `休市` rows, so a probe root with no rows
   // at all is a crawl that failed, not a window without trading.
-  if (days === null) throw new Error('no ' + PROBE_ROOT + ' rows for ' + start + '–' + end);
+  if (built === null) throw new Error('no ' + PROBE_ROOT + ' rows for ' + start + '–' + end);
 
-  var written = writeArchivedDays(sheetId, days);
+  var written = writeArchivedDays(sheetId, built.days);
   job.windows += 1;
   job.days_written += written.days;
   job.days_skipped += written.skipped;
   job.rows_written += written.rows;
   job.failures = 0;
   job.last_error = null;
-  job.cursor = rocToISO(shiftROC(start, -1));
-  if (start <= from) job.status = 'done';
+  moveBackfillCursor(job, built.deferred || shiftROC(start, -1));
+}
+
+function moveBackfillCursor(job, roc) {
+  job.cursor = rocToISO(roc);
+  if (roc < isoToROC(job.from)) job.status = 'done';
 }
 
 /**
@@ -482,9 +578,16 @@ function backfillWindow(job, sheetId) {
  * range crawl exactly as the live path builds a day: `aggregateGroup` against
  * the previous trading day, the guard's item rules, then `historyRowsFor`.
  * Rows dated before `rocStart` are only ever that previous day. Pure.
- * @returns {Array<{date: string, rows: Array}>|null} null when the probe root
- *   answered nothing at all — a failed crawl, which must not pass for a week
- *   of closed markets.
+ *
+ * The oldest day in the window has no previous trading day in hand when a
+ * closure longer than the context days sits right before it. It is not
+ * written unjudged: it is returned as `deferred`, and the caller ends the next
+ * window on it, where the window's own days lie behind it. The newest day is
+ * never deferred — the next window would end on it again — and is judged
+ * against nothing, as the live path does after a closure past its lookback.
+ * @returns {{days: Array<{date: string, rows: Array}>, deferred: ?string}|null}
+ *   null when the probe root answered nothing at all — a failed crawl, which
+ *   must not pass for a week of closed markets.
  */
 function backfillDays(rowsByRoot, rocStart, rocEnd) {
   var probeRows = rowsByRoot[PROBE_ROOT];
@@ -492,14 +595,19 @@ function backfillDays(rowsByRoot, rocStart, rocEnd) {
   var trading = tradingDates(probeRows);
   var byItem = [];
   for (var i = 0; i < BOARD_ITEMS.length; i++) {
-    byItem.push(byTransDate(selectRows(rowsByRoot[BOARD_ITEMS[i].official], BOARD_ITEMS[i])));
+    byItem.push(groupByTransDate(selectRows(rowsByRoot[BOARD_ITEMS[i].official], BOARD_ITEMS[i])));
   }
 
   var days = [];
+  var deferred = null;
   for (var t = 0; t < trading.length; t++) {
     var day = trading[t];
     if (day < rocStart || day > rocEnd) continue;
     var prev = t > 0 ? trading[t - 1] : null;
+    if (!prev && day !== rocEnd) {
+      deferred = day;
+      continue;
+    }
     var items = [];
     for (var j = 0; j < BOARD_ITEMS.length; j++) {
       var todayRows = byItem[j][day];
@@ -514,31 +622,7 @@ function backfillDays(rowsByRoot, rocStart, rocEnd) {
     var rows = historyRowsFor(board);
     if (rows.length) days.push({ date: board.date, rows: rows });
   }
-  return days;
-}
-
-/**
- * The dates the probe root really traded on, oldest first — the same test as
- * `isTradingDate`, applied to rows already in hand.
- */
-function tradingDates(probeRows) {
-  var volume = {};
-  var traded = tradedRows(probeRows);
-  for (var i = 0; i < traded.length; i++) {
-    var day = traded[i].TransDate;
-    if (!day) continue;
-    volume[day] = (volume[day] || 0) + parseFloat(traded[i].Trans_Quantity || 0);
-  }
-  return Object.keys(volume).filter(function (d) { return volume[d] >= PROBE_MIN_VOLUME; }).sort();
-}
-
-function byTransDate(rows) {
-  var out = {};
-  for (var i = 0; i < rows.length; i++) {
-    var day = rows[i].TransDate;
-    if (day) (out[day] = out[day] || []).push(rows[i]);
-  }
-  return out;
+  return { days: days, deferred: deferred };
 }
 
 /**
