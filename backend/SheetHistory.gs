@@ -241,7 +241,8 @@ function readDay(sheet, date, zone) {
  * The runs of consecutive rows whose date lies in [from, to], 1-based, found
  * by reading column A alone: a backfilled year is ~50k rows, and all eight
  * columns of it would be 400k cells read to use a few hundred. The one way
- * this archive locates a day, for the correction path and the year-ago read.
+ * this archive locates a day, for the correction path and the readers. Each
+ * run carries the dates found in it, as `days`.
  */
 function findRuns(sheet, from, to, zone) {
   var lastRow = sheet.getLastRow();
@@ -260,8 +261,10 @@ function findRuns(sheet, from, to, zone) {
     if (run && run.last === row - 1) {
       run.last = row;
     } else {
-      runs.push({ first: row, last: row });
+      run = { first: row, last: row, days: {} };
+      runs.push(run);
     }
+    run.days[day] = true;
   }
   return runs;
 }
@@ -1469,7 +1472,6 @@ function refreshYearAgo(boardRoc, startedAt) {
         date: boardRoc, sheet: sheetId, at: new Date().toISOString(),
         items: found.items, scattered: found.scattered || undefined
       }));
-      props.deleteProperty(YOY_SKIPPED_PROP); // read after all: nothing left undone
     } catch (err) {
       // Read again by the next refresh — and said in `diag`, or a full
       // property store would have every refresh read with nothing showing why.
@@ -1479,7 +1481,9 @@ function refreshYearAgo(boardRoc, startedAt) {
       } catch (err2) {
         Logger.log('refreshYearAgo: not noted: ' + err2);
       }
+      return found.items;
     }
+    clearUnread(props, YOY_SKIPPED_PROP); // read after all: nothing left undone
     return found.items;
   } catch (err) {
     // Not kept: the next refresh asks again, rather than the day going
@@ -1641,25 +1645,50 @@ function scanSpan(spreadsheet, span, liveYear, onRow) {
 }
 
 /**
+ * Whether the tab has been sorted by another column. Every writer keeps a
+ * day's rows together, so in date order — however the days themselves were
+ * written, backfill windows and live days in between — a date is in one run;
+ * two are let through (a day appended again by hand: the readers take the row
+ * written last). Sorted by item, a date is in a run per item. The number of
+ * runs alone cannot tell the two apart: a long span in order may have one a
+ * day, and a sort by item gives one an item.
+ */
+function scatteredRuns(runs) {
+  var runsOf = {};
+  for (var r = 0; r < runs.length; r++) {
+    for (var day in runs[r].days) {
+      runsOf[day] = (runsOf[day] || 0) + 1;
+      if (runsOf[day] > 2) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Runs close together read in one call — the dates are checked row by row
+ * anyway: each with the one before when fewer than `YOY_MERGE_SLACK_ROWS`
+ * rows lie between, so a span split by a few live days is one or two round
+ * trips under the lock, not one a day.
+ */
+function mergeRuns(runs) {
+  if (runs.length < 2) return runs;
+  var out = [{ first: runs[0].first, last: runs[0].last }];
+  for (var r = 1; r < runs.length; r++) {
+    var prev = out[out.length - 1];
+    if (runs[r].first - prev.last - 1 <= YOY_MERGE_SLACK_ROWS) prev.last = runs[r].last;
+    else out.push({ first: runs[r].first, last: runs[r].last });
+  }
+  return out;
+}
+
+/**
  * One year tab's rows in the span, handed to `onRow`.
  * @returns {boolean} true when the tab is out of date order and was not read.
  */
 function scanTab(sheet, span, zone, onRow) {
   var runs = findRuns(sheet, span.from, span.to, zone);
-  // A tab sorted by another column scatters the span into a run per item and
-  // day — hundreds. A long span in order may have more runs than a week (live
-  // days after a backfill's older windows, holes filled later): one a day
-  // is still far short of scattered.
-  var days = (Date.parse(span.to) - Date.parse(span.from)) / 86400000 + 1;
-  if (runs.length > Math.max(YOY_MAX_RUNS, days)) return true;
-  // Runs close together are read in one call — the dates are checked row by
-  // row anyway — so a week split by a few live days is one round trip.
-  if (runs.length > 1) {
-    var wanted = 0;
-    for (var q = 0; q < runs.length; q++) wanted += runs[q].last - runs[q].first + 1;
-    var spanRows = runs[runs.length - 1].last - runs[0].first + 1;
-    if (spanRows <= wanted * 2 + YOY_MERGE_SLACK_ROWS) runs = [{ first: runs[0].first, last: runs[runs.length - 1].last }];
-  }
+  if (scatteredRuns(runs)) return true;
+  runs = mergeRuns(runs);
   for (var r = 0; r < runs.length; r++) {
     var values = sheet.getRange(runs[r].first, 1, runs[r].last - runs[r].first + 1, SHEET_HEADER.length).getValues();
     for (var v = 0; v < values.length; v++) {
@@ -1853,7 +1882,7 @@ function refreshVarietyBaselines(boardRoc, startedAt) {
       noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'not kept');
       return found.items;
     }
-    props.deleteProperty(VARIETY_BASE_SKIPPED_PROP);
+    clearUnread(props, VARIETY_BASE_SKIPPED_PROP);
     return found.items;
   } catch (err) {
     // The lock busy past its short wait, the Sheet unreachable: not kept, and
@@ -1875,6 +1904,19 @@ function refreshVarietyBaselines(boardRoc, startedAt) {
 function noteUnread(props, key, sheetId, why) {
   if (!sheetId) return;
   props.setProperty(key, JSON.stringify({ at: new Date().toISOString(), sheet: sheetId, why: why }));
+}
+
+/**
+ * …and clears it once a read is kept. Never throws: the read and its keep
+ * have happened, and a failure here must not be noted as theirs — the stale
+ * note is older than what is kept, and `diag` shows neither.
+ */
+function clearUnread(props, key) {
+  try {
+    props.deleteProperty(key);
+  } catch (err) {
+    Logger.log('clearUnread (' + key + '): ' + err);
+  }
 }
 
 /**

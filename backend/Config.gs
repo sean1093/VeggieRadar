@@ -271,10 +271,6 @@ var YOY_SOON_MS = 6 * 60 * 60 * 1000; // …while a backfill may add to the wind
 // Kept medians older than this many days are not applied at all: the window
 // they describe has moved too far from the board's date.
 var YOY_KEPT_MAX_DAYS = 7;
-// Runs of the window's rows past which the tab is taken as sorted by another
-// column: the backfill writes a week in at most a few runs. A longer span may
-// have one a day (`scanTab`).
-var YOY_MAX_RUNS = 20;
 // Rows of other days that may sit between runs read in one call.
 var YOY_MERGE_SLACK_ROWS = 400;
 // The year-ago read is the refresh's last step; past this far into the run it

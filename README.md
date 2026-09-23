@@ -592,9 +592,10 @@ then each window newest-first. Nothing reads the tab in order (the readers
 group by date), so sorting column A in the Sheets UI is safe at any time: the
 header row is frozen (the backfill freezes tabs the live archive made before
 it did), so it stays on row 1, and a sort by date keeps each
-day's rows together, which is all the correction path relies on. (Sort by any
-other column and a later correction reports the day `scattered` and leaves
-it alone.)
+day's rows together, which is all the correction path and the readers rely
+on. (Sort by any other column and a later correction reports the day
+`scattered` and leaves it alone; a reader finds a date in more than two runs
+and reports the tab `scattered` rather than reading it.)
 
 
 ### Static board mirror

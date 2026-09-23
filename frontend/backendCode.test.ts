@@ -3981,6 +3981,17 @@ describe('same weeks last year (#22 §2)', () => {
     expect(back.api.handleDiag().sheet_history.year_ago).toMatchObject({ skipped: 'not kept' });
   });
 
+  it('never notes a kept read as not kept when clearing the old note fails', () => {
+    const roc = rocDate(0);
+    const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)), plausibleRowsWith({}));
+    back.api.storeBoard({ type: 'board', date: 'x', roc_date: roc, generated_at: new Date().toISOString(), count: 0, items: [] });
+    back.api.refreshYearAgo(roc, Date.now() - 5 * 60_000);
+    back.breakDelete('veggie_yoy_skipped_at');
+    expect(back.api.refreshYearAgo(roc)).toEqual({ 高麗菜: 25 });
+    expect(back.api.keptYearAgo(roc)).toEqual({ 高麗菜: 25 });
+    expect(back.api.handleDiag().sheet_history.year_ago).not.toHaveProperty('skipped');
+  });
+
   it('keeps saying why the last read was not kept while a backfill walks the window', () => {
     const roc = rocDate(0);
     const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)), plausibleRowsWith({}));
@@ -4435,7 +4446,7 @@ describe('per-variety baselines (#22 §3)', () => {
       ...Array.from({ length: 12 }, (_, i) => blendRow(dayOf(ROC, -1 - i), '高麗菜', 25)), // the blend is no variety
       varietyRow(dayOf(ROC, -50), '高麗菜', '初秋', 500), // past the horizon
       ...days(ROC, '已下架', '某品種', 10, 12), // not a board item
-    ]);
+    ].sort((x, y) => String(y[0]).localeCompare(String(x[0])))); // a day's rows together, as every writer keeps them
     expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20, 改良種: 54.5 } });
   });
 
@@ -4561,13 +4572,41 @@ describe('per-variety baselines (#22 §3)', () => {
 
   it('reads a long span in order however many runs its days fall into, and not a sorted one', () => {
     // Thirty days, each followed by a row of another day: thirty runs, more
-    // than a week's limit, and a tab in date order all the same.
-    const inOrder = archived(days(ROC, '高麗菜', '初秋', 20, 30).flatMap((r) => [r, varietyRow('2026-01-02', '高麗菜', '初秋', 99)]));
+    // than a week's worth, and a tab in date order all the same.
+    const inOrder = archived([
+      ...days(ROC, '高麗菜', '初秋', 20, 30).flatMap((r) => [r, varietyRow('2026-01-02', '高麗菜', '初秋', 99)]),
+      varietyRow(dayOf(ROC, -3), '高麗菜', '初秋', 20), // a day appended again by hand: two runs, let through
+    ]);
     expect(inOrder.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20 } });
-    // Sorted by item: every row its own run, far past one a day.
-    const sorted = archived(['高麗菜', '番茄'].flatMap((item) =>
-      days(ROC, item, '某種', 20, 30).flatMap((r) => [r, varietyRow('2026-01-02', item, '某種', 99)])));
+    // Sorted by item, as Sheets sorts: each item's rows together, in their
+    // old order — its older days, then the span's. Three runs only, and
+    // every date in all three.
+    const sorted = archived(['高麗菜', '番茄', '洋蔥'].flatMap((item) => [
+      ...Array.from({ length: 5 }, () => varietyRow('2026-01-02', item, '某種', 99)),
+      ...days(ROC, item, '某種', 20, 12).reverse(),
+    ]));
     expect(sorted.api.refreshVarietyBaselines(ROC)).toEqual({});
+    expect(sorted.sheetReads).toHaveLength(1); // column A only
+  });
+
+  it('reads runs far apart one by one, and neighbours together', () => {
+    // A thousand rows of other days between each day: no single read, and
+    // each day its own — but a day right after another is read with it.
+    const filler = (n: number) => Array.from({ length: n }, () => varietyRow('2026-01-02', '番茄', '牛番茄', 99));
+    const rows = days(ROC, '高麗菜', '初秋', 20, 12).flatMap((r, i) =>
+      i % 2 === 0 ? [r, ...filler(10)] : [r, ...filler(1000)]); // pairs of days ten rows apart, a thousand between pairs
+    const back = archived(rows);
+    expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20 } });
+    expect(back.sheetReads).toHaveLength(1 + 6); // column A, then each pair
+  });
+
+  it('never notes a kept read as failed when clearing the old note fails', () => {
+    const back = archived(days(ROC, '高麗菜', '初秋', 20, 12));
+    back.api.storeBoard({ type: 'board', date: 'x', roc_date: ROC, generated_at: new Date().toISOString(), count: 0, items: [] });
+    back.api.refreshVarietyBaselines(ROC, Date.now() - 5 * 60_000);
+    back.breakDelete('veggie_variety_base_skipped_at');
+    expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20 } });
+    expect(back.api.handleDiag().sheet_history.variety_baseline).not.toHaveProperty('skipped');
   });
 
   it('counts a write whose cleanup of old chunks failed as kept', () => {
