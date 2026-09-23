@@ -273,6 +273,11 @@ var YOY_SOON_MS = 6 * 60 * 60 * 1000; // …while a backfill may add to the wind
 var YOY_KEPT_MAX_DAYS = 7;
 // Rows of other days that may sit between runs read in one call.
 var YOY_MERGE_SLACK_ROWS = 400;
+// Reads of a tab, after runs close together are merged, past which a reader
+// takes it as sorted by another column (`scattered`) and does not read it:
+// in date order a span is a few blocks — the live days, a backfill's windows,
+// holes filled later — and sorted by item, a block an item.
+var ARCHIVE_MAX_READS = 20;
 // The year-ago read is the refresh's last step; past this far into the run it
 // is left to the next refresh, well inside the 6-minute execution limit.
 var YOY_START_BY_MS = 4 * 60 * 1000;

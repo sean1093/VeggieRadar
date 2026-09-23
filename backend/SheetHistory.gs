@@ -241,8 +241,7 @@ function readDay(sheet, date, zone) {
  * The runs of consecutive rows whose date lies in [from, to], 1-based, found
  * by reading column A alone: a backfilled year is ~50k rows, and all eight
  * columns of it would be 400k cells read to use a few hundred. The one way
- * this archive locates a day, for the correction path and the readers. Each
- * run carries the dates found in it, as `days`.
+ * this archive locates a day, for the correction path and the readers.
  */
 function findRuns(sheet, from, to, zone) {
   var lastRow = sheet.getLastRow();
@@ -261,10 +260,8 @@ function findRuns(sheet, from, to, zone) {
     if (run && run.last === row - 1) {
       run.last = row;
     } else {
-      run = { first: row, last: row, days: {} };
-      runs.push(run);
+      runs.push({ first: row, last: row });
     }
-    run.days[day] = true;
   }
   return runs;
 }
@@ -1480,6 +1477,7 @@ function refreshYearAgo(boardRoc, startedAt) {
         noteUnread(props, YOY_SKIPPED_PROP, sheetId, 'not kept');
       } catch (err2) {
         Logger.log('refreshYearAgo: not noted: ' + err2);
+        clearUnread(props, YOY_SKIPPED_PROP); // an older note must not stand for this read
       }
       return found.items;
     }
@@ -1645,27 +1643,6 @@ function scanSpan(spreadsheet, span, liveYear, onRow) {
 }
 
 /**
- * Whether the tab has been sorted by another column. Every writer keeps a
- * day's rows together, so in date order — however the days themselves were
- * written, backfill windows and live days in between — a date is in one run,
- * bar a day an edit by hand has split (appended again, a date mistyped inside
- * its block). Sorted by item, nearly every date is in a run per item. So: most
- * dates split. A few odd days are read around — the readers take the row
- * written last — where the correction path, which deletes a day's block,
- * refuses such a day (`readDay`). The number of runs alone cannot tell a sort
- * from a long span in order, which may have one a day.
- */
-function scatteredRuns(runs) {
-  var runsOf = {};
-  for (var r = 0; r < runs.length; r++) {
-    for (var day in runs[r].days) runsOf[day] = (runsOf[day] || 0) + 1;
-  }
-  var dates = Object.keys(runsOf);
-  var split = dates.filter(function (d) { return runsOf[d] > 1; }).length;
-  return split * 2 > dates.length;
-}
-
-/**
  * Runs close together read in one call — the dates are checked row by row
  * anyway: each with the one before when at most `YOY_MERGE_SLACK_ROWS` rows
  * lie between, so a span split by a few live days is one or two round trips
@@ -1689,9 +1666,12 @@ function mergeRuns(runs) {
  * @returns {boolean} true when the tab is out of date order and was not read.
  */
 function scanTab(sheet, span, zone, onRow) {
-  var runs = findRuns(sheet, span.from, span.to, zone);
-  if (scatteredRuns(runs)) return true;
-  runs = mergeRuns(runs);
+  // Order is not what matters here — every row's date is checked on the second
+  // read, and the row written last per date wins — but what reading costs,
+  // under the lock: a tab sorted by another column spreads the span over a
+  // block per item, too far apart to read together.
+  var runs = mergeRuns(findRuns(sheet, span.from, span.to, zone));
+  if (runs.length > ARCHIVE_MAX_READS) return true;
   for (var r = 0; r < runs.length; r++) {
     var values = sheet.getRange(runs[r].first, 1, runs[r].last - runs[r].first + 1, SHEET_HEADER.length).getValues();
     for (var v = 0; v < values.length; v++) {
@@ -1885,7 +1865,9 @@ function refreshVarietyBaselines(boardRoc, startedAt) {
       try {
         noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'not kept');
       } catch (err2) {
-        Logger.log('refreshVarietyBaselines: not noted: ' + err2); // not a failed read
+        // Not a failed read — and an older note must not stand for this one.
+        Logger.log('refreshVarietyBaselines: not noted: ' + err2);
+        clearUnread(props, VARIETY_BASE_SKIPPED_PROP);
       }
       return found.items;
     }

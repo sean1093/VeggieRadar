@@ -3992,6 +3992,20 @@ describe('same weeks last year (#22 §2)', () => {
     expect(back.api.handleDiag().sheet_history.year_ago).not.toHaveProperty('skipped');
   });
 
+  it('does not leave an older note standing for a read it could neither keep nor note', () => {
+    const roc = rocDate(0);
+    const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)), plausibleRowsWith({}));
+    back.api.refreshYearAgo(roc, Date.now() - 5 * 60_000); // 'late'
+    back.breakProp(back.api.YOY_PROP);
+    const original = back.props.set.bind(back.props);
+    back.props.set = (k: string, v: string) => {
+      if (k === 'veggie_yoy_skipped_at') throw new Error('full');
+      return original(k, v);
+    };
+    expect(back.api.refreshYearAgo(roc)).toEqual({ 高麗菜: 25 });
+    expect(back.props.has('veggie_yoy_skipped_at')).toBe(false);
+  });
+
   it('keeps saying why the last read was not kept while a backfill walks the window', () => {
     const roc = rocDate(0);
     const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)), plausibleRowsWith({}));
@@ -4095,10 +4109,12 @@ describe('same weeks last year (#22 §2)', () => {
     // Sorted by item, the week scatters into hundreds of runs; reading
     // around that is a read of the whole tab late in a refresh.
     const roc = '115.09.21';
+    // Each item's block holds its other days too: too far apart to read together.
     const rows: unknown[][] = [];
+    const older = Array.from({ length: 401 }, () => blend('2025-03-01', '番茄', 1));
     for (let i = 0; i < 40; i++) {
       rows.push(blend(yearAgo(roc, (i % 5) - 2), `品項${i}`, 20));
-      rows.push(blend('2025-03-01', '番茄', 1));
+      rows.push(...older);
     }
     const back = archived(rows);
     expect(back.api.refreshYearAgo(roc)).toEqual({});
@@ -4206,10 +4222,12 @@ describe('same weeks last year (#22 §2)', () => {
   it('looks at a tab out of date order again within hours, not a day', () => {
     // Its fix is a re-sort by hand, which nothing else here would notice.
     const roc = '115.09.21';
+    // Each item's block holds its other days too: too far apart to read together.
     const rows: unknown[][] = [];
+    const older = Array.from({ length: 401 }, () => blend('2025-03-01', '番茄', 1));
     for (let i = 0; i < 40; i++) {
       rows.push(blend(yearAgo(roc, (i % 5) - 2), `品項${i}`, 20));
-      rows.push(blend('2025-03-01', '番茄', 1));
+      rows.push(...older);
     }
     const back = archived(rows);
     back.api.refreshYearAgo(roc);
@@ -4581,14 +4599,21 @@ describe('per-variety baselines (#22 §3)', () => {
     ]);
     expect(inOrder.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20 } });
     // Sorted by item, as Sheets sorts: each item's rows together, in their
-    // old order — its older days, then the span's. Three runs only, and
-    // every date in all three.
-    const sorted = archived(['高麗菜', '番茄', '洋蔥'].flatMap((item) => [
-      ...Array.from({ length: 5 }, () => varietyRow('2026-01-02', item, '某種', 99)),
+    // old order — its older days, then the span's. A block an item, and each
+    // item's older days between: a read an item, past the limit.
+    const items = ['高麗菜', ...Array.from({ length: 20 }, (_, i) => `品項${i}`)];
+    const sortedBy = (older: number) => archived(items.flatMap((item) => [
+      ...Array.from({ length: older }, () => varietyRow('2026-01-02', item, '某種', 99)),
       ...days(ROC, item, '某種', 20, 12).reverse(),
     ]));
+    const sorted = sortedBy(401);
     expect(sorted.api.refreshVarietyBaselines(ROC)).toEqual({});
     expect(sorted.sheetReads).toHaveLength(1); // column A only
+    // Early in the year, when the tab is mostly the span, the same sort is
+    // read in one call — every row's date is checked, so order never mattered.
+    const compact = sortedBy(5);
+    expect(compact.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 某種: 20 } });
+    expect(compact.sheetReads).toHaveLength(2);
   });
 
   it('reads runs far apart one by one, and neighbours together', () => {
@@ -4604,6 +4629,7 @@ describe('per-variety baselines (#22 §3)', () => {
 
   it('notes a read it could not keep as not kept, even when noting that fails', () => {
     const back = archived(days(ROC, '高麗菜', '初秋', 20, 12));
+    back.api.refreshVarietyBaselines(ROC, Date.now() - 5 * 60_000); // an older note: 'late'
     back.breakProp(back.api.VARIETY_BASE_COUNT); // the medians cannot be kept…
     const original = back.props.set.bind(back.props); // …nor the note written
     back.props.set = (k: string, v: string) => {
@@ -4611,6 +4637,7 @@ describe('per-variety baselines (#22 §3)', () => {
       return original(k, v);
     };
     expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20 } }); // not null, as a failed read is
+    expect(back.props.has('veggie_variety_base_skipped_at')).toBe(false); // 'late' does not stand for this read
   });
 
   it('never notes a kept read as failed when clearing the old note fails', () => {

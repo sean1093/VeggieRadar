@@ -594,8 +594,10 @@ header row is frozen (the backfill freezes tabs the live archive made before
 it did), so it stays on row 1, and a sort by date keeps each
 day's rows together, which is all the correction path and the readers rely
 on. (Sort by any other column and a later correction reports the day
-`scattered` and leaves it alone; a reader finds most dates split across
-runs and reports the tab `scattered` rather than reading it.)
+`scattered` and leaves it alone. A reader checks every row's date, so order
+matters to it only as cost: a span it would need more than
+`ARCHIVE_MAX_READS` (20) separate reads for — a block an item — is reported
+`scattered` rather than read.)
 
 
 ### Static board mirror
