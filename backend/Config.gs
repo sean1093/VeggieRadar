@@ -78,7 +78,7 @@ var BOARD_PROP_PREFIX = 'veggie_board_v2_chunk_';
 
 var BOARD_PROP_COUNT = 'veggie_board_v2_chunks';
 
-var PROP_CHUNK_SIZE = 8000;
+var PROP_CHUNK_SIZE = 8000; // UTF-8 bytes, under a property's 9 KB
 
 // Freshness. `date`/`roc_date` is the trading date of the prices — it legitimately
 // stays put over weekends, holidays and typhoon closures, when MOA publishes only
@@ -272,7 +272,8 @@ var YOY_SOON_MS = 6 * 60 * 60 * 1000; // …while a backfill may add to the wind
 // they describe has moved too far from the board's date.
 var YOY_KEPT_MAX_DAYS = 7;
 // Runs of the window's rows past which the tab is taken as sorted by another
-// column: the backfill writes a week in at most a few runs.
+// column: the backfill writes a week in at most a few runs. A longer span may
+// have one a day (`scanTab`).
 var YOY_MAX_RUNS = 20;
 // Rows of other days that may sit between runs read in one call.
 var YOY_MERGE_SLACK_ROWS = 400;

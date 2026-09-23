@@ -154,11 +154,10 @@ function readDurableBoard() {
 function writeChunkedProp(prefix, countKey, json) {
   try {
     var props = PropertiesService.getScriptProperties();
-    var chunks = Math.ceil(json.length / PROP_CHUNK_SIZE) || 1;
+    var pieces = propChunks(json);
+    var chunks = pieces.length;
     var write = {};
-    for (var i = 0; i < chunks; i++) {
-      write[prefix + i] = json.substring(i * PROP_CHUNK_SIZE, (i + 1) * PROP_CHUNK_SIZE);
-    }
+    for (var i = 0; i < chunks; i++) write[prefix + i] = pieces[i];
     write[countKey] = String(chunks);
     props.setProperties(write);
   } catch (err) {
@@ -178,6 +177,30 @@ function writeChunkedProp(prefix, countKey, json) {
     Logger.log('writeChunkedProp cleanup error (' + prefix + '): ' + err2);
   }
   return true;
+}
+
+/**
+ * `json` cut into pieces of at most `PROP_CHUNK_SIZE` UTF-8 bytes: a property
+ * value holds 9 KB, and a crop's or variety's name takes three bytes a
+ * character — 8000 characters of them would not fit. Never cut inside a
+ * surrogate pair, whose halves count 4 and 0.
+ */
+function propChunks(json) {
+  var out = [];
+  var start = 0;
+  var bytes = 0;
+  for (var i = 0; i < json.length; i++) {
+    var c = json.charCodeAt(i);
+    var size = c < 0x80 ? 1 : c < 0x800 ? 2 : c >= 0xD800 && c <= 0xDBFF ? 4 : c >= 0xDC00 && c <= 0xDFFF ? 0 : 3;
+    if (bytes + size > PROP_CHUNK_SIZE) {
+      out.push(json.substring(start, i));
+      start = i;
+      bytes = 0;
+    }
+    bytes += size;
+  }
+  out.push(json.substring(start));
+  return out;
 }
 
 /** Reads a chunked JSON string back, or null when absent or torn. */

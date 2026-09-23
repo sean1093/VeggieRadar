@@ -76,6 +76,11 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   let mailThrows = false;
   let brokenPropKey: string | null = null;
   let brokenDeleteKey: string | null = null;
+  // A property value holds 9 KB, counted here in UTF-8 bytes, the stricter
+  // reading: a crop's name is three bytes a character.
+  const fitsProperty = (v: string) => {
+    if (new TextEncoder().encode(String(v)).length > 9 * 1024) throw new Error('Argument too large: value');
+  };
 
   const respond = (url: string, options?: Record<string, unknown>) => {
     fetches.push(url);
@@ -189,10 +194,12 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
         },
         setProperty: (k: string, v: string) => {
           if (k === brokenPropKey) throw new Error('properties service unavailable');
+          fitsProperty(v);
           props.set(k, v);
         },
         setProperties: (o: Record<string, string>) => {
           if (brokenPropKey !== null && brokenPropKey in o) throw new Error('properties service unavailable');
+          Object.values(o).forEach(fitsProperty);
           Object.entries(o).forEach(([k, v]) => props.set(k, v));
         },
         deleteProperty: (k: string) => {
@@ -3974,19 +3981,20 @@ describe('same weeks last year (#22 §2)', () => {
     expect(back.api.handleDiag().sheet_history.year_ago).toMatchObject({ skipped: 'not kept' });
   });
 
-  it('says it waits for a backfill, not that a read was left undone, while one walks the window', () => {
+  it('keeps saying why the last read was not kept while a backfill walks the window', () => {
     const roc = rocDate(0);
     const back = archived([-2, -1, 1, 2].map((d) => blend(yearAgo(roc, d), '高麗菜', 25)), plausibleRowsWith({}));
     back.api.storeBoard({ type: 'board', date: 'x', roc_date: roc, generated_at: new Date().toISOString(), count: 0, items: [] });
-    back.api.refreshYearAgo(roc, Date.now() - 5 * 60_000);
+    back.breakProp(back.api.YOY_PROP);
+    back.api.refreshYearAgo(roc);
     back.props.set('veggie_sheet_backfill', JSON.stringify({
       id: 'j', status: 'running', updated_at: new Date().toISOString(),
       sheet: SHEET_ID, from: '2020-01-01', to: '2026-09-20', cursor: '2099-01-01',
     }));
     expect(back.api.refreshYearAgo(roc)).toEqual({});
-    const diag = back.api.handleDiag().sheet_history.year_ago;
-    expect(diag).toMatchObject({ waiting_for_backfill: true });
-    expect(diag).not.toHaveProperty('skipped');
+    // Still said: a store that would not take the result will not once the
+    // backfill has passed either.
+    expect(back.api.handleDiag().sheet_history.year_ago).toMatchObject({ waiting_for_backfill: true, skipped: 'not kept' });
   });
 
   it('does not count text in column A that sorts between two dates as a day', () => {
@@ -4522,22 +4530,44 @@ describe('per-variety baselines (#22 §3)', () => {
   it('reads nothing while a backfill walks the span, and says it waits', () => {
     const back = archived(days(ROC, '高麗菜', '初秋', 20, 12));
     back.api.storeBoard({ type: 'board', date: 'x', roc_date: ROC, generated_at: new Date().toISOString(), count: 0, items: [] });
-    back.api.refreshVarietyBaselines(ROC, Date.now() - 5 * 60_000); // a 'late' note, made moot by the wait
+    back.api.refreshVarietyBaselines(ROC, Date.now() - 5 * 60_000); // a 'late' note, still shown by the wait
     back.props.set('veggie_sheet_backfill', JSON.stringify({
       id: 'j', status: 'running', updated_at: new Date().toISOString(),
       sheet: SHEET_ID, from: '2025-09-14', to: '2026-09-20', cursor: dayOf(ROC, -10),
     }));
     expect(back.api.refreshVarietyBaselines(ROC)).toBeNull();
     expect(back.sheetReads).toHaveLength(0);
-    const diag = back.api.handleDiag().sheet_history.variety_baseline;
-    expect(diag).toMatchObject({ waiting_for_backfill: true });
-    expect(diag).not.toHaveProperty('skipped');
+    expect(back.api.handleDiag().sheet_history.variety_baseline).toMatchObject({ waiting_for_backfill: true, skipped: 'late' });
     // Past the span, it reads.
     back.props.set('veggie_sheet_backfill', JSON.stringify({
       id: 'j', status: 'running', updated_at: new Date().toISOString(),
       sheet: SHEET_ID, from: '2025-09-14', to: '2026-09-20', cursor: dayOf(ROC, -46),
     }));
     expect(back.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20 } });
+  });
+
+  it('cuts chunks by bytes, not characters, and never inside a surrogate pair', () => {
+    const back = loadBackend();
+    const names = JSON.stringify({ 高麗菜: '改良種'.repeat(4000) }); // 36 KB in 12k characters
+    expect(back.api.writeChunkedProp('p_', 'p_n', names)).toBe(true); // the stub refuses a value over 9 KB
+    expect(back.api.readChunkedProp('p_', 'p_n')).toBe(names);
+    const wide = 'abc' + '𠀀'.repeat(3000); // four bytes each, two UTF-16 units; odd-aligned
+    expect(back.api.writeChunkedProp('q_', 'q_n', wide)).toBe(true);
+    expect(back.api.readChunkedProp('q_', 'q_n')).toBe(wide);
+    for (const [k, v] of back.props) {
+      if (k.startsWith('q_') && k !== 'q_n') expect(() => encodeURIComponent(v)).not.toThrow(); // no lone half
+    }
+  });
+
+  it('reads a long span in order however many runs its days fall into, and not a sorted one', () => {
+    // Thirty days, each followed by a row of another day: thirty runs, more
+    // than a week's limit, and a tab in date order all the same.
+    const inOrder = archived(days(ROC, '高麗菜', '初秋', 20, 30).flatMap((r) => [r, varietyRow('2026-01-02', '高麗菜', '初秋', 99)]));
+    expect(inOrder.api.refreshVarietyBaselines(ROC)).toEqual({ 高麗菜: { 初秋: 20 } });
+    // Sorted by item: every row its own run, far past one a day.
+    const sorted = archived(['高麗菜', '番茄'].flatMap((item) =>
+      days(ROC, item, '某種', 20, 30).flatMap((r) => [r, varietyRow('2026-01-02', item, '某種', 99)])));
+    expect(sorted.api.refreshVarietyBaselines(ROC)).toEqual({});
   });
 
   it('counts a write whose cleanup of old chunks failed as kept', () => {

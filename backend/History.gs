@@ -154,7 +154,12 @@ function applyBaselines(items, history, todayRoc) {
 function attachComparison(item, base, priceKey, pctKey) {
   if (!(base > 0)) return;
   item[priceKey] = round1(base * CATTY_PER_KG);
-  item[pctKey] = round1(((item.avg_price - base) / base) * 100);
+  item[pctKey] = percentAgainst(item.avg_price, base);
+}
+
+/** How far `today` is from `base`, both 元/公斤, in percent to one decimal. */
+function percentAgainst(today, base) {
+  return round1(((today - base) / base) * 100);
 }
 
 /** Cheap history overview for diag/backfill responses. */

@@ -1447,10 +1447,8 @@ function refreshYearAgo(boardRoc, startedAt) {
       // newer days, and a median of those would be published as 「去年此時」.
       // Nothing is read, and nothing kept: kept, an empty answer would
       // outlive the backfill. Every refresh asks again, which costs a
-      // property; the kept medians of an earlier date stand meanwhile. `diag`
-      // says it waits (`waiting_for_backfill`), and no longer that a read
-      // was left undone: none is due until the backfill has passed.
-      props.deleteProperty(YOY_SKIPPED_PROP);
+      // property; the kept medians of an earlier date stand meanwhile, and
+      // `diag` says it waits (`noteReaderState`).
       return {};
     }
     if (startedAt && Date.now() - startedAt > YOY_START_BY_MS) {
@@ -1488,8 +1486,7 @@ function refreshYearAgo(boardRoc, startedAt) {
     // without a comparison because one read failed — and `diag` says so.
     Logger.log('refreshYearAgo failed: ' + err);
     try {
-      noteUnread(PropertiesService.getScriptProperties(), YOY_SKIPPED_PROP,
-        PropertiesService.getScriptProperties().getProperty(HISTORY_SHEET_ID_PROP), 'failed');
+      if (props) noteUnread(props, YOY_SKIPPED_PROP, sheetId, 'failed'); // both set above, or nothing to note
     } catch (err2) {
       Logger.log('refreshYearAgo: not noted: ' + err2);
     }
@@ -1649,7 +1646,12 @@ function scanSpan(spreadsheet, span, liveYear, onRow) {
  */
 function scanTab(sheet, span, zone, onRow) {
   var runs = findRuns(sheet, span.from, span.to, zone);
-  if (runs.length > YOY_MAX_RUNS) return true;
+  // A tab sorted by another column scatters the span into a run per item and
+  // day — hundreds. A long span in order may have more runs than a week (live
+  // days after a backfill's older windows, holes filled later): one a day
+  // is still far short of scattered.
+  var days = (Date.parse(span.to) - Date.parse(span.from)) / 86400000 + 1;
+  if (runs.length > Math.max(YOY_MAX_RUNS, days)) return true;
   // Runs close together are read in one call — the dates are checked row by
   // row anyway — so a week split by a few live days is one round trip.
   if (runs.length > 1) {
@@ -1740,6 +1742,8 @@ function noteReaderState(out, blank, sheetId, span, job, skippedRaw) {
     out = out || blank;
     out.waiting_for_backfill = true;
   }
+  // Shown next to a wait too: what failed, was not kept or ran late will
+  // likely go the same way once the backfill has passed.
   var skipped = parseJson(skippedRaw);
   if (skipped && skipped.sheet === sheetId && (!out || !out.at || skipped.at > out.at)) {
     out = out || blank;
@@ -1778,8 +1782,7 @@ function applyVarietyBaselines(items, medians) {
       // In 元/公斤, and from exactly the value the archive holds for today's
       // row (`historyRowsFor`): comparing the rounded 元/台斤 with an unrounded
       // median would show a variety that has not moved as 「低 1%」.
-      var today = round1(varieties[v].catty_price / CATTY_PER_KG);
-      varieties[v].vs_baseline_percent = round1(((today - base) / base) * 100);
+      varieties[v].vs_baseline_percent = percentAgainst(round1(varieties[v].catty_price / CATTY_PER_KG), base);
     }
   }
 }
@@ -1830,7 +1833,6 @@ function refreshVarietyBaselines(boardRoc, startedAt) {
       // span has written only its later days, and 28 days' median would be
       // taken over a fortnight. Not read, not kept; the medians of an earlier
       // date stand meanwhile, and `diag` says it waits.
-      props.deleteProperty(VARIETY_BASE_SKIPPED_PROP);
       return null;
     }
     if (startedAt && Date.now() - startedAt > YOY_START_BY_MS) {
@@ -1858,8 +1860,7 @@ function refreshVarietyBaselines(boardRoc, startedAt) {
     // read again by the next refresh — and said in `diag` meanwhile.
     Logger.log('refreshVarietyBaselines failed: ' + err);
     try {
-      noteUnread(PropertiesService.getScriptProperties(), VARIETY_BASE_SKIPPED_PROP,
-        PropertiesService.getScriptProperties().getProperty(HISTORY_SHEET_ID_PROP), 'failed');
+      if (props) noteUnread(props, VARIETY_BASE_SKIPPED_PROP, sheetId, 'failed');
     } catch (err2) {
       Logger.log('refreshVarietyBaselines: not noted: ' + err2);
     }

@@ -226,7 +226,8 @@ Two further robustness measures: `fetchRootRows()` retries roots that came back
 empty once, because a throttled 13-request batch used to drop a whole slice of
 the board (including 高麗菜) without any error; and `writeChunkedProp()` splits
 the ~34 KB board — and the price history — across numbered `ScriptProperties`
-chunks, since a single property value is capped at 9 KB.
+chunks, since a single property value is capped at 9 KB — cut at 8000 UTF-8
+bytes, not characters, since a crop's name takes three bytes a character.
 
 ### The search path: answer, refuse, or crawl
 
