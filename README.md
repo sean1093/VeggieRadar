@@ -578,8 +578,9 @@ within the 45 before the board's date, the day itself left out). A variety's
 row is archived only on days the board broke the item down, which takes two
 varieties past the share and volume floors, so a crop nearly all one variety
 has rows for it only on a few contested days; a variety gets a median only
-when it was listed on at least half those days since it first was (a variety
-just in season is not held to the weeks before it), and ten at least. The
+when it was listed on at least half those 28 days, and ten at least. A
+variety just in season therefore waits a fortnight or so: from these rows it
+cannot be told from a dominant one only lately broken down. The
 row shows 「批發比近月低/高 N%」 as `varieties[].vs_baseline_percent` —
 wholesale, in 元/公斤 as the archive holds it, since the row leads with a
 retail estimate — hidden on a

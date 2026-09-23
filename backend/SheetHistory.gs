@@ -1913,9 +1913,11 @@ function clearUnread(props, key) {
  * (`varietyBreakdown`). A crop that is nearly all one variety has rows for
  * it only on its few contested days, and their median is not its month. So a
  * variety is given one only when it was listed on at least
- * `VARIETY_MIN_COVERAGE` of those days since it was first listed among them
- * — a variety just in season is not held to the weeks before it — and on
- * `BASELINE_MIN_DAYS` at least.
+ * `VARIETY_MIN_COVERAGE` of those days, and on `BASELINE_MIN_DAYS` at least.
+ * A variety just in season waits until it has half of them: from these rows
+ * it cannot be told from a dominant one only lately broken down, and no
+ * comparison is better than one taken over a fortnight of contested days.
+ * A day the item traded is one with any priced row for it.
  */
 function varietyMedians(spreadsheet, span, liveYear) {
   var prices = {}; // item → variety → date → 元/公斤
@@ -1925,10 +1927,8 @@ function varietyMedians(spreadsheet, span, liveYear) {
     var variety = cells[3];
     var price = Number(cells[4]);
     if (!(price > 0)) return;
-    if (variety === '' || variety === null) {
-      (traded[item] = traded[item] || {})[date] = true;
-      return;
-    }
+    (traded[item] = traded[item] || {})[date] = true;
+    if (variety === '' || variety === null) return; // the blend row
     var byVariety = (prices[item] = prices[item] || {});
     (byVariety[variety] = byVariety[variety] || {})[date] = price;
   });
@@ -1939,12 +1939,12 @@ function varietyMedians(spreadsheet, span, liveYear) {
   var out = {};
   Object.keys(prices).forEach(function (item) {
     if (!known[item]) return;
-    var days = Object.keys(traded[item] || {}).sort().slice(-BASELINE_WINDOW);
+    var days = Object.keys(traded[item]).sort().slice(-BASELINE_WINDOW);
+    var need = Math.max(BASELINE_MIN_DAYS, Math.ceil(days.length * VARIETY_MIN_COVERAGE));
     Object.keys(prices[item]).forEach(function (variety) {
       var byDate = prices[item][variety];
       var listed = days.filter(function (d) { return byDate[d] !== undefined; });
-      var since = days.length - days.indexOf(listed[0]); // the item's days since first listed
-      if (listed.length < Math.max(BASELINE_MIN_DAYS, Math.ceil(since * VARIETY_MIN_COVERAGE))) return;
+      if (listed.length < need) return;
       var base = median(listed.map(function (d) { return byDate[d]; }));
       (out[item] = out[item] || {})[variety] = Math.round(base * 100) / 100;
     });
