@@ -192,22 +192,34 @@ function backfillHistoryOnce() {
   try {
     result = backfillHistory();
   } finally {
-    dropTriggers(BACKFILL_ONCE_FN);
     // A run that merged nothing leaves no queue behind it: the crawl is gone
     // either way, and making the operator wait out the hour to ask again
-    // would be a penalty for someone else's lock.
-    if (!result || !result.merged) CacheService.getScriptCache().remove(BACKFILL_LOCK_KEY);
+    // would be a penalty for someone else's lock. Guarded on its own so a
+    // `ScriptApp` failure below cannot also cost them that hour — and before
+    // it, so the reverse cannot happen either.
+    try {
+      if (!result || !result.merged) CacheService.getScriptCache().remove(BACKFILL_LOCK_KEY);
+    } catch (err) {
+      Logger.log('backfillHistoryOnce: queue lock not cleared: ' + err);
+    }
+    dropTriggers(BACKFILL_ONCE_FN);
   }
   return result;
 }
 
 /**
  * Merges the crawled windows into the history under the lock.
- * @returns {boolean} false when the lock could not be taken.
+ *
+ * `busy` and `failed` are told apart by whether the body ran at all, because
+ * only the first is worth retrying: a lock someone else holds clears on its
+ * own, and a merge that threw would throw again the same way.
+ * @returns {string} 'merged', 'busy' or 'failed'.
  */
 function mergeCrawled(crawled) {
+  var ran = false;
   try {
     withHistoryLock(function () {
+      ran = true;
       var history = readHistory();
       for (var c = 0; c < crawled.length; c++) {
         var rowsByRoot = crawled[c];
@@ -230,10 +242,10 @@ function mergeCrawled(crawled) {
       pruneHistory(history);
       writeHistory(history);
     });
-    return true;
+    return 'merged';
   } catch (err) {
-    Logger.log('mergeCrawled: ' + err);
-    return false;
+    Logger.log(ran ? 'mergeCrawled failed: ' + err : 'mergeCrawled: history lock busy: ' + err);
+    return ran ? 'failed' : 'busy';
   }
 }
 
@@ -265,11 +277,12 @@ function backfillHistory() {
   // a 30 s wait can genuinely time out — and a thrown timeout here would throw
   // away a crawl that took minutes, behind a one-hour queue lock that stops
   // anyone simply asking again.
-  var merged = mergeCrawled(crawled) || mergeCrawled(crawled);
+  var outcome = mergeCrawled(crawled);
+  if (outcome === 'busy') outcome = mergeCrawled(crawled);
   var summary = historySummary();
-  summary.merged = merged;
-  Logger.log(merged
+  summary.merged = outcome === 'merged';
+  Logger.log(summary.merged
     ? 'Backfill complete: ' + summary.items + ' items with history'
-    : 'Backfill merged nothing: the history lock stayed busy');
+    : 'Backfill merged nothing (' + outcome + ')');
   return summary;
 }

@@ -174,10 +174,10 @@ function yearSheet(spreadsheet, year) {
   sheet = spreadsheet.insertSheet(year);
   sheet.getRange(1, 1, 1, SHEET_HEADER.length).setValues([SHEET_HEADER]);
   // The date column is written and read as text. Left as a date, Sheets parses
-  // `2026-09-21` into a value it hands back as a `Date` in the spreadsheet's
-  // own timezone, and `dropDay` — which compares dates as strings — would
-  // match nothing and duplicate the day it meant to replace. `cellDate` below
-  // still tolerates a date cell, for a tab someone reformatted by hand.
+  // `2026-09-21` into a value it hands back as a `Date`, and `readDay` — which
+  // compares dates as strings — would match nothing and duplicate the day it
+  // meant to replace. `cellDate` below still tolerates a date cell, for a tab
+  // someone reformatted by hand.
   sheet.getRange(1, 1, sheet.getMaxRows(), 1).setNumberFormat('@');
   return sheet;
 }
@@ -211,7 +211,12 @@ function readDay(sheet, date, zone) {
 function sameRows(existing, rows) {
   if (existing.length !== rows.length) return false;
   for (var i = 0; i < rows.length; i++) {
-    for (var c = 0; c < SHEET_HEADER.length; c++) {
+    // From column 1. `readDay` has already matched column 0, and on a tab
+    // whose date column holds real dates that cell is a `Date` where the crawl
+    // has a string — comparing it would make every day look changed, and the
+    // day would be deleted and rewritten every window for as long as the
+    // market stayed shut.
+    for (var c = 1; c < SHEET_HEADER.length; c++) {
       // Through strings: a number read back from a cell is a number, and the
       // one written may be either.
       if (String(existing[i][c]) !== String(rows[i][c])) return false;

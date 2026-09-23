@@ -226,7 +226,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'handleDiag', 'BOARD_MAX_AGE_MS', 'REFRESH_ONCE_FN',
     'handleTrend', 'resolveTradeDates',
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
-    'applyBaselines', 'backfillHistory', 'backfillHistoryOnce', 'handleBackfill', 'buildBoard',
+    'applyBaselines', 'backfillHistory', 'backfillHistoryOnce', 'mergeCrawled', 'handleBackfill', 'buildBoard',
     'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown', 'handleSearch', 'RETAIL_BAND_ROOT',
     'sendAlert', 'recordRefreshOutcome', 'withAlertLock', 'handleAlertTest',
     'ALERT_FAILURE_STREAK', 'ALERT_SILENCE_MS', 'ALERT_COOLDOWN_MS',
@@ -994,8 +994,20 @@ describe('backfillHistory — losing the lock', () => {
 
     expect(result.merged).toBe(false);
     expect(locks.waits).toBe(2); // tried twice before giving the crawl up
-    expect(logs.some((l) => l.includes('merged nothing'))).toBe(true);
+    expect(logs.some((l) => l.includes('history lock busy'))).toBe(true);
+    expect(logs.some((l) => l.includes('merged nothing (busy)'))).toBe(true);
     expect(cache.has('veggie_backfill_queued')).toBe(false); // ask again whenever you like
+  });
+
+  it('tells a busy lock apart from a merge that threw', () => {
+    // Only the first is worth retrying: a lock someone else holds clears on
+    // its own, and a merge that threw would throw again the same way. They
+    // are told apart by whether the body ran at all.
+    const { api, locks, logs } = loadBackend();
+    expect(api.mergeCrawled([null])).toBe('failed'); // the body, not the lock
+    expect(locks.waits).toBe(1);
+    expect(logs.some((l) => l.includes('mergeCrawled failed'))).toBe(true);
+    expect(logs.some((l) => l.includes('history lock busy'))).toBe(false);
   });
 
   it('keeps the queue lock when the merge worked', () => {
@@ -2001,6 +2013,21 @@ describe('long-term history in a Sheet', () => {
       expect(api.appendDailyHistory(corrected)).toBe('replaced');
       expect(tab.rows).toHaveLength(5); // replaced, not duplicated
       expect(formatZones).toContain('Pacific/Auckland');
+    });
+
+    it('sees an unchanged day on a date-formatted tab as unchanged', () => {
+      // The other half of reading those cells: if the comparison then treats
+      // the `Date` in column 0 as a difference, every day looks changed and
+      // the archive rewrites it every window for as long as the market is
+      // shut — which is what the comparison replaced.
+      const { api, tabs } = configured();
+      api.appendDailyHistory(boardOf('2026-09-21', 8));
+      const tab = tabs.get('2026') as { rows: unknown[][]; textColumnA: boolean };
+      tab.textColumnA = false;
+      tab.rows = tab.rows.map((row, i) => (i === 0 ? row : [new Date('2026-09-21T00:00:00'), ...row.slice(1)]));
+
+      expect(api.appendDailyHistory(boardOf('2026-09-21'))).toBe('unchanged');
+      expect(tab.rows).toHaveLength(5);
     });
 
     it('does not drop the day for a board it would write nothing for', () => {
