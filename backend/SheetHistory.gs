@@ -409,6 +409,16 @@ function startSheetBackfill(props, months) {
     // Its last link could still finish and write that job back over this one.
     return backfillReply(job, false, '上一批次仍在執行，請數分鐘後再試');
   }
+  if (resuming && job.status === 'running' && (job.failures || 0) >= SHEET_BACKFILL_MAX_FAILURES) {
+    // Stalled with its failures already spent: the links that stalled it
+    // were counted and never came back. Said as it is rather than queued, to
+    // fail on its first step; asking again retries it, as for any failed job.
+    job.status = 'failed';
+    job.last_error = job.last_error || 'the last ' + job.failures + ' links did not finish';
+    job.updated_at = new Date().toISOString();
+    writeSheetBackfill(props, job);
+    return backfillReply(job, false, '回填已失敗（' + job.last_error + '）；再送一次即重試');
+  }
   if (resuming) {
     // An operator retrying a chain that gave up starts its count again. A
     // chain that merely stalled keeps it: the link that stalled it may have
@@ -808,8 +818,7 @@ function backfillWindow(job, sheetId, lease) {
   for (var k = 0; k < skips.length; k++) {
     if (end >= skips[k].from && end <= skips[k].to) {
       // Written by a job before this one: step over it without a crawl.
-      moveBackfillCursor(job, shiftROC(skips[k].from, -1));
-      job.failures = 0;
+      completeWindow(job, shiftROC(skips[k].from, -1), false);
       return;
     }
   }
@@ -859,15 +868,11 @@ function backfillWindow(job, sheetId, lease) {
   if (empty) {
     job.gaps = recent(job.gaps, span);
     job.holes = addHoles(job, [{ from: rocToISO(start), to: rocToISO(end) }]);
-    job.windows += 1;
-    job.failures = 0;
-    job.last_error = null;
-    moveBackfillCursor(job, shiftROC(start, -1));
+    completeWindow(job, shiftROC(start, -1), true);
     return;
   }
 
   var written = writeArchivedDays(sheetId, built.days, job.id, lease);
-  job.windows += 1;
   job.days_written += written.days;
   job.days_skipped += written.skipped;
   job.days_rejected = (job.days_rejected || 0) + built.rejected.length;
@@ -881,10 +886,26 @@ function backfillWindow(job, sheetId, lease) {
   // Written, so not a hole: its days are in the Sheet, and a later job would
   // skip them by date anyway. Filling in the crop means deleting those rows.
   if (refused.length) job.partial = recent(job.partial, span + ' without ' + refused.join('、'));
+  // A crop left out of a day because that day truncated on its own: written
+  // without it, and so on record like any other partial day.
+  Object.keys(fetched.dropped).forEach(function (root) {
+    fetched.dropped[root].forEach(function (day) {
+      if (day >= start && day <= end) job.partial = recent(job.partial, rocToISO(day) + ' without ' + root);
+    });
+  });
   job.rows_written += written.rows;
+  completeWindow(job, built.deferred || shiftROC(start, -1), true);
+}
+
+/**
+ * A window done — written, stepped over as a gap, or skipped as covered: the
+ * cursor moves past it and whatever the retries were counting is cleared.
+ */
+function completeWindow(job, nextRoc, crawled) {
+  if (crawled) job.windows += 1;
   job.failures = 0;
   job.last_error = null;
-  moveBackfillCursor(job, built.deferred || shiftROC(start, -1));
+  moveBackfillCursor(job, nextRoc);
 }
 
 /**
@@ -1040,19 +1061,33 @@ function backfillDays(rowsByRoot, rocStart, rocEnd, dropped) {
  * reference is the rest of the span: each item at its median price across the
  * other days fetched. A broken day, or a short run of them, is outvoted by the
  * days around it, and every day — the first and the newest alike — has one.
+ *
+ * What it cannot tell apart is a broken stretch from a real shift that lasts
+ * (a typhoon week): either way the minority side of the span is refused. That
+ * is the archive's rule — a missing day over a wrong one — and the refused
+ * days are holes, which a later job, whose spans fall differently, judges
+ * again. The live guard, judging day over day, refuses the other side.
  * Dates are left off both, since rule (d) exists to refuse a board older than
  * the one before it, and the reference has no date.
  */
 function judgeDay(boards, t) {
   var prices = {};
+  var others = 0;
   for (var u = 0; u < boards.length; u++) {
     if (u === t) continue;
+    others++;
     for (var i = 0; i < boards[u].items.length; i++) {
       var it = boards[u].items[i];
       if (it.catty_price > 0) (prices[it.name] = prices[it.name] || []).push(it.catty_price);
     }
   }
-  var reference = Object.keys(prices).map(function (name) {
+  // The items a typical day of the span carries: on at least half of the
+  // other days. Every item seen on any day would make the reference a board
+  // no single day has, and rule (a)'s "60 % of the reference" a bar that a
+  // normal day misses.
+  var reference = Object.keys(prices).filter(function (name) {
+    return prices[name].length * 2 >= others;
+  }).map(function (name) {
     return { name: name, catty_price: median(prices[name]) };
   });
   return validateBoard({ items: boards[t].items }, reference.length ? { items: reference } : null);
@@ -1119,7 +1154,9 @@ function writeArchivedDays(sheetId, days, jobId, lease) {
       var sheet = yearSheet(spreadsheet, blocks[b].year);
       // Tabs the live archive made before the header was frozen get it
       // frozen here, so the README's "sort column A freely" holds for them.
-      sheet.setFrozenRows(1);
+      // Once per tab while the cache remembers, not on every append under
+      // the lock the refresh waits on.
+      freezeOnce(sheet, blocks[b].year, cache);
       var from = appendRow(sheet);
       growFor(sheet, from + blocks[b].rows.length - 1);
       sheet.getRange(from, 1, blocks[b].rows.length, SHEET_HEADER.length).setValues(blocks[b].rows);
@@ -1162,6 +1199,21 @@ function presentDates(spreadsheet, year, zone, jobId, cache) {
   var present = tab ? archivedDates(tab, zone) : {};
   rememberPresent(cache, jobId, year, present);
   return present;
+}
+
+function freezeOnce(sheet, year, cache) {
+  var key = SHEET_FROZEN_CACHE_PREFIX + year;
+  try {
+    if (cache.get(key)) return;
+  } catch (err) {
+    // Unknown: freezing again is harmless.
+  }
+  sheet.setFrozenRows(1);
+  try {
+    cache.put(key, '1', SHEET_PRESENT_CACHE_TTL);
+  } catch (err) {
+    Logger.log('freezeOnce: not remembered: ' + err);
+  }
 }
 
 function forgetPresent(cache, jobId, year) {
@@ -1238,9 +1290,15 @@ function countArchive(sheetId) {
       if (!/^\d{4}$/.test(tabs[i].getName())) continue;
       var last = tabs[i].getLastRow();
       if (last < 2) continue;
-      rows += last - 1;
-      var present = archivedDates(tabs[i], zone);
-      for (var d in present) dates[d] = true;
+      // Rows and days from the same cells: a blank row, or a header a sort
+      // by hand moved into the data, is neither.
+      var cells = tabs[i].getRange(2, 1, last - 1, 1).getValues();
+      for (var c = 0; c < cells.length; c++) {
+        var day = cellDate(cells[c][0], zone);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+        rows++;
+        dates[day] = true;
+      }
     }
     var sorted = Object.keys(dates).sort();
     return {

@@ -47,7 +47,9 @@ var TREND_CACHE_PREFIX = 'veggie_trend_';
 
 var TREND_CACHE_TTL = 60 * 60;   // seconds; bounds staleness once closing prices publish
 var TREND_UNANSWERED_TTL = 2 * 60; // seconds; see `handleTrend`
-var TREND_MAX_DAYS = 14;         // MOA caps one response near 1000 rows; 14 days stays under it
+// MOA caps one response near 1000 rows. 14 days of most crops stays under it;
+// when a broad term does not, `handleTrend` leaves the cut oldest point out.
+var TREND_MAX_DAYS = 14;
 var TRADE_DATES_CACHE_KEY = 'veggie_trade_dates';
 
 var TRADE_DATES_TTL = 60 * 60;   // seconds; saves up to 16 probe fetches per search miss
@@ -250,6 +252,7 @@ var SHEET_BACKFILL_MAX_HOLES = 40;
 // only dates that can appear in it are its own, which it adds as it goes.
 var SHEET_PRESENT_CACHE_PREFIX = 'veggie_sheet_present_';
 var SHEET_PRESENT_CACHE_TTL = 6 * 60 * 60; // seconds; the platform maximum
+var SHEET_FROZEN_CACHE_PREFIX = 'veggie_sheet_frozen_';
 // What the archive holds, as the status request reports it. Counting it reads
 // column A of every year tab, and an operator watching a job polls.
 var SHEET_SUMMARY_CACHE_KEY = 'veggie_sheet_summary';

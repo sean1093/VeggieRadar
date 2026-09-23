@@ -63,6 +63,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   const sheetReads: string[] = [];
   /** Cells read, all tabs: what a read costs, not just how many there were. */
   const cellsRead = { count: 0 };
+  const freezes: string[] = [];
   let brokenReadKey: string | null = null;
   /** Tabs whose next `setValues` throws, once — a write that fails part-way. */
   const failingWrites = new Set<string>();
@@ -126,7 +127,10 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
         },
       }),
       deleteRows: (start: number, count: number) => void rows().splice(start - 1, count),
-      setFrozenRows: (n: number) => { tab().frozen = n; },
+      setFrozenRows: (n: number) => {
+        freezes.push(name);
+        tab().frozen = n;
+      },
     };
   };
 
@@ -294,7 +298,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     breakSheet: () => { sheetThrows = true; },
     formatZones, cacheRemovals, sheetReads,
     failWriteOnce: (tab: string) => { failingWrites.add(tab); },
-    cellsRead, cacheTtls,
+    cellsRead, cacheTtls, freezes,
     /** The id `ScriptApp` would pass a trigger's handler as `e.triggerUid`. */
     uidOf,
     breakRead: (key: string) => { brokenReadKey = key; },
@@ -2378,6 +2382,22 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.links()).toBe(0);
     });
 
+    it('says a stalled job whose failures are spent has failed, not that it is queued', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '12' });
+      back.triggers.length = 0;
+      back.setJob({
+        failures: back.api.SHEET_BACKFILL_MAX_FAILURES,
+        updated_at: new Date(Date.now() - back.api.SHEET_BACKFILL_STALL_MS - 60_000).toISOString(),
+      });
+
+      const reply = back.api.handleSheetBackfill({ months: '12' });
+      expect(reply.queued).toBe(false);
+      expect(reply.message).toContain('回填已失敗');
+      expect(back.job().status).toBe('failed');
+      expect(back.api.handleSheetBackfill({ months: '12' }).queued).toBe(true); // asking again retries
+    });
+
     it('resumes a job whose chain stopped, from where it got to', () => {
       // One link runs for at most six minutes and queues the next a second
       // later, so a running job this quiet has nothing behind it.
@@ -2776,6 +2796,14 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.job().rejected.join('\n')).toContain('2026-09-16: every item withheld');
     });
 
+    it('freezes a tab once, not on every append under the lock', () => {
+      const back = backfill();
+      back.api.handleSheetBackfill({ months: '1' });
+      for (let i = 0; i < 20 && back.job().status === 'running'; i++) back.api.sheetBackfillStep();
+      expect(back.job().windows).toBe(4);
+      expect(back.freezes.filter((t) => t === '2026').length).toBeLessThanOrEqual(2);
+    });
+
     it('freezes the header of a tab the live path made before it did', () => {
       const back = backfill();
       back.tabs.set('2026', { rows: [[...back.api.SHEET_HEADER]], maxRows: 1000, textColumnA: true });
@@ -2915,6 +2943,21 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       expect(back.job().skip).toEqual([]);
     });
 
+    it('judges a day against what a typical day of the span carries', () => {
+      // One day with far more crops than the rest must not make the rest look
+      // thin: rule (a) is "60 % of the reference", and a reference of every
+      // crop seen on any day is a board no single day has.
+      const sparse = new Set(Object.keys(FILLER).slice(0, 44));
+      const world = (root: string, roc: string): Row[] =>
+        sparse.has(root) && roc !== '115.09.09' ? [] : market(root, roc);
+      const back = backfill(world);
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+
+      expect(back.job().days_rejected).toBe(0);
+      expect(back.datesOf('2026')).toContain('2026-09-12');
+    });
+
     it('does not let a broken context day refuse the good days after it', () => {
       // The day before a window is judged against nothing in this fetch. As
       // the only reference it would refuse every day after it; judged against
@@ -3019,7 +3062,8 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
       back.api.sheetBackfillStep();
 
       const itemsOn = (date: string) => back.rowsOf('2026').filter((r) => r[0] === date).map((r) => r[1]);
-      expect(itemsOn('2026-09-15')).not.toContain('番茄'); // left out
+      expect(itemsOn('2026-09-15')).not.toContain('番茄'); // left out…
+      expect(back.job().partial).toContain('2026-09-15 without 番茄'); // …on record
       expect(itemsOn('2026-09-16')).not.toContain('番茄'); // unjudged, so withheld
       expect(itemsOn('2026-09-16')).toContain('高麗菜');
       expect(itemsOn('2026-09-17')).toContain('番茄');
@@ -3428,7 +3472,7 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
 
       back.cache.delete('veggie_sheet_summary');
       expect(back.api.handleSheetBackfill({}).archive).toMatchObject({
-        days: 30, first_date: '2026-08-21', last_date: '2026-09-20',
+        rows: 30 * ROWS_A_DAY, days: 30, first_date: '2026-08-21', last_date: '2026-09-20',
       });
     });
 

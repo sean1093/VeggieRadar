@@ -452,9 +452,12 @@ from MOA's range queries:
   of the two neighbours lets a broken stretch vouch for itself — so a day is
   judged against **the rest of the 12-day span**, each item at its median
   price across the other days. A broken day, or a short run of them, is
-  outvoted, and every day has a reference, the first and the newest alike. A
-  refused day (too few items, a board-wide price shift) is not written, and
-  is listed under the job's `rejected`. Each window fetches three
+  outvoted, and every day has a reference, the first and the newest alike.
+  What it cannot tell from a broken stretch is a real shift that lasts (a
+  typhoon week): the minority side of the span is refused — a missing day over
+  a wrong one — and those days are holes that a later job, whose spans fall
+  differently, judges again. A refused day is not written, and is listed
+  under the job's `rejected`. Each window fetches three
   extra leading days that are never written: they are the *previous trading
   day* rule (e) judges the first day against, and without them one day in
   every nine would go into the archive unjudged. After a longer closure
