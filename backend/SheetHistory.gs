@@ -1383,35 +1383,56 @@ function applyYearOverYear(items, medians) {
 }
 
 /**
- * Each item's median 元/公斤 over the archived trading days within
- * `YOY_WINDOW_DAYS` of this trading date one year back, or null when there is
- * no archive to ask. Computed once per trading date and kept in a property;
- * an empty answer is asked again after `YOY_EMPTY_RETRY_MS`. Never throws.
+ * The medians the last read kept, for a board of `boardRoc`, or null. Cheap —
+ * a property — so the build can use it; the Sheets read is `refreshYearAgo`.
+ * Medians kept for another spreadsheet, or for a window too far from this
+ * date, are not applied.
  */
-function readYearAgo(boardRoc) {
+function keptYearAgo(boardRoc) {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
+    if (!sheetId || !boardRoc) return null;
+    var kept = parseYearAgo(props.getProperty(YOY_PROP));
+    if (!kept || kept.sheet !== sheetId) return null;
+    var apart = Math.abs(rocToDate(boardRoc).getTime() - rocToDate(kept.date).getTime()) / 86400000;
+    return apart <= YOY_KEPT_MAX_DAYS ? kept.items : null;
+  } catch (err) {
+    Logger.log('keptYearAgo: ' + err);
+    return null;
+  }
+}
+
+/**
+ * Reads the Sheet for this trading date's year-ago medians when what is kept
+ * is not for this date and spreadsheet, or has aged past its keep (see
+ * `YOY_KEEP_MS`). The last step of a refresh. Never throws; a failed read is
+ * not kept, so the next refresh tries again.
+ * @returns {Object|null} the medians now kept, or null when there is no
+ *   archive or the read failed.
+ */
+function refreshYearAgo(boardRoc) {
   var props;
   var sheetId;
   try {
     props = PropertiesService.getScriptProperties();
     sheetId = props.getProperty(HISTORY_SHEET_ID_PROP);
   } catch (err) {
-    Logger.log('readYearAgo: properties unavailable: ' + err);
+    Logger.log('refreshYearAgo: properties unavailable: ' + err);
     return null;
   }
   if (!sheetId || !boardRoc) return null;
 
   var kept = parseYearAgo(props.getProperty(YOY_PROP));
   if (kept && kept.date === boardRoc && kept.sheet === sheetId) {
-    var empty = !Object.keys(kept.items).length;
-    if (!empty || Date.now() - Date.parse(kept.at) < YOY_EMPTY_RETRY_MS) return kept.items;
+    var filling = !Object.keys(kept.items).length || backfillRunning(props);
+    if (Date.now() - Date.parse(kept.at) < (filling ? YOY_EMPTY_RETRY_MS : YOY_KEEP_MS)) return kept.items;
   }
   var medians;
   try {
     medians = yearAgoMedians(SpreadsheetApp.openById(sheetId), boardRoc);
   } catch (err) {
-    // Not kept: the next refresh asks again, rather than the day going
-    // without a comparison because one read failed.
-    Logger.log('readYearAgo failed: ' + err);
+    Logger.log('refreshYearAgo failed: ' + err);
     return null;
   }
   try {
@@ -1419,9 +1440,14 @@ function readYearAgo(boardRoc) {
       date: boardRoc, sheet: sheetId, at: new Date().toISOString(), items: medians
     }));
   } catch (err) {
-    Logger.log('readYearAgo: not kept: ' + err); // asked again next refresh
+    Logger.log('refreshYearAgo: not kept: ' + err); // read again next refresh
   }
   return medians;
+}
+
+function backfillRunning(props) {
+  var job = parseSheetBackfill(props.getProperty(SHEET_BACKFILL_PROP));
+  return !!job && job.status === 'running';
 }
 
 function parseYearAgo(raw) {
@@ -1452,7 +1478,6 @@ function yearAgoMedians(spreadsheet, boardRoc) {
   var years = from.substring(0, 4) === to.substring(0, 4) ? [from.substring(0, 4)] : [from.substring(0, 4), to.substring(0, 4)];
 
   var prices = {};
-  var days = {};
   for (var y = 0; y < years.length; y++) {
     var sheet = spreadsheet.getSheetByName(years[y]);
     if (!sheet) continue;
@@ -1475,19 +1500,27 @@ function yearAgoMedians(spreadsheet, boardRoc) {
       var values = sheet.getRange(runs[r].first, 1, runs[r].last - runs[r].first + 1, SHEET_HEADER.length).getValues();
       for (var v = 0; v < values.length; v++) {
         var cells8 = values[v];
+        // Checked again, not trusted from the first read: a sort by hand
+        // between the two would put other days on these rows.
+        var date = cellDate(cells8[0], zone);
+        if (date < from || date > to) continue;
         if (cells8[3] !== '' && cells8[3] !== null) continue; // a variety row
         var price = Number(cells8[4]);
         if (!(price > 0)) continue;
         var name = String(cells8[1]);
-        (prices[name] = prices[name] || []).push(price);
-        (days[name] = days[name] || {})[cellDate(cells8[0], zone)] = true;
+        // One value per day: a day archived twice must not weigh twice.
+        var byDay = (prices[name] = prices[name] || {});
+        if (!(date in byDay)) byDay[date] = price;
       }
     }
   }
   var out = {};
   Object.keys(prices).forEach(function (name) {
-    if (Object.keys(days[name]).length < YOY_MIN_DAYS) return;
-    out[name] = round1(median(prices[name]));
+    var values = Object.keys(prices[name]).map(function (d) { return prices[name][d]; });
+    if (values.length < YOY_MIN_DAYS) return;
+    // Kept unrounded, like the 28-day median: the percentage is measured
+    // against the median, and only the published price is rounded.
+    out[name] = median(values);
   });
   return out;
 }

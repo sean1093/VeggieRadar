@@ -263,10 +263,15 @@ var YOY_MIN_DAYS = 3;            // fewer archived days than this → nothing pu
 // Computed once per trading date and kept here, so a refresh reads the Sheet
 // once a day rather than every four hours: "<roc date>" plus the medians.
 var YOY_PROP = 'veggie_yoy';
-// A result with nothing in it — the archive does not reach back a year yet, or
-// the backfill is still walking there — is tried again after this long, not
-// only on the next trading date.
+// How long a read is good for. A day, normally — and a long closure keeps one
+// trading date for days, so this, not the date, is what makes it read again.
+// Six hours while the archive may still be filling in: the last read found
+// nothing, or a backfill is running and may be walking through that window.
+var YOY_KEEP_MS = 24 * 60 * 60 * 1000;
 var YOY_EMPTY_RETRY_MS = 6 * 60 * 60 * 1000;
+// Kept medians older than this many days are not applied at all: the window
+// they describe has moved too far from the board's date.
+var YOY_KEPT_MAX_DAYS = 7;
 // What the archive holds, as the status request reports it. Counting it reads
 // column A of every year tab, and an operator watching a job polls.
 var SHEET_SUMMARY_CACHE_KEY = 'veggie_sheet_summary';

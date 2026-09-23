@@ -532,15 +532,20 @@ from MOA's range queries:
 
 #### Reading it: the same weeks last year
 
-The archive's first reader is 「比去年同期」 (#22 §2). Once per trading date
-the refresh reads the archived blend rows within a week either side of that
-date a year back — column A of the year tab (two, across New Year) to find
-them, then only those rows — and takes each crop's median. With at least
-three archived days it attaches `last_year_price` (元/台斤) and
-`vs_last_year_percent`, wholesale against wholesale like the baseline. The
-medians are kept in one property for the day, so the other refreshes read
-nothing; an empty result (the backfill has not reached back a year yet) is
-asked again after six hours. It is shown as one line in the drawer and on no
+The archive's first reader is 「比去年同期」 (#22 §2). The refresh reads the
+archived blend rows within a week either side of the trading date a year
+back — column A of the year tab (two, across New Year) to find them, then
+only those rows — and takes each crop's median, one value per day. With at
+least three archived days a crop gets `last_year_price` (元/台斤) and
+`vs_last_year_percent`, wholesale against wholesale like the baseline.
+
+The read is the refresh's **last** step, after the board is stored and its
+outcome recorded — a slow Sheets read must never cost the board, and a
+timeout there costs only the comparison. The board is built with the
+medians kept from the last read, which after a new trading date are those of
+a window a day or two older: a ±7-day median barely moves. They are read
+again once a day, or every six hours while a backfill is running or the
+last read found nothing, since the archive may still be filling in. It is shown as one line in the drawer and on no
 card: `drawer_opened` carries `has_last_year`, and whether it earns a badge
 is for those numbers to say. `diag.sheet_history.year_ago` reports which
 trading date it compares and how many crops it covers.
@@ -795,7 +800,7 @@ does not justify publishing.
 | `baseline_price`, `vs_baseline_percent` | fewer than 10 in-horizon observations for that crop (§5) |
 | `last_year_price`, `vs_last_year_percent` | no long-term archive configured, or fewer than 3 archived trading days for that crop within a week of this date a year back (§2) |
 | `varieties` | fewer than 2 varieties clear the share and volume thresholds (§5) |
-| `suspect` | the item's numbers are plausible; it appears only on an item the guard flagged (§2), whose change and baseline the client must then hide |
+| `suspect` | the item's numbers are plausible; it appears only on an item the guard flagged (§2), whose change, baseline and year-ago comparison the client must then hide — everything that compares today with another day |
 
 `date` is the trading date; `generated_at` is when the backend crawled. See
 "Trading date vs. refresh time" in §2 — clients must not present the trading date
@@ -1123,7 +1128,7 @@ wrapper, `src/lib/analytics.ts`. Each event exists to settle a decision:
 | `sort_changed` | `mode` | 划算優先 adoption → 「今日推薦」 (§9) |
 | `filter_changed` | `filter` | Which categories and 關注 get used |
 | `watch_toggled` | `on`, `count_bucket` | Whether a watchlist summary is worth building |
-| `drawer_opened` | `has_varieties`, `has_baseline`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen |
+| `drawer_opened` | `has_varieties`, `has_baseline`, `has_last_year`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen; `has_last_year` is how #22 decides whether 「比去年同期」 earns a place on the card (it is drawer-only until then) |
 | `share` | `method` (`web_share` / `clipboard`), `has_retail` | Whether sharing earns the per-item preview pages (§9), and how much of it goes through the native sheet |
 | `trend_result` | `outcome` (`ok` / `empty` / `failed`), `reason` | Whether the trend deadline is right; memo hits are not reported |
 | `chunk_failed` | `chunk` | Cost of the code split |

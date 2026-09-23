@@ -197,6 +197,20 @@ describe('DetailDrawer', () => {
       expect(screen.getByText(/今日持平/)).toBeInTheDocument();
     });
 
+    it('says 持平 for a difference that rounds to nothing, not 「低 0%」', () => {
+      render(
+        <DetailDrawer
+          isOpen
+          onClose={() => {}}
+          item={{ ...withRetail, baseline_price: 18, vs_baseline_percent: -0.4, last_year_price: 16, vs_last_year_percent: 0.3 }}
+          allProduceItems={mockAllProduceItems}
+        />,
+      );
+      expect(screen.queryByText(/0%/)).not.toBeInTheDocument();
+      expect(screen.getByText(/今日持平）/)).toBeInTheDocument();
+      expect(screen.getByText(/今日批發\s*持平/)).toBeInTheDocument();
+    });
+
     it('says nothing when there is no year-ago price, or only half of one', () => {
       const { unmount } = render(
         <DetailDrawer isOpen onClose={() => {}} item={withRetail} allProduceItems={mockAllProduceItems} />,

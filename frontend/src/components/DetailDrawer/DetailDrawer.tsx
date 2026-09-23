@@ -10,7 +10,7 @@ import type { ProduceItem } from '../../types/produce';
 import { fetchProduceTrend } from '../../services/api';
 import { itemUrl } from '../../lib/urlState';
 import { marketPrice } from '../../lib/utils/market-price';
-import { trustedBaseline, trustedLastYear } from '../../lib/utils/baseline';
+import { relativePhrase, trustedBaseline, trustedLastYear } from '../../lib/utils/baseline';
 import { track } from '../../lib/analytics';
 
 // recharts is ~half the initial JS and serves exactly one element inside this
@@ -341,23 +341,13 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ isOpen, onClose, item, allP
             {vsBaseline !== null && item.baseline_price != null && (
               <p className="mt-2 text-xs text-stone">
                 近一個月批發中位約 {item.baseline_price} 元/台斤，今日批發
-                {vsBaseline < 0
-                  ? `低 ${Math.round(Math.abs(vsBaseline))}%`
-                  : vsBaseline > 0
-                    ? `高 ${Math.round(vsBaseline)}%`
-                    : '持平'}
+                {relativePhrase(vsBaseline)}
                 ；卡片徽章與「划算優先」排序以此為準。
               </p>
             )}
             {lastYear !== null && (
               <p className="mt-1 text-xs text-stone">
-                去年此時批發約 {lastYear.price} 元/台斤（今日
-                {lastYear.percent < 0
-                  ? `低 ${Math.round(Math.abs(lastYear.percent))}%`
-                  : lastYear.percent > 0
-                    ? `高 ${Math.round(lastYear.percent)}%`
-                    : '持平'}
-                ）。
+                去年此時批發約 {lastYear.price} 元/台斤（今日{relativePhrase(lastYear.percent)}）。
               </p>
             )}
           </div>

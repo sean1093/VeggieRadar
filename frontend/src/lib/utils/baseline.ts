@@ -25,6 +25,16 @@ export function trustedBaseline(item: ProduceItem): number | null {
 }
 
 /**
+ * 「低 N%」「高 N%」 or 「持平」 for a percentage difference, as the drawer's
+ * comparison sentences say it. Rounded FIRST: −0.4 is 持平, not 「低 0%」.
+ */
+export function relativePhrase(percent: number): string {
+  const rounded = Math.round(Math.abs(percent));
+  if (rounded === 0) return '持平';
+  return percent < 0 ? `低 ${rounded}%` : `高 ${rounded}%`;
+}
+
+/**
  * Today against the same weeks last year (#22 §2), or null when that
  * comparison cannot be trusted or is not there. The same rule as
  * `trustedBaseline`: a day the guard flagged is compared with nothing.
