@@ -13,7 +13,7 @@ const CABBAGE: CropDef = { name: '高麗菜', official: '甘藍', category: '葉
 
 const META: RunMeta = {
   from: '2026-09-01', to: '2026-09-03', minTradeVolume: 200,
-  requests: 4, cacheHits: 0, retries: 0, failures: 0, truncated: [], itemsRequested: 1, partial: false,
+  requests: 4, cacheHits: 0, retries: 0, truncated: [], itemsRequested: 1, partial: false,
 };
 
 function row(date: string, market: string, price: number, qty: number): MoaRow {
@@ -43,6 +43,14 @@ describe('renderReport', () => {
     const md = render([...NORTH_AND_CENTRAL, row('115.09.01', '新竹市', 40, 3000)]);
     expect(md).toContain('1 個市場未對應到區域');
     expect(md).toContain('新竹市');
+    expect(md).not.toContain('✅');
+  });
+
+  it('will not call an empty roster verified', () => {
+    // --days 2 over a holiday: nothing traded, so nothing was checked. A green
+    // check here would assert a verification that never ran.
+    const md = renderReport(META, [], [cropStats(CABBAGE, [])]);
+    expect(md).toContain('等於沒有驗證過');
     expect(md).not.toContain('✅');
   });
 

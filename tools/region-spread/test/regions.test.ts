@@ -30,6 +30,16 @@ describe('regionOf', () => {
     expect(regionOf(' 104 台北二 ')).toBe('北');
   });
 
+  it('keeps a name that is only a code, instead of reducing it to nothing', () => {
+    // Two code-only markets reduced to '' would become one key: the roster
+    // would merge them, and mixChurn would see no change on a day pair where
+    // the whole regional sample was swapped.
+    expect(normalizeMarket('104')).toBe('104');
+    expect(normalizeMarket(' 400 ')).toBe('400');
+    expect(normalizeMarket('104')).not.toBe(normalizeMarket('400'));
+    expect(regionOf('104')).toBe('其他');
+  });
+
   it('maps every table entry to one of the four regions of issue #23', () => {
     for (const [market, region] of Object.entries(REGION_BY_MARKET)) {
       expect(REGIONS, `${market} → ${region}`).toContain(region);

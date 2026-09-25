@@ -77,7 +77,16 @@ export function regionOf(marketName: string | undefined): Region {
   return REGION_BY_MARKET[normalizeMarket(marketName)] ?? '其他';
 }
 
-/** `' 104 台北二 '` → `'台北二'`; anything else is returned trimmed. */
+/**
+ * `' 104 台北二 '` → `'台北二'`; anything else is returned trimmed.
+ *
+ * The code prefix is only stripped when something is left. A value that is
+ * ALL digits is a market identified by its code alone, and reducing it to an
+ * empty string would collapse every such market onto one key — which would
+ * merge distinct markets in the roster and hide a swapped regional sample from
+ * `mixChurn`, whose whole job is to notice that the markets changed.
+ */
 export function normalizeMarket(marketName: string | undefined): string {
-  return String(marketName ?? '').trim().replace(/^\d+\s*/, '');
+  const trimmed = String(marketName ?? '').trim();
+  return trimmed.replace(/^\d+\s*/, '') || trimmed;
 }

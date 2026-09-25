@@ -85,6 +85,9 @@ export type CropStats = {
   viableRegions: number;
 };
 
+/** What an unnamed market is called in the roster, so it cannot hide in a blank. */
+export const UNNAMED_MARKET = '（未具名）';
+
 /** One board item, its fetched rows, and the days the measurement kept. */
 export type MeasuredItem = { def: CropDef; rows: MoaRow[]; days: CropDay[] };
 
@@ -270,8 +273,11 @@ export function marketSightings(measured: MeasuredItem[]): MarketSighting[] {
       // coverage ratio or churn count, so it must not contribute to the share
       // that decides whether those numbers can be trusted either.
       if (!published.has(backend.rocToISO(String(row.TransDate ?? '')))) continue;
-      const name = normalizeMarket(row.MarketName);
-      if (!name) continue;
+      // A row with no market name still trades: `dailySplit` counts it into
+      // the nationwide blend and into 其他. Dropping it here instead would let
+      // unmapped volume sit outside the roster entirely, and section 1 would
+      // print its green check over a day most of whose volume is unplaceable.
+      const name = normalizeMarket(row.MarketName) || UNNAMED_MARKET;
       // The overlapping responses carry the SAME row, field for field, so the
       // price and quantity go into the identity too: a row that differs in any
       // of them is a different transaction and is kept, whatever MOA's

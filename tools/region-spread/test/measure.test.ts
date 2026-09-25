@@ -254,6 +254,19 @@ describe('marketSightings', () => {
     expect(marketSightings(measured(CABBAGE, rows)).map((m) => m.name)).toEqual(['台北一']);
   });
 
+  it('gives an unnamed market a name rather than letting its volume vanish', () => {
+    // `dailySplit` counts a nameless row into the nationwide blend and into
+    // 其他; if the roster dropped it, section 1 could print its green check
+    // over a day most of whose volume is unplaceable.
+    const rows = [
+      { TransDate: '115.09.01', CropName: '甘藍', MarketName: '  ', Avg_Price: 20, Trans_Quantity: 9000 },
+      row('115.09.01', '台北一', 20, 1000),
+    ];
+    const seen = marketSightings(measured(CABBAGE, rows));
+    expect(seen.map((m) => m.region)).toContain('其他');
+    expect(seen.find((m) => m.region === '其他')?.volume).toBe(9000);
+  });
+
   it('surfaces a market the region table has never been confirmed to contain', () => {
     const seen = marketSightings(measured(CABBAGE, [row('115.09.01', '新竹市', 20, 1000)]));
     expect(seen[0].region).toBe('其他');

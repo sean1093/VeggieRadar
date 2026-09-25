@@ -19,7 +19,6 @@ export type RunMeta = {
   requests: number;
   cacheHits: number;
   retries: number;
-  failures: number;
   /** `<root> <ISO date>` per single day MOA truncated; see `FetchStats`. */
   truncated: string[];
   itemsRequested: number;
@@ -55,17 +54,21 @@ function heading(meta: RunMeta, measured: CropStats[], markets: MarketSighting[]
     `| 最長交易日數 | ${days} |`,
     `| 市場 | ${markets.length} |`,
     `| MIN_TRADE_VOLUME | ${meta.minTradeVolume} kg（沿用後端設定） |`,
-    `| MOA 請求 | ${meta.requests}（快取命中 ${meta.cacheHits}、重試 ${meta.retries}、失敗 ${meta.failures}） |`,
+    // No 失敗 column: a failed fetch throws out of the run, so a report that
+    // exists is one where it was always 0 — printing it would suggest the
+    // number could have been anything else.
+    `| MOA 請求 | ${meta.requests}（快取命中 ${meta.cacheHits}、重試 ${meta.retries}） |`,
     // Halving has a floor, so a single day MOA still truncated keeps only its
     // newest rows: a partial market set, which reads exactly like a real
     // regional price difference. It cannot be re-fetched away, so it is stated.
     // These days are DROPPED from the measurement (`dailySplit`), because a
-    // partial market set reads exactly like a regional price difference. What
-    // remains for a reader to know is that they are gone: the item's 交易日 and
-    // every 覆蓋率 denominator are smaller by this much.
+    // partial market set reads exactly like a regional price difference. The
+    // unit is the MOA ROOT, which is what is fetched — and a root can back
+    // more than one board item (花椰菜 → 白花椰菜 and 青花菜), so the label says
+    // root rather than 品項 and the sentence says who it reaches.
     meta.truncated.length
-      ? `| ⚠️ 被截斷的品項×日 | ${meta.truncated.length}：${truncatedList(meta.truncated)} —— 只拿到部分市場，已從第 2–5 節剔除（該品項的交易日與覆蓋率分母相應減少） |`
-      : `| 被截斷的品項×日 | 0 |`,
+      ? `| ⚠️ 被截斷的 root×日 | ${meta.truncated.length}：${truncatedList(meta.truncated)} —— 只拿到部分市場，已從第 2–5 節剔除（用到該 root 的每個品項，交易日與覆蓋率分母都相應減少） |`
+      : `| 被截斷的 root×日 | 0 |`,
     '',
     '所有價格為 `元/台斤`，與看板顯示的單位一致；成交量為公斤。',
     '每日的全台與分區均價都由後端自己的 `selectRows` → `weightedAverage` 算出，',
@@ -91,7 +94,10 @@ function marketSection(markets: MarketSighting[], partial: boolean): string {
   return [
     `## 1. 市場對照表（issue #23 標註待驗證的那張）`,
     '',
-    unmapped.length
+    !markets.length
+      // No roster is not a clean roster: nothing was checked.
+      ? `> ⚠️ 這次沒有抓到任何成交資料，對照表等於沒有驗證過。先確認期間內有交易日（\`--days\` 太短會整段遇到休市）。`
+      : unmapped.length
       ? `> ⚠️ **${unmapped.length} 個市場未對應到區域**（占成交量 ${pct(unmappedShare)}）：${unmapped.map((m) => m.name).join('、')}。\n> 請把它們補進 \`src/regions.ts\` 的 \`REGION_BY_MARKET\` 後重跑（快取已在本機，重跑不再發請求）。`
       : partial
         // A --root run only ever saw the markets those roots traded in, so a

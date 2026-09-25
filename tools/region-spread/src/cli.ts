@@ -103,7 +103,6 @@ async function main(): Promise<void> {
     requests: stats.requests,
     cacheHits: stats.cacheHits,
     retries: stats.retries,
-    failures: stats.failures,
     truncated: [...stats.truncated],
     itemsRequested: items.length,
     partial: only.length > 0,
