@@ -35,9 +35,9 @@ function writeHistory(history) {
  * backfill can genuinely overlap; without the lock, whichever writes last
  * silently discards the other's observations.
  */
-function withHistoryLock(fn) {
+function withHistoryLock(fn, waitMs) {
   var lock = LockService.getScriptLock();
-  lock.waitLock(HISTORY_LOCK_WAIT_MS);
+  lock.waitLock(waitMs || HISTORY_LOCK_WAIT_MS);
   try {
     return fn();
   } finally {
@@ -140,11 +140,26 @@ function applyBaselines(items, history, todayRoc) {
       prices.push(series[j][1]);
     }
     if (prices.length < BASELINE_MIN_DAYS) continue;
-    var base = median(prices);
-    if (!(base > 0)) continue;
-    items[i].baseline_price = round1(base * CATTY_PER_KG);
-    items[i].vs_baseline_percent = round1(((items[i].avg_price - base) / base) * 100);
+    attachComparison(items[i], median(prices), 'baseline_price', 'vs_baseline_percent');
   }
+}
+
+/**
+ * Today's wholesale price against a reference median in 元/公斤: the
+ * reference in 元/台斤 under `priceKey`, today's distance from it under
+ * `pctKey`. One formula for every comparison the card carries — the 28-day
+ * baseline and the same weeks last year — so the drawer's two sentences
+ * cannot round or convert differently. Nothing without a positive reference.
+ */
+function attachComparison(item, base, priceKey, pctKey) {
+  if (!(base > 0)) return;
+  item[priceKey] = round1(base * CATTY_PER_KG);
+  item[pctKey] = percentAgainst(item.avg_price, base);
+}
+
+/** How far `today` is from `base`, both 元/公斤, in percent to one decimal. */
+function percentAgainst(today, base) {
+  return round1(((today - base) / base) * 100);
 }
 
 /** Cheap history overview for diag/backfill responses. */
@@ -169,6 +184,14 @@ function historySummary() {
  * never run inside the Web App response window. `force=1` jumps the lock.
  */
 function handleBackfill(params) {
+  // The long-term archive's backfill (#22 §4) is a different job with its own
+  // state; it shares the action and the admin gate, nothing else.
+  if (params && params.sheet === '1') return handleSheetBackfill(params);
+  if (params && params.sheet) {
+    // Anything else there is a typo for the archive, and falling through to
+    // the rolling seed — and its hour-long queue lock — would be a surprise.
+    return { type: 'backfill', sheet: true, queued: false, message: 'sheet 參數只接受 1' };
+  }
   var cache = CacheService.getScriptCache();
   if (params && params.force) cache.remove(BACKFILL_LOCK_KEY);
   if (cache.get(BACKFILL_LOCK_KEY)) {
@@ -188,10 +211,65 @@ function handleBackfill(params) {
 
 /** One-off trigger target; the lock keeps repeat taps cheap for its full TTL. */
 function backfillHistoryOnce() {
+  var result = null;
   try {
-    backfillHistory();
+    result = backfillHistory();
   } finally {
-    dropTriggers(BACKFILL_ONCE_FN);
+    // The trigger first, and each guarded on its own. Dropping the queue lock
+    // before this trigger is gone leaves a window where a `handleBackfill`
+    // re-locks and installs a new one, which this line then deletes: the
+    // backfill never runs and the hour-long lock blocks every retry. Guarding
+    // both is what keeps either failure from costing the other.
+    try {
+      dropTriggers(BACKFILL_ONCE_FN);
+    } catch (err) {
+      Logger.log('backfillHistoryOnce: trigger not dropped: ' + err);
+    }
+    // A run that merged nothing leaves no queue behind it: the crawl is gone
+    // either way, and making the operator wait out the hour to ask again
+    // would be a penalty for someone else's lock.
+    try {
+      if (!result || !result.merged) CacheService.getScriptCache().remove(BACKFILL_LOCK_KEY);
+    } catch (err) {
+      Logger.log('backfillHistoryOnce: queue lock not cleared: ' + err);
+    }
+  }
+  return result;
+}
+
+/**
+ * Merges the crawled windows into the history under the lock.
+ *
+ * `busy` and `failed` are told apart by whether the body ran at all, because
+ * only the first is worth retrying: a lock someone else holds clears on its
+ * own, and a merge that threw would throw again the same way.
+ * @returns {string} 'merged', 'busy' or 'failed'.
+ */
+function mergeCrawled(crawled) {
+  var ran = false;
+  try {
+    withHistoryLock(function () {
+      ran = true;
+      var history = readHistory();
+      for (var c = 0; c < crawled.length; c++) {
+        var rowsByRoot = crawled[c];
+        for (var i = 0; i < BOARD_ITEMS.length; i++) {
+          var def = BOARD_ITEMS[i];
+          var byDate = groupByTransDate(selectRows(rowsByRoot[def.official], def));
+          Object.keys(byDate).forEach(function (roc) {
+            var day = weightedAverage(byDate[roc]);
+            if (day.volume < MIN_TRADE_VOLUME || !(day.avg > 0)) return;
+            history.items[def.name] = appendObservation(history.items[def.name], roc, round1(day.avg));
+          });
+        }
+      }
+      pruneHistory(history);
+      writeHistory(history);
+    });
+    return 'merged';
+  } catch (err) {
+    Logger.log(ran ? 'mergeCrawled failed: ' + err : 'mergeCrawled: history lock busy: ' + err);
+    return ran ? 'failed' : 'busy';
   }
 }
 
@@ -213,36 +291,36 @@ function backfillHistory() {
     end.setDate(today.getDate() - w * BACKFILL_WINDOW_DAYS);
     var start = new Date(end);
     start.setDate(end.getDate() - (BACKFILL_WINDOW_DAYS - 1));
-    // fetchRootRows retries empty roots once, so one throttled batch cannot
-    // silently strip a slice of roots from the one-time seed.
-    crawled.push(fetchRootRows(roots, dateToROC(start), dateToROC(end)));
+    // Retries empty roots once, so one throttled batch cannot silently strip
+    // a slice of roots from the one-time seed; and refetches what MOA cut from
+    // a root, whose oldest day would otherwise be an average of some markets.
+    // A root still unanswered is simply missing, as it always was: the
+    // 4-hourly refresh tops the window up.
+    //
+    // A cut root gets one more request for what MOA cut, not halving until
+    // whole: this seed crawls every window in ONE execution, and an open-ended
+    // run of refetches could push it past the 6-minute limit and lose the
+    // lot. No older window covers those days either, so dropping them would
+    // leave the baseline a hole until they aged out.
+    var meta = { answered: {}, truncated: {}, unanswered: {} };
+    var rows = fetchRootRows(roots, dateToROC(start), dateToROC(end), meta);
+    Object.keys(meta.truncated).forEach(function (root) {
+      rows[root] = patchTruncated(root, dateToROC(start), rows[root]);
+    });
+    crawled.push(rows);
   }
 
-  withHistoryLock(function () {
-    var history = readHistory();
-    for (var c = 0; c < crawled.length; c++) {
-      var rowsByRoot = crawled[c];
-      for (var i = 0; i < BOARD_ITEMS.length; i++) {
-        var def = BOARD_ITEMS[i];
-        var rows = selectRows(rowsByRoot[def.official], def);
-        var byDate = {};
-        for (var r = 0; r < rows.length; r++) {
-          var dateKey = rows[r].TransDate;
-          if (!dateKey) continue;
-          (byDate[dateKey] = byDate[dateKey] || []).push(rows[r]);
-        }
-        Object.keys(byDate).forEach(function (roc) {
-          var day = weightedAverage(byDate[roc]);
-          if (day.volume < MIN_TRADE_VOLUME || !(day.avg > 0)) return;
-          history.items[def.name] = appendObservation(history.items[def.name], roc, round1(day.avg));
-        });
-      }
-    }
-    pruneHistory(history);
-    writeHistory(history);
-  });
-
+  // Retried once, because losing this lock now costs more than it used to: the
+  // long-term archive (#22) holds the same lock across a Sheets round trip, so
+  // a 30 s wait can genuinely time out — and a thrown timeout here would throw
+  // away a crawl that took minutes, behind a one-hour queue lock that stops
+  // anyone simply asking again.
+  var outcome = mergeCrawled(crawled);
+  if (outcome === 'busy') outcome = mergeCrawled(crawled);
   var summary = historySummary();
-  Logger.log('Backfill complete: ' + summary.items + ' items with history');
+  summary.merged = outcome === 'merged';
+  Logger.log(summary.merged
+    ? 'Backfill complete: ' + summary.items + ' items with history'
+    : 'Backfill merged nothing (' + outcome + ')');
   return summary;
 }

@@ -47,7 +47,10 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string | undefined;
 // out and saw 「暫無趨勢資料」 — their request only warmed the cache for
 // everyone else. Waiting costs nothing visible here: the drawer's prices are
 // already rendered and the chart slot holds its height.
-const BOARD_TIMEOUT_MS = 12_000;
+// Exported so `scripts/probe-verdict.mjs` can be held to it: the probe waits
+// longer than this on purpose, and must not treat an answer a visitor never
+// waited for as proof that visitors are served (`api.timeouts.test.ts`).
+export const BOARD_TIMEOUT_MS = 12_000;
 const SEARCH_TIMEOUT_MS = 15_000;
 const TREND_TIMEOUT_MS = 15_000;
 // The mirror is same-origin static JSON on a CDN, so it either answers in

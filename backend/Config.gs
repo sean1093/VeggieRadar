@@ -27,6 +27,7 @@ var ADMIN_TOKEN_PROP = 'ADMIN_TOKEN';
 
 var MIN_TRADE_VOLUME = 200;      // kg; filters out sparse trades for one item
 var PROBE_MIN_VOLUME = 50000;    // kg; a real island-wide trading day for the probe crop
+var PROBE_ROOT = '甘藍';         // cabbage: year-round, all markets, high volume — the most reliable probe
 // Variety breakdown shown in the item drawer. Only varieties that matter are
 // published: at least two of them, each holding a meaningful slice of the
 // item's traded volume — otherwise the blended average already tells the story.
@@ -45,7 +46,10 @@ var FETCH_BATCH = 13;            // concurrent UrlFetchApp requests; a 70+ burst
 var TREND_CACHE_PREFIX = 'veggie_trend_';
 
 var TREND_CACHE_TTL = 60 * 60;   // seconds; bounds staleness once closing prices publish
-var TREND_MAX_DAYS = 14;         // MOA caps one response near 1000 rows; 14 days stays under it
+var TREND_UNANSWERED_TTL = 2 * 60; // seconds; see `handleTrend`
+// MOA caps one response near 1000 rows. 14 days of most crops stays under it;
+// when a broad term does not, `handleTrend` leaves the cut oldest point out.
+var TREND_MAX_DAYS = 14;
 var TRADE_DATES_CACHE_KEY = 'veggie_trade_dates';
 
 var TRADE_DATES_TTL = 60 * 60;   // seconds; saves up to 16 probe fetches per search miss
@@ -74,7 +78,7 @@ var BOARD_PROP_PREFIX = 'veggie_board_v2_chunk_';
 
 var BOARD_PROP_COUNT = 'veggie_board_v2_chunks';
 
-var PROP_CHUNK_SIZE = 8000;
+var PROP_CHUNK_SIZE = 8000; // UTF-8 bytes, under a property's 9 KB
 
 // Freshness. `date`/`roc_date` is the trading date of the prices — it legitimately
 // stays put over weekends, holidays and typhoon closures, when MOA publishes only
@@ -131,6 +135,180 @@ var ALERT_STREAK_PROP = 'veggie_alert_streak';
 var ALERT_SENT_PROP = 'veggie_alert_sent_at';
 
 var ALERT_ACTIVE_PROP = 'veggie_alert_active';
+
+// Why the last alert mail did not go out, as a `classifyMailError` CATEGORY —
+// never the raw text, which can quote the recipient address. Opening an
+// incident no longer depends on being able to send one (an unset ALERT_EMAIL
+// used to leave the backend knowing it was broken and telling nobody, `diag`
+// included), so this is what says the mailbox is silent on purpose.
+var ALERT_UNSENT_PROP = 'veggie_alert_unsent_reason';
+
+// Mirror deploys (#68). The published mirror is only as fresh as the last
+// Pages deploy, and asking a cron for one is not the same as getting one: over
+// 222 h a `20 */2 * * *` schedule produced a median gap of 4.5 h, and hourly
+// over the next 137 h produced 4.64 h — the ticks are throttled, not dropped.
+// `repository_dispatch` is API-triggered and not throttled that way, so the
+// backend asks for the deploy itself once a crawl lands.
+//
+// The token is a fine-grained PAT scoped to this repository with
+// `contents: write`, kept in Script Properties like every other secret. Unset,
+// the whole thing is skipped and the schedule remains the fallback.
+var GH_DISPATCH_TOKEN_PROP = 'GH_DISPATCH_TOKEN';
+var GH_DISPATCH_EVENT = 'board-crawled';
+var GH_DISPATCH_URL = 'https://api.github.com/repos/sean1093/VeggieRadar/dispatches';
+// The last attempt, as "<ISO> <outcome>": what `diag` reports, including the
+// throttled ones, since those are the crawls the mirror does not carry.
+var GH_DISPATCH_PROP = 'veggie_mirror_dispatch';
+// The last ACCEPTED dispatch, which is the only kind that costs a Pages
+// deploy, and so the only kind that arms the floor below. Separate from the
+// record above on purpose: writing every attempt into the floor's own clock
+// would let a rejected attempt suppress the retry that recovers from it, and
+// a throttled one extend the floor for as long as something kept crawling.
+var GH_DISPATCH_OK_PROP = 'veggie_mirror_dispatch_ok';
+// `?action=warm` is public and releases its lock when the crawl ends, so a
+// visitor can drive crawls every few minutes; a Pages deploy is a minute of CI
+// against a soft limit of ten an hour. A crawl inside this window is not
+// mirrored until the next one, and its board differs from the mirrored one by
+// less than the window.
+var GH_DISPATCH_MIN_INTERVAL_MS = 30 * 60 * 1000;
+// The other half of that floor. A rejection costs no deploy, so the next crawl
+// must be free to retry it — but an expired PAT beside a public `?action=warm`
+// would otherwise POST a doomed request every few minutes for as long as
+// anyone kept crawling, and get the token secondary-rate-limited for it.
+var GH_DISPATCH_FAIL_BACKOFF_MS = 5 * 60 * 1000;
+
+// Long-term price history in a Google Sheet (`SheetHistory.gs`, #22). The
+// ScriptProperties history is a rolling 28 trading days by design — 500 KB is
+// what it gets — so 「比去年同期」 and a per-variety baseline need somewhere
+// else to be measured from. The spreadsheet is the deployer's own, named by
+// this property; unset, the whole thing is off and nothing changes.
+var HISTORY_SHEET_ID_PROP = 'HISTORY_SHEET_ID';
+// The last trading day archived, as "<ISO date> <generated_at>". The date says
+// whether that day is already written; the timestamp bounds how often a
+// revisit is worth looking at, which is all the clock decides — what replaces
+// a day is the rows differing (`archiveDay`).
+var SHEET_LAST_WRITE_PROP = 'veggie_sheet_last_write';
+// How often a crawl of the SAME trading day is worth comparing against what
+// was archived. MOA completes a day's closing prices through the evening, so
+// a later crawl can carry better numbers; inside this window it is the
+// 4-hourly refresh revisiting the same day, and is skipped without a read.
+var SHEET_CORRECTION_MS = 6 * 60 * 60 * 1000;
+
+// Backfilling the archive from MOA (#22 §4). A year is ~40 range windows and
+// one Apps Script execution stops at 6 minutes, so the backfill is a chain of
+// one-off triggers, one window each, walking backwards from the day before the
+// board's trading date. The job — its reach, where it has got to and what it
+// wrote — lives in one property, which is what lets a chain that died (a
+// quota, a deploy, a trigger that never fired) be resumed rather than redone.
+var SHEET_BACKFILL_FN = 'sheetBackfillStep';
+var SHEET_BACKFILL_PROP = 'veggie_sheet_backfill';
+// The id of a job the operator cancelled. Its own property, because the chain
+// rewrites the job as it goes and could write "running" straight back over a
+// cancel that landed between its read and its write; nothing but a cancel
+// ever writes this one.
+var SHEET_BACKFILL_CANCEL_PROP = 'veggie_sheet_backfill_cancel';
+// Leading days fetched only to be the PREVIOUS trading day of the first day
+// written: `validateBoard`'s rule (e) judges a day against the one before it,
+// and without them the first day of every window would go unjudged. Taken out
+// of the same `BACKFILL_WINDOW_DAYS` request, which is what keeps it under
+// MOA's row cap: each link writes the other 9. A closure longer than this
+// (春節 runs 4–6 days) is handled by deferring that first day to the next
+// window, where it is the newest day and has the whole window behind it.
+var SHEET_BACKFILL_CONTEXT_DAYS = 3;
+var SHEET_BACKFILL_DEFAULT_MONTHS = 12;
+var SHEET_BACKFILL_MAX_MONTHS = 24;
+// Consecutive failed windows before the chain stops itself. A window that
+// failed is retried by the next link, but one that keeps failing — a revoked
+// share, a spent quota, a window too slow for the 6-minute limit — must not
+// loop a crawl every few seconds for ever.
+var SHEET_BACKFILL_MAX_FAILURES = 3;
+// A running job that has not moved for this long has no chain behind it: one
+// link runs for at most 6 minutes and queues the next within minutes.
+var SHEET_BACKFILL_STALL_MS = 15 * 60 * 1000;
+// How long a link can possibly still be running: the execution limit, plus a
+// margin. A job whose last link started longer ago than this has nothing in
+// flight that could still write it back.
+var SHEET_BACKFILL_LINK_MAX_MS = 7 * 60 * 1000;
+// The wait before retrying a failed window, times the failures so far. A
+// per-IP throttle lasts minutes; retrying after a second would spend every
+// retry inside it and stop the job over something that clears on its own.
+// Kept well under the stall window, which it must not look like.
+var SHEET_BACKFILL_RETRY_MS = 3 * 60 * 1000;
+// A window MOA keeps answering the same way is not retried for ever. Up to
+// this many roots refused every time — the probe never among them — is a
+// refusal of those crops, and the window is written without them, on record.
+// More is a throttle, which drops a whole batch and clears on its own, and
+// keeps failing the window instead.
+var SHEET_BACKFILL_MAX_REFUSED = 2;
+// How many times MOA must answer a window the same way before that answer is
+// acted on (a gap, or a window written without a refused crop). Its own knob:
+// tolerating flakier links must not also mean crawling a hole more times.
+var SHEET_BACKFILL_SETTLE_ANSWERS = 3;
+// Days a job moved past without writing, kept so coverage can leave them out.
+// Past this the job stops claiming coverage (`addHoles`), rather than forget.
+var SHEET_BACKFILL_MAX_HOLES = 40;
+// The dates a year tab already holds, cached for the length of a job: its
+// range never meets a date the live path writes, so after the first read the
+// only dates that can appear in it are its own, which it adds as it goes.
+var SHEET_PRESENT_CACHE_PREFIX = 'veggie_sheet_present_';
+var SHEET_PRESENT_CACHE_TTL = 6 * 60 * 60; // seconds; the platform maximum
+var SHEET_FROZEN_CACHE_PREFIX = 'veggie_sheet_frozen_';
+
+// 「比去年同期」 (#22 §2): each item against its own price in the same weeks a
+// year earlier, from the archive. The median over the trading days within
+// this many calendar days either side of the date a year back — a window, not
+// the one day, because a single day a year ago is one market's weather.
+var YOY_WINDOW_DAYS = 7;
+var YOY_MIN_SIDE_DAYS = 2;       // archived days needed on EACH side of the day; fewer → nothing published
+// Computed once per trading date and kept here, so a refresh reads the Sheet
+// once a day rather than every four hours: "<roc date>" plus the medians.
+var YOY_PROP = 'veggie_yoy';
+// How long a read is good for. A day, normally — and a long closure keeps one
+// trading date for days, so this, not the date, is what makes it read again.
+// Six hours while a backfill is running, which may be adding to the window.
+var YOY_KEEP_MS = 24 * 60 * 60 * 1000;
+var YOY_SOON_MS = 6 * 60 * 60 * 1000; // …while a backfill may add to the window, or the tab needs re-sorting
+// Kept medians older than this many days are not applied at all: the window
+// they describe has moved too far from the board's date.
+var YOY_KEPT_MAX_DAYS = 7;
+// Rows of other days that may sit between runs read in one call.
+var YOY_MERGE_SLACK_ROWS = 400;
+// Reads of a tab, after runs close together are merged, past which a reader
+// takes it as sorted by another column (`scattered`) and does not read it:
+// in date order a span is a few blocks — the live days, a backfill's windows,
+// holes filled later — and sorted by item, a block an item.
+var ARCHIVE_MAX_READS = 20;
+// The year-ago read is the refresh's last step; past this far into the run it
+// is left to the next refresh, well inside the 6-minute execution limit.
+var YOY_START_BY_MS = 4 * 60 * 1000;
+// A read left undone — `late`, `failed`, or read and `not kept` — as JSON
+// with its sheet and reason, for `diag` (`noteUnread`); cleared once a read
+// is kept.
+var YOY_SKIPPED_PROP = 'veggie_yoy_skipped_at';
+// The archive's readers wait this long for the history lock, not the 30 s a
+// write does: their read is optional — a busy lock costs a comparison until
+// the next refresh — and two of them run back to back at the end of one.
+var READER_LOCK_WAIT_MS = 5 * 1000;
+var ISO_DAY = /^\d{4}-\d{2}-\d{2}$/; // what a date cell in the archive reads as
+
+// Per-variety baselines (#22 §3): each variety's own median over the item's
+// baseline days — its `BASELINE_WINDOW` most recent archived trading days
+// within `BASELINE_HORIZON_DAYS` (counted back from the board's trading date:
+// see `varietySpan`) — where it was listed on `BASELINE_MIN_DAYS` and
+// `VARIETY_MIN_COVERAGE` of them at least (`varietyMedians`). Chunked: ~100 items with up to four
+// varieties each is more than one 9 KB property holds.
+var VARIETY_BASE_PREFIX = 'veggie_variety_base_chunk_';
+var VARIETY_BASE_COUNT = 'veggie_variety_base_chunks';
+// The share of the item's baseline days a variety must have been listed on
+// to get a median of its own: rows exist only on days the board broke the
+// item down, and a variety's few contested days are not its month.
+var VARIETY_MIN_COVERAGE = 0.5;
+// The same, for the variety read.
+var VARIETY_BASE_SKIPPED_PROP = 'veggie_variety_base_skipped_at';
+// What the archive holds, as the status request reports it. Counting it reads
+// column A of every year tab, and an operator watching a job polls.
+var SHEET_SUMMARY_CACHE_KEY = 'veggie_sheet_summary';
+var SHEET_SUMMARY_CACHE_TTL = 10 * 60; // seconds
 
 // Plausibility guard (`Validate.gs`). The refresh used to reject exactly one
 // thing — an EMPTY board — so a throttled crawl or a MOA unit change would

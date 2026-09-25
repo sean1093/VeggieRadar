@@ -61,15 +61,21 @@ const wait = (ms) => new Promise((done) => setTimeout(done, ms));
  * deadline belong to `get` — wrap it.
  */
 export async function withRetry(get, url, { attempts = 3, backoffMs = 2_000, sleep = wait, transient = isTransient } = {}) {
+  // `elapsedMs` spans every attempt and every wait between them, where `ms`
+  // is only the last request. A caller reporting "answered in 0.8 s after 4
+  // attempts" from `ms` alone would describe 75 s of waiting as under a
+  // second, and a caller comparing it with a browser's deadline would be
+  // comparing the wrong number.
+  const started = Date.now();
   let res;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     res = await get(url);
-    if (!transient(res)) return { ...res, attempts: attempt };
+    if (!transient(res)) return { ...res, attempts: attempt, elapsedMs: Date.now() - started };
     // Linear, not exponential: a cold start takes seconds, and the probe runs
     // on a schedule where a bounded wait is cheaper than a false alarm.
     if (attempt < attempts) await sleep(backoffMs * attempt);
   }
-  return { ...res, attempts };
+  return { ...res, attempts, elapsedMs: Date.now() - started };
 }
 
 /** `" after 3 attempts"`, or nothing when the first attempt settled it. */
@@ -85,15 +91,24 @@ export function attemptSuffix(res) {
  * request must not hold a scheduled job open.
  */
 export async function get(url, { timeoutMs = 30_000, userAgent = 'VeggieRadar-fetch-retry' } = {}) {
+  const started = Date.now();
   try {
     const response = await fetch(url, {
       signal: AbortSignal.timeout(timeoutMs),
       headers: { 'user-agent': userAgent },
     });
-    return { status: response.status, body: await response.text() };
+    // `ms` is how long the answer took. A caller that gives the backend a
+    // longer deadline than the browser does needs it: an answer this probe
+    // waited 25 s for is one every visitor already timed out on.
+    return { status: response.status, body: await response.text(), ms: Date.now() - started };
   } catch (error) {
     // A deadline surfaces as TimeoutError, DNS/TLS failures as TypeError.
-    return { status: 0, body: '', error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) };
+    return {
+      status: 0,
+      body: '',
+      ms: Date.now() - started,
+      error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+    };
   }
 }
 

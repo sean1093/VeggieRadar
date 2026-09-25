@@ -13,6 +13,22 @@ updates:
       # reviewed on its own.
       minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # TypeScript past typescript-eslint's peer bound is held, and not by
+      # anything in this repo. Under TS 7 the package THROWS on import —
+      # `Error: typescript-eslint does not support TS 7.0` — so the lint job
+      # cannot run at all, and its peer range is still `>=4.8.4 <6.1.0` on both
+      # latest (8.70.1) and canary (8.70.2-alpha.5). Everything else is ready:
+      # the typecheck, all 616 tests and the production build pass on 7.0.2.
+      #
+      # Without this, every release past that bound reopens a PR that cannot
+      # merge and spends a CI run proving it. The bound mirrors the peer range
+      # rather than naming TS 7, so a stable 6.0 would still flow through.
+      #
+      # An ignore is silent by design: #83 is the reminder, and the check is
+      # `npm view typescript-eslint peerDependencies.typescript`.
+      - dependency-name: typescript
+        versions: [">=6.1.0"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

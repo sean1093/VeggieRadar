@@ -25,7 +25,10 @@
  *
  * @param {Object} next board from `buildBoard`.
  * @param {Object|null} prev the stored board, parsed. Null on first deploy —
- *   then only the absolute floor can fire, since every other rule compares.
+ *   then the rules that compare against it stop firing (a's relative bound,
+ *   b, c, d) and the rules that read the card itself still do: a's absolute
+ *   floor, and the item-level e and f, which judge today's numbers against
+ *   what `aggregateGroup` recorded about the previous trading day.
  * @returns {{ok: boolean, reasons: string[], suspects: string[]}} `reasons`
  *   lists EVERY triggered board-level rule in English (it travels to `diag`
  *   and into the failure mail); `suspects` holds item display names.
@@ -96,18 +99,20 @@ function validateBoard(next, prev) {
   var suspects = [];
   for (var k = 0; k < items.length; k++) {
     var it = items[k];
-    var before = prevByName[it.name];
     var suspect = false;
 
     // (e) A huge move on collapsed volume is one outlier transaction carrying
-    // the whole average, not a price. The issue proposed comparing against the
-    // item's HISTORY median volume, but the history store keeps prices only
-    // (`[[roc, price], ...]`); the previous board already carries yesterday's
-    // volume, so it is used instead — adding volume to the store would change
-    // its format for a signal we already have.
+    // the whole average, not a price. The comparison is against the PREVIOUS
+    // TRADING DAY, which the card carries as the transient `prev_volume`
+    // (`aggregateGroup`) — not against the stored board, which is only the
+    // previous trading day on the FIRST refresh of a day. On the second the
+    // stored board is that same morning, its volume is today's, the rule
+    // could not fire, and an item flagged at 08:00 was published unflagged at
+    // 12:00 with its badges and its place in 划算優先 restored. Absent when
+    // the crop did not trade yesterday, and then there is nothing to compare.
     if (Math.abs(it.change_percent || 0) > SUSPECT_CHANGE_PERCENT &&
-      before && before.trade_volume > 0 &&
-      it.trade_volume < SUSPECT_VOLUME_RATIO * before.trade_volume) {
+      it.prev_volume > 0 &&
+      it.trade_volume < SUSPECT_VOLUME_RATIO * it.prev_volume) {
       suspect = true;
     }
 

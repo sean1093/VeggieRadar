@@ -17,7 +17,8 @@
  *   - `doGet?action=getTrend&cropName=<name>&days=7` returns a price trend,
  *     served from a shared cache and crawled with ONE range query.
  *   - `doGet?action=warm` queues a rebuild and returns immediately.
- *   - `doGet?action=backfill` queues a one-time history seed for baselines.
+ *   - `doGet?action=backfill` queues a one-time history seed for baselines;
+ *     `&sheet=1&months=N` backfills the long-term archive instead.
  *   - `doGet?action=diag` reports board freshness and trigger state.
  *
  * Data source: Taiwan MOA wholesale market transactions (open data, no key required).
@@ -155,10 +156,11 @@ function handleWarm(params) {
 function handleDiag(full, props) {
   props = props || PropertiesService.getScriptProperties().getProperties();
   var handlers = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
+  var board = boardSummary();
   return {
     type: 'diag',
     now: new Date().toISOString(),
-    board: boardSummary(),
+    board: board,
     board_items_configured: BOARD_ITEMS.length,
     triggers: handlers,
     refresh_queued: !!CacheService.getScriptCache().get(REFRESH_LOCK_KEY),
@@ -168,16 +170,65 @@ function handleDiag(full, props) {
     // our own rule text and our own item names — never platform or MOA text.
     last_validation: parseValidation(props[LAST_VALIDATION_PROP]),
     history: historySummary(),
+    // The long archive (#22), from the properties alone — never a read of the
+    // Sheet itself. `diag` is public and unauthenticated, and a spreadsheet
+    // read here would let anyone spend the deployment's Sheets quota.
+    sheet_history: {
+      configured: !!props[HISTORY_SHEET_ID_PROP],
+      last_write: parseSheetWrite(props[SHEET_LAST_WRITE_PROP]),
+      // The MOA backfill (§4), as progress: where it has got to, not why it
+      // last failed.
+      backfill: publicBackfill(parseSheetBackfill(props[SHEET_BACKFILL_PROP])),
+      // The year-ago reference (§2) the board is being compared with: for
+      // which trading date, and how many items it covers.
+      year_ago: publicYearAgo(props[YOY_PROP], props[HISTORY_SHEET_ID_PROP], props[YOY_SKIPPED_PROP],
+        (board || {}).roc_date, props[SHEET_BACKFILL_PROP]),
+      // Each variety's own 28-day median (§3): for which trading date, and
+      // how many items and varieties it covers.
+      variety_baseline: publicVarietyBaselines(props, (board || {}).roc_date),
+    },
+    // Whether the mirror is being republished by the crawl or left to the
+    // fallback cron: an expired PAT would 401 on every refresh and nothing
+    // else here would say so. Outcome and time only, never the token.
+    mirror_dispatch: parseDispatch(props[GH_DISPATCH_PROP], props[GH_DISPATCH_OK_PROP]),
     // Alert state, so a silent mailbox can be told apart from a silent
     // pipeline. The recipient address is deliberately not exposed — diag is a
     // public endpoint.
     alert: {
       failure_streak: parseInt(props[ALERT_STREAK_PROP] || '0', 10) || 0,
       incident_open: props[ALERT_ACTIVE_PROP] === '1',
-      last_sent: props[ALERT_SENT_PROP] || null,
+      // When the incident window armed — an ATTEMPT, not a delivery: the
+      // incident opens whether or not the mail could go out, so calling this
+      // `last_sent` would claim one next to `recipient_configured: false`.
+      last_attempt: props[ALERT_SENT_PROP] || null,
       // Whether a mail could go anywhere at all — the address itself stays out.
       recipient_configured: !!props[ALERT_EMAIL_PROP],
+      // Why the last alert mail did not go out, as a category. An incident now
+      // opens whether or not anyone could be told about it, so this is what
+      // says the mailbox is silent and roughly what to fix.
+      last_send_failure: props[ALERT_UNSENT_PROP] || null,
     },
+  };
+}
+
+/**
+ * `GH_DISPATCH_PROP` is stored as `<ISO timestamp> <outcome>`; null until the
+ * first attempt, which is also what a deployment with no token shows forever.
+ */
+function parseDispatch(value, lastOk) {
+  // A missing record beside a present `last_ok` is the partial write the two
+  // keys allow — the floor's clock is written first, deliberately. Reporting
+  // null there would say "never attempted" about a mirror that is deploying.
+  if (!value) return lastOk ? { at: null, outcome: 'unknown', last_ok: lastOk } : null;
+  var space = value.indexOf(' ');
+  return {
+    at: space === -1 ? value : value.substring(0, space),
+    outcome: space === -1 ? 'unknown' : value.substring(space + 1),
+    // When the mirror was last actually asked to publish. The outcome above
+    // cannot answer that on its own: under a crawl every few minutes it reads
+    // `throttled` almost always, which says the newest board is not the
+    // published one but not how old the published one is.
+    last_ok: lastOk || null
   };
 }
 

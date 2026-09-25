@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Header from './components/Header/Header';
 import BoardCaption from './components/BoardCaption/BoardCaption';
 import ProduceList from './components/ProduceGrid/ProduceList';
@@ -9,6 +9,7 @@ import ErrorMessage from './components/ErrorMessage/ErrorMessage';
 import { boardItems, useBoard } from './hooks/useBoard';
 import { itemsFor, useSearch, type SearchStatus } from './hooks/useSearch';
 import { useBoardView } from './hooks/useBoardView';
+import { useUrlState } from './lib/urlState';
 import { useWatchlist } from './hooks/useWatchlist';
 import type { ProduceItem } from './types/produce';
 import './App.css';
@@ -32,12 +33,56 @@ function missSuggestion(query: string, status: SearchStatus): string {
  * has to be spelled out here.
  */
 function App() {
-  const { status, freshness, reload } = useBoard();
+  const { status, freshness, reload, settled } = useBoard();
   const board = boardItems(status);
-  const { query, status: searchStatus, search: runQuery, preview, clear } = useSearch(board);
+  const { query, status: searchStatus, outcome, search: runQuery, preview, cancelPreview, clear } = useSearch(board);
   const watchlist = useWatchlist();
-  const view = useBoardView(itemsFor(searchStatus, board), watchlist, board);
+  // Read straight off the URL rather than from `view`, which does not exist
+  // yet and which this feeds. A query in the URL that the search has not
+  // answered means the board view must not yet call a linked item missing:
+  // `#/i/<name>?q=<name>` is what a shared live-search result looks like, and
+  // the crop it names is on nobody's board by definition.
+  const url = useUrlState();
+  const { query: urlQuery, item: urlItem } = url;
+  // Whether the link's own question is still open. Read off `outcome`, the
+  // backend's raw verdict, rather than off `searchStatus`: a board that
+  // substring-matches the query masks a busy backend as a local hit, and that
+  // mask would read as an answer nobody gave.
+  //
+  //   - the hook has not taken the URL's query yet, or
+  //   - it holds the word but has not asked it — a word typed while the board
+  //     was still loading arrives through the debounced preview, which never
+  //     costs a request, and the adoption below is what asks, or
+  //   - it is in flight, or
+  //   - the backend was busy, which is not an answer about this crop.
+  //
+  // So: pending until the hook has actually answered *this* word. Calling an
+  // idle phase an answer dismissed the drawer one commit before the request
+  // that justifies it was even issued — `useBoardView`'s effects run first.
+  const answered = outcome.kind === 'local' || outcome.kind === 'remote' || outcome.kind === 'not_found';
+  const searchPending = urlItem !== null && urlQuery !== '' && !(answered && query === urlQuery);
+  const view = useBoardView(itemsFor(searchStatus, board), watchlist, board, searchPending);
+  // Every run of a query the URL owns carries the card the URL is asking for:
+  // the first adoption, and equally the retry after a busy backend. Dropping
+  // it on the retry let the board's substring match settle the query and the
+  // linked card vanish — the failure mode, one button later.
+  // …but only for a card the board cannot produce on its own. Requiring a
+  // name the board already carries skips the local short-circuit and spends a
+  // backend request on a query the board answers offline — and if that request
+  // fails, takes the list down with it.
+  const runLinkedQuery = useCallback(
+    (q: string) => {
+      // Required only when this run is the link's own question: the same query
+      // the URL carries, for a card the board cannot produce itself. A new
+      // word is the visitor's question and takes the board's short-circuit;
+      // requiring a name there would spend a request the board answers free.
+      const needed = urlItem !== null && q.trim() === urlQuery && !board.some((it) => it.name === urlItem);
+      runQuery(q, needed ? urlItem : undefined);
+    },
+    [runQuery, urlItem, urlQuery, board],
+  );
   const searching = searchStatus.kind === 'searching';
+
   const toggleWatch = (item: ProduceItem) => watchlist.toggle(item.official_name);
 
   // The URL's query runs itself — on a shared `?q=` and on back/forward alike —
@@ -50,6 +95,47 @@ function App() {
   // after a submit it re-applied the previous query while the box showed the
   // new one. Each distinct URL query is therefore adopted exactly once.
   const adoptedQuery = useRef<string | null>(null);
+  // Set while the hook has been asked for the URL's query and has not taken it
+  // yet. Both effects run in the same commit, so without this the mirror below
+  // sees the *pre-adoption* `query` — an empty string on a first load — reads
+  // it as a word the visitor settled on, and publishes it over the very link
+  // being adopted. Anything the visitor does cancels the adoption.
+  const adopting = useRef(false);
+  // The word the box last reported, or null until the visitor touches it. It
+  // only ever suppresses the *first* adoption: a cold board can land after
+  // they have started typing, and the URL's query must not overwrite a word
+  // in progress. Every later change of the URL — the back key, a hash typed
+  // in, another link — is a navigation they asked for and is adopted normally.
+  //
+  // The word rather than a flag, and this word rather than `query`: `query`
+  // is what the 300 ms debounce has settled, so mid-word it still holds the
+  // *previous* one. Comparing that let a board landing inside the debounce
+  // window adopt over characters already on screen and erase them.
+  const typed = useRef<string | null>(null);
+  // The word the *URL* is asking the box to show. Updated only where an
+  // external navigation is detected below — a link, the back key, a hash typed
+  // in — never from the box's own word coming back through the mirror. Keying
+  // the box on `view.linkedQuery` instead let a stale echo rewind a character
+  // that landed between the debounce firing and React flushing it.
+  const [box, setBox] = useState({ word: url.query, seed: 0 });
+  // Put a word in the box and mean it. Bumping the counter is what makes the
+  // header take it, so the same word can be re-imposed — which is exactly what
+  // a card tapped mid-word needs.
+  const showInBox = useCallback((word: string) => setBox((b) => ({ word, seed: b.seed + 1 })), []);
+
+  // Tapping a card answers the board as it stands. A word still in the 300 ms
+  // debounce would settle afterwards, publish itself beside the card's item
+  // and leave `#/i/枇杷?q=高` — a link whose query can never find its own
+  // card. So the pending word is dropped and the box is put back to the query
+  // that is actually on screen.
+  const openCard = useCallback(
+    (item: ProduceItem) => {
+      cancelPreview();
+      showInBox(urlQuery);
+      view.select(item);
+    },
+    [cancelPreview, showInBox, urlQuery, view],
+  );
   useEffect(() => {
     if (!board.length) return;
     if (adoptedQuery.current === view.linkedQuery) return;
@@ -58,8 +144,32 @@ function App() {
     // A first load carrying no `?q=` has nothing to restore, and running the
     // empty query here would discard a word typed while the board arrived.
     if (firstAdoption && !view.linkedQuery) return;
-    if (view.linkedQuery !== query) runQuery(view.linkedQuery);
-  }, [board.length, view.linkedQuery, query, runQuery]);
+    // Marked adopted above but not run: the mirror below then publishes what
+    // the visitor typed, so the URL and the caption follow the box instead of
+    // the two disagreeing for the rest of the session.
+    //
+    // Only when their word is a different question. Someone who types the
+    // link's own query while the board is still cold is asking for the very
+    // thing the link asks for, and skipping there dropped the card without so
+    // much as a request.
+    if (firstAdoption && typed.current !== null && typed.current.trim() !== view.linkedQuery) return;
+    showInBox(view.linkedQuery);
+    // The URL's item is passed as the name the answer has to contain: a link
+    // to a crop off the board must not be settled by a local substring match
+    // on some other crop that happens to be on it (`useSearch`).
+    //
+    // A request is owed when the hook holds a different question, and equally
+    // when it holds the same word but never asked it: a word typed while the
+    // board was still loading reaches the hook through the debounced preview,
+    // which by design never costs a request. Without the second half, someone
+    // who types the link's own query before the board lands gets 今日無交易資料
+    // for the very card the link names — and not one call to the backend.
+    const unanswered = urlItem !== null && !board.some((it) => it.name === urlItem);
+    if (view.linkedQuery !== query || unanswered) {
+      adopting.current = true;
+      runLinkedQuery(view.linkedQuery);
+    }
+  }, [board, urlItem, view.linkedQuery, query, runLinkedQuery, showInBox]);
 
   // …and the settled word goes back the other way. `query` only moves once the
   // typing debounce has settled, so this publishes one word rather than one
@@ -73,8 +183,15 @@ function App() {
   const { applyQuery } = view;
   useEffect(() => {
     if (adoptedQuery.current === null) return; // nothing adopted yet: the board is still arriving
-    if (query === view.linkedQuery) return;
+    if (query === view.linkedQuery) {
+      adopting.current = false; // the hook has caught up; the box owns the URL again
+      return;
+    }
+    if (adopting.current) return; // mid-adoption: `query` is the value being replaced
     adoptedQuery.current = query;
+    // Recorded, not imposed: the box already holds this word. It matters for
+    // what a later navigation restores, and for what a tapped card puts back.
+    setBox((b) => ({ ...b, word: query }));
     applyQuery(query);
   }, [query, view.linkedQuery, applyQuery]);
 
@@ -89,9 +206,11 @@ function App() {
           widens the board back to 全部, writes the query to the URL and asks
           the backend. */}
       <Header
-        onSearch={(q) => { view.applyQuery(q); runQuery(q); }}
-        onQueryChange={preview}
-        onClear={() => { view.applyQuery(''); clear(); }}
+        onSearch={(q) => { adopting.current = false; typed.current = q; view.applyQuery(q); runLinkedQuery(q); }}
+        onQueryChange={(q) => { adopting.current = false; typed.current = q; preview(q); }}
+        onClear={() => { adopting.current = false; typed.current = ''; view.applyQuery(''); clear(); }}
+        initialQuery={box.word}
+        seed={box.seed}
         searching={searching}
       />
 
@@ -109,6 +228,19 @@ function App() {
               searching={searching}
             />
             {view.notice && <p role="status" className="-mt-4 pb-5 text-xs text-clay">{view.notice}</p>}
+
+            {/* A backend too busy to answer, behind a board that matched the
+                query anyway. The rows stay — they are prices the visitor can
+                read — and this is what says the card a link asked for is not
+                among them, with the one button that can still fetch it. */}
+            {outcome.kind === 'transient' && searchStatus.kind === 'local' && (
+              <p role="status" className="-mt-4 pb-5 text-xs text-clay">
+                服務忙碌中，部分結果可能未顯示。
+                <button onClick={() => runLinkedQuery(query)} className="pl-2 underline hover:text-ink">
+                  重試
+                </button>
+              </p>
+            )}
 
             {view.filterOptions.length > 1 && (
               <div className="pb-5">
@@ -133,20 +265,20 @@ function App() {
                 so a query submitted during the first paint can be answered
                 before the board itself arrives. */}
             {status.kind === 'loading' && view.visibleItems.length === 0 && (
-              <ProduceList items={[]} loading onCardClick={view.select} />
+              <ProduceList items={[]} loading onCardClick={openCard} />
             )}
 
             {view.visibleItems.length > 0 && (
               <ProduceList
                 items={view.visibleItems}
-                onCardClick={view.select}
+                onCardClick={openCard}
                 isWatched={watchlist.isWatched}
                 onToggleWatch={toggleWatch}
               />
             )}
 
             {searchStatus.kind === 'transient' && (
-              <ErrorMessage error={searchStatus.message} query={query} onRetry={() => runQuery(query)} />
+              <ErrorMessage error={searchStatus.message} query={query} onRetry={() => runLinkedQuery(query)} />
             )}
 
             {status.kind !== 'loading' &&
@@ -170,6 +302,8 @@ function App() {
           allProduceItems={board}
           watched={watchlist.isWatched(view.selectedItem.official_name)}
           onToggleWatch={toggleWatch}
+          shareQuery={view.shareQuery}
+          boardSettled={settled}
         />
       )}
     </div>

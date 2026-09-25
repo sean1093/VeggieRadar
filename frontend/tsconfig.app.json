@@ -16,8 +16,9 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
-    /* Path Mapping */
-    "baseUrl": ".",
+    /* Path Mapping. No `baseUrl`: `paths` resolves relative to this file
+       without it, which is how TypeScript 7 requires it written — and is
+       equally correct on the 5.x we are on (#83). */
     "paths": {
       "@/*": ["./src/*"]
     },

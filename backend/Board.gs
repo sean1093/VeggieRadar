@@ -81,15 +81,12 @@ function buildBoard() {
   var today = fetchRootRows(roots, dates.latest);
   var prev = dates.prev ? fetchRootRows(roots, dates.prev) : {};
 
-  var items = [];
-  for (var i = 0; i < BOARD_ITEMS.length; i++) {
-    var def = BOARD_ITEMS[i];
-    var todayRows = selectRows(today[def.official], def);
-    if (!todayRows.length) continue;
-    var card = aggregateGroup(def, todayRows, selectRows(prev[def.official], def));
-    if (card) items.push(card);
-  }
+  var items = boardCards(today, prev);
   applyBaselines(items, readHistory(), dates.latest);
+  // The medians kept from the last read: a Sheets read has no place before
+  // the board is stored (`refreshYearAgo` runs last in the refresh).
+  applyYearOverYear(items, keptYearAgo(dates.latest));
+  applyVarietyBaselines(items, keptVarietyBaselines(dates.latest));
 
   return {
     type: 'board',
@@ -103,6 +100,24 @@ function buildBoard() {
     count: items.length,
     items: items
   };
+}
+
+/**
+ * The board's cards from one trading day's rows and the previous trading
+ * day's, each keyed by MOA root. Shared by the crawl and the archive's
+ * backfill (`backfillDays`), so a backfilled day is the day the board would
+ * have shown.
+ */
+function boardCards(todayByRoot, prevByRoot) {
+  var items = [];
+  for (var i = 0; i < BOARD_ITEMS.length; i++) {
+    var def = BOARD_ITEMS[i];
+    var todayRows = selectRows(todayByRoot[def.official], def);
+    if (!todayRows.length) continue;
+    var card = aggregateGroup(def, todayRows, selectRows(prevByRoot[def.official], def));
+    if (card) items.push(card);
+  }
+  return items;
 }
 
 /** Distinct MOA root names to fetch — several board items share one root. */
@@ -139,42 +154,76 @@ function readDurableBoard() {
 function writeChunkedProp(prefix, countKey, json) {
   try {
     var props = PropertiesService.getScriptProperties();
-    var chunks = Math.ceil(json.length / PROP_CHUNK_SIZE) || 1;
+    var pieces = propChunks(json);
+    var chunks = pieces.length;
     var write = {};
-    for (var i = 0; i < chunks; i++) {
-      write[prefix + i] = json.substring(i * PROP_CHUNK_SIZE, (i + 1) * PROP_CHUNK_SIZE);
-    }
+    for (var i = 0; i < chunks; i++) write[prefix + i] = pieces[i];
     write[countKey] = String(chunks);
     props.setProperties(write);
-
+  } catch (err) {
+    Logger.log('writeChunkedProp error (' + prefix + '): ' + err);
+    return false;
+  }
+  // Written, whatever the cleanup does: a leftover chunk past the count is
+  // never read, and costs only quota until the next write removes it.
+  try {
     var existing = props.getProperties();
     for (var key in existing) {
       if (key.indexOf(prefix) !== 0) continue;
       var idx = parseInt(key.substring(prefix.length), 10);
       if (!isNaN(idx) && idx >= chunks) props.deleteProperty(key);
     }
-  } catch (err) {
-    Logger.log('writeChunkedProp error (' + prefix + '): ' + err);
+  } catch (err2) {
+    Logger.log('writeChunkedProp cleanup error (' + prefix + '): ' + err2);
   }
+  return true;
+}
+
+/**
+ * `json` cut into pieces of at most `PROP_CHUNK_SIZE` UTF-8 bytes: a property
+ * value holds 9 KB, and a crop's or variety's name takes three bytes a
+ * character — 8000 characters of them would not fit. Never cut inside a
+ * surrogate pair, whose halves count 4 and 0.
+ */
+function propChunks(json) {
+  var out = [];
+  var start = 0;
+  var bytes = 0;
+  for (var i = 0; i < json.length; i++) {
+    var c = json.charCodeAt(i);
+    var size = c < 0x80 ? 1 : c < 0x800 ? 2 : c >= 0xD800 && c <= 0xDBFF ? 4 : c >= 0xDC00 && c <= 0xDFFF ? 0 : 3;
+    if (bytes + size > PROP_CHUNK_SIZE) {
+      out.push(json.substring(start, i));
+      start = i;
+      bytes = 0;
+    }
+    bytes += size;
+  }
+  out.push(json.substring(start));
+  return out;
 }
 
 /** Reads a chunked JSON string back, or null when absent or torn. */
 function readChunkedProp(prefix, countKey) {
   try {
-    var all = PropertiesService.getScriptProperties().getProperties();
-    var chunks = parseInt(all[countKey] || '0', 10);
-    if (!chunks) return null;
-    var parts = [];
-    for (var i = 0; i < chunks; i++) {
-      var part = all[prefix + i];
-      if (part == null) return null; // torn write — treat as missing
-      parts.push(part);
-    }
-    return parts.join('');
+    return chunkedFrom(PropertiesService.getScriptProperties().getProperties(), prefix, countKey);
   } catch (err) {
     Logger.log('readChunkedProp error (' + prefix + '): ' + err);
     return null;
   }
+}
+
+/** The same, from a property map the caller already read. */
+function chunkedFrom(all, prefix, countKey) {
+  var chunks = parseInt(all[countKey] || '0', 10);
+  if (!chunks) return null;
+  var parts = [];
+  for (var i = 0; i < chunks; i++) {
+    var part = all[prefix + i];
+    if (part == null) return null; // torn write — treat as missing
+    parts.push(part);
+  }
+  return parts.join('');
 }
 
 /**
@@ -187,6 +236,7 @@ function readChunkedProp(prefix, countKey) {
  * can show that refreshes are running and what they decided.
  */
 function refreshBoardCache() {
+  var started = Date.now();
   var board = buildBoard();
   var props = PropertiesService.getScriptProperties();
   var verdict = board.items && board.items.length
@@ -203,14 +253,30 @@ function refreshBoardCache() {
   }));
   if (verdict.ok) {
     markSuspects(board, verdict.suspects);
+    // Everything the guard needed and nobody else may see. Stripped here
+    // rather than never attached, because the guard's own comparison is a
+    // build-time fact: see `prev_volume` in `aggregateGroup`.
+    dropTransient(board.items);
     storeBoard(board);
     updateHistory(board);
     props.setProperty(LAST_OK_PROP, board.generated_at + ' ' + board.roc_date + ' ' + board.count + ' items');
+    // Ask for the mirror deploy now the board exists to mirror — after the
+    // store, never before it, and never in the rejected branch below: a deploy
+    // publishes whatever `?action=board` answers at the time.
+    requestMirrorDeploy();
+    // The long archive, if one is configured. Same contract: after the store,
+    // never throws, and a day it misses costs the archive, not the board.
+    appendDailyHistory(board);
     recordRefreshOutcome(true,
       '看板已重新建立。\n\n' +
       '交易日：' + board.roc_date + '\n' +
       '品項數：' + board.count + '\n' +
       '完成於：' + board.generated_at + '\n');
+    // Last of all: the year-ago medians the NEXT build compares with. A slow
+    // Sheets read here costs that comparison at most — the board is stored,
+    // mirrored, archived and its outcome recorded.
+    refreshYearAgo(board.roc_date, started);
+    refreshVarietyBaselines(board.roc_date, started);
   } else {
     var reason = verdict.reasons.join('; ');
     if (board.items && board.items.length) {
@@ -227,6 +293,130 @@ function refreshBoardCache() {
   }
   Logger.log('Board refreshed: ' + (board.count || 0) + ' items for ' + (board.roc_date || 'n/a'));
   return board;
+}
+
+/**
+ * Tells GitHub a new board exists, so the mirror is republished by the crawl
+ * rather than by a clock unrelated to it (#68).
+ *
+ * Mirror age is the board's age when the deploy ran plus everything since, and
+ * the second term is not the number the cron says: a schedule asking every
+ * 2 h realised a 4.5 h median, hourly realised 4.64 h. `repository_dispatch`
+ * is API-triggered and not subject to that throttling, so this collapses both
+ * terms — the mirror is published minutes after the board it mirrors exists.
+ *
+ * Nothing here may touch the crawl. With no token configured it does nothing
+ * at all and the schedule stays the fallback, and every failure is logged and
+ * swallowed — the same contract the alerting honours.
+ * @returns {string} what it did, for tests and logs.
+ */
+function requestMirrorDeploy() {
+  var props;
+  var token;
+  var lastOk;
+  var lastAttempt;
+  try {
+    props = PropertiesService.getScriptProperties();
+    token = props.getProperty(GH_DISPATCH_TOKEN_PROP);
+    // Read here, with the token, so every properties read in this function is
+    // inside this guard: a transient outage must return from here, not throw
+    // into `refreshBoardCache` and cost the crawl its own bookkeeping.
+    lastOk = props.getProperty(GH_DISPATCH_OK_PROP);
+    lastAttempt = props.getProperty(GH_DISPATCH_PROP);
+  } catch (err) {
+    Logger.log('requestMirrorDeploy: properties unavailable: ' + err);
+    return 'unavailable';
+  }
+  if (!token) return 'unconfigured'; // deliberate: deploy-pages.yml still has its schedule
+  // `?action=warm` is public, and the lock it takes is released when the crawl
+  // ends rather than held for its TTL, so a visitor can drive crawls every few
+  // minutes. A crawl costs the backend; a deploy costs a minute of CI against
+  // Pages' ten-an-hour soft limit.
+  //
+  // A throttled crawl is dropped, not deferred: the mirror then carries the
+  // previous board until the next crawl. That board is at most one window
+  // older, which is the trade — and it is recorded, because it is the one
+  // state in which the newest board is not the one on the mirror.
+  if (withinWindow(lastOk, GH_DISPATCH_MIN_INTERVAL_MS)) {
+    return recordDispatch(props, 'throttled');
+  }
+  // A failed attempt is retried by the next crawl, not by the next visitor:
+  // see `GH_DISPATCH_FAIL_BACKOFF_MS`. Deliberately not recorded — the record
+  // still holds the failure this is backing off from, which is the more useful
+  // thing for `diag` to be showing, and re-stamping it here would extend the
+  // backoff for as long as something kept crawling.
+  if (withinWindow(dispatchFailedAt(lastAttempt), GH_DISPATCH_FAIL_BACKOFF_MS)) return 'backoff';
+  try {
+    var response = UrlFetchApp.fetch(GH_DISPATCH_URL, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {
+        Authorization: 'Bearer ' + token,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28'
+      },
+      payload: JSON.stringify({ event_type: GH_DISPATCH_EVENT }),
+      // Handled here rather than thrown: a 401 from an expired PAT is an
+      // operator's problem, not a reason to lose a crawl that succeeded.
+      muteHttpExceptions: true
+    });
+    var code = response.getResponseCode();
+    if (code === 204) return recordDispatch(props, 'dispatched'); // 204 is an accepted dispatch
+    // Status only. The body is GitHub's, and an error body is the last place
+    // to be pasting into a log beside a token that just failed.
+    Logger.log('requestMirrorDeploy: GitHub answered ' + code);
+    return recordDispatch(props, 'rejected ' + code);
+  } catch (err) {
+    Logger.log('requestMirrorDeploy failed: ' + err);
+    return recordDispatch(props, 'failed');
+  }
+}
+
+/**
+ * Records an attempt — the outcome and when — and returns that outcome.
+ *
+ * A log line is not enough: an expired PAT would 401 on every crawl, mirror
+ * freshness would quietly revert to the fallback cron, and nothing an operator
+ * looks at would say so. `diag` reads this back as `mirror_dispatch`. Never
+ * throws: the property store is not worth a crawl.
+ */
+function recordDispatch(props, outcome) {
+  var now = new Date().toISOString();
+  // The floor's clock first, and guarded separately. Both may be new keys and
+  // a rejected board has just written its chunks into the same store, so
+  // either write can fail on a full one — under a shared guard the first
+  // failure would take the second write with it. Losing the floor lets every
+  // later crawl spend another Pages deploy; losing the record costs `diag` a
+  // line, which `parseDispatch` reads as "attempted, outcome unknown".
+  //
+  // Only an accepted dispatch arms the floor: a rejection cost no deploy, and
+  // holding the next crawl over it would block the retry that recovers from a
+  // transient GitHub error.
+  if (outcome === 'dispatched') {
+    try {
+      props.setProperty(GH_DISPATCH_OK_PROP, now);
+    } catch (err) {
+      Logger.log('recordDispatch floor failed: ' + err);
+    }
+  }
+  try {
+    props.setProperty(GH_DISPATCH_PROP, now + ' ' + outcome);
+  } catch (err) {
+    Logger.log('recordDispatch failed: ' + err);
+  }
+  return outcome;
+}
+
+/**
+ * When the last attempt failed AT GitHub — a rejection or a thrown request —
+ * or '' for anything else, a throttle included. Only those two are worth
+ * backing off from; the rest cost GitHub nothing.
+ */
+function dispatchFailedAt(record) {
+  var space = (record || '').indexOf(' ');
+  if (space === -1) return '';
+  var outcome = record.substring(space + 1);
+  return outcome === 'failed' || outcome.indexOf('rejected') === 0 ? record.substring(0, space) : '';
 }
 
 /** Parses a stored board JSON string, or null when it is absent or corrupt. */
@@ -249,8 +439,19 @@ function refreshBoardCacheOnce() {
   try {
     refreshBoardCache();
   } finally {
-    dropTriggers(REFRESH_ONCE_FN);
-    CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
+    // Each guarded on its own, and the trigger first: a `ScriptApp` failure
+    // here used to strand `REFRESH_LOCK_KEY` for its whole TTL, which is the
+    // lock that stops `?action=warm` queueing another rebuild.
+    try {
+      dropTriggers(REFRESH_ONCE_FN);
+    } catch (err) {
+      Logger.log('refreshBoardCacheOnce: trigger not dropped: ' + err);
+    }
+    try {
+      CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
+    } catch (err) {
+      Logger.log('refreshBoardCacheOnce: refresh lock not cleared: ' + err);
+    }
   }
 }
 

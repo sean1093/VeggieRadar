@@ -27,6 +27,9 @@
  *
  * Exit code 1 means at least one check failed; `OUT` always describes what
  * happened, so the workflow can report a failure without parsing stdout.
+ * Not every unhealthy endpoint is a failure: `probe-verdict.mjs` decides which
+ * ones a visitor would actually notice, and the rest are reported as
+ * `degraded` in the summary without paging anyone.
  *
  * Freshness is judged on `generated_at` ALONE. `date` is the trading date of
  * the prices and legitimately stands still over weekends, holidays and typhoon
@@ -37,7 +40,11 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BOARD_HEALTHY_ITEMS, boardMismatch } from '../src/types/board.schema.ts';
-import { get as request, outcome, withRetry } from './gas-retry.mjs';
+import { BOARD_MAX_AGE_MS } from '../src/lib/utils/freshness.ts';
+import { attemptSuffix, get as request, isTransientStatic, outcome, withRetry } from './gas-retry.mjs';
+import {
+  applyVerdict, DEGRADED, dispatchState, GAS_UNREACHABLE, MIRROR_BACKSTOP_MS, reachabilityCategory, servingFor,
+} from './probe-verdict.mjs';
 
 const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -45,7 +52,24 @@ const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // of failing fast, and a queued probe must not hold a scheduled job open.
 // The two GAS checks retry that deadline (`gas-retry.mjs`), because a single
 // timeout or cold-start 404 is a blip, not an outage.
-const TIMEOUT_MS = 20_000;
+//
+// It must not be shorter than the deploy's (`fetch-retry.mjs`, 30 s), because
+// the deploy refreshing the mirror is the backstop that lets an unreachable
+// backend be softened to `degraded` (`probe-verdict.mjs`). A stricter probe
+// would invert that: a queued backend answering in, say, 25 s would keep the
+// mirror fresh on every deploy while every probe attempt timed out, and the
+// softening would hold green forever with the diag checks never evaluated.
+const TIMEOUT_MS = 30_000;
+// How long the GAS checks keep asking before calling `/exec` unreachable.
+// The shared default is 3 attempts with a 2 s then 4 s backoff; Apps Script
+// answers its cold-start 404 in about a second, so on 2026-09-15 that spent
+// roughly 10 s before giving up and opening #61. Four attempts with a linear
+// 5 s backoff spends around 35 s on the same symptom. The bound is what the
+// deadline makes it — 4 × TIMEOUT_MS + 30 s of backoff, so 150 s if every
+// attempt runs to its deadline, which is the queued-request case and is worth
+// waiting out in a job that runs four times a day.
+const GAS_ATTEMPTS = 4;
+const GAS_BACKOFF_MS = 5_000;
 // Two 4-hourly refresh cycles plus the crawl: one missed run is routine and
 // self-heals, two in a row is a pipeline that stopped.
 const MAX_AGE_MS = 8 * 60 * 60 * 1000;
@@ -108,8 +132,25 @@ const get = (url) => request(url, { timeoutMs: TIMEOUT_MS, userAgent: 'VeggieRad
  * cold-start 404 and a queued request that times out. See `gas-retry.mjs` —
  * one attempt per GAS check is what turned two cold starts into two
  * self-closing prod-alert issues. Contract failures are never retried.
+ *
+ * The budget is deliberately wider than the module default: `/exec` stayed a
+ * 404 for longer than the default's ~30 s on 2026-09-15, and a minute of
+ * asking is cheap in a job that runs four times a day.
  */
-const getGas = (url) => withRetry(get, url);
+const getGas = (url) => withRetry(get, url, { attempts: GAS_ATTEMPTS, backoffMs: GAS_BACKOFF_MS });
+
+/**
+ * The same tolerance for the two static URLs, on GitHub Pages' terms: a 5xx or
+ * a dead connection is a CDN having a moment, while a **404 is the answer** —
+ * nothing is published there — and must not be retried. `deploy-pages.yml`
+ * already fetches this very mirror through `fetch-retry.mjs` on these terms.
+ *
+ * It matters more than it looks: `mirror` passing is what lets an unreachable
+ * backend be softened to `degraded`, so a lone CDN blip here would fail the
+ * mirror check, withdraw the softening, and open exactly the false alarm this
+ * probe's retry policy exists to prevent.
+ */
+const getStatic = (url) => withRetry(get, url, { transient: isTransientStatic });
 
 const ok = (name, detail) => ({ name, status: 'ok', detail });
 const skipped = (name, detail) => ({ name, status: 'skipped', detail });
@@ -151,9 +192,9 @@ function boardProblem(board) {
 
 async function checkPages() {
   const name = 'pages';
-  const res = await get(PAGES_URL);
-  if (res.error) return failed(name, 'pages_down', `request failed: ${res.error}`);
-  if (res.status !== 200) return failed(name, 'pages_down', `HTTP ${res.status}`, res.body);
+  const res = await getStatic(PAGES_URL);
+  if (res.error) return failed(name, 'pages_down', `request failed${attemptSuffix(res)}: ${res.error}`);
+  if (res.status !== 200) return failed(name, 'pages_down', `HTTP ${res.status}${attemptSuffix(res)}`, res.body);
 
   const title = res.body.match(/<title>([^<]*)<\/title>/i);
   if (!title || !title[1].includes('今日菜價')) {
@@ -170,22 +211,35 @@ async function checkPages() {
 
 async function checkMirror() {
   const name = 'mirror';
-  const res = await get(MIRROR_URL);
-  if (res.error) return failed(name, 'mirror_stale', `request failed: ${res.error}`);
+  const res = await getStatic(MIRROR_URL);
+  if (res.error) return failed(name, 'mirror_stale', `request failed${attemptSuffix(res)}: ${res.error}`);
   // A deploy that could obtain neither a fresh board nor the previously
   // published mirror ships without one on purpose (README §2): absent is a
   // degraded state, not a broken one, and `gas_board` below covers the
   // visitors it sends to the backend. Failing here would hold the alert issue
   // permanently open and train its reader to ignore the one alert that matters.
   if (res.status === 404) return skipped(name, 'no mirror published');
-  if (res.status !== 200) return failed(name, 'mirror_stale', `HTTP ${res.status}`, res.body);
+  if (res.status !== 200) return failed(name, 'mirror_stale', `HTTP ${res.status}${attemptSuffix(res)}`, res.body);
 
   const parsed = parseObject(res.body);
   if (parsed.problem) return failed(name, 'mirror_stale', parsed.problem, res.body);
   const board = parsed.value;
+  const age = ageMs(board.generated_at);
   const problem = boardProblem(board);
-  if (problem) return failed(name, 'mirror_stale', problem.detail, res.body);
-  return ok(name, `${board.count} items, crawled ${hours(ageMs(board.generated_at))} h ago`);
+  // `serving` is what `applyVerdict` measures against the app's own read
+  // order; the check's own verdict deliberately stays the looser one, because
+  // a mirror between the two bounds is degraded, not broken.
+  //
+  // Which boards may be softened is `servingFor`'s call, where the tests are.
+  const measured = servingFor({
+    ageMs: age,
+    count: board.count,
+    problemKind: problem && problem.kind,
+    maxSkewMs: MAX_SKEW_MS,
+  });
+  const serving = measured ? { serving: measured } : {};
+  if (problem) return { ...failed(name, 'mirror_stale', problem.detail, res.body), ...serving };
+  return { ...ok(name, `${board.count} items, crawled ${hours(age)} h ago`), ...serving };
 }
 
 async function checkGasBoard() {
@@ -193,7 +247,7 @@ async function checkGasBoard() {
   if (!API_BASE_URL) return failed(name, 'gas_error', 'no API base URL: set API_BASE_URL or VITE_API_BASE_URL');
   const res = await getGas(`${API_BASE_URL}?action=board`);
   const reached = outcome(res);
-  if (!reached.ok) return failed(name, 'gas_error', reached.reason, res.body);
+  if (!reached.ok) return failed(name, reachabilityCategory(res), reached.reason, res.body);
 
   // Apps Script answers 200 with an HTML page for platform-level failures
   // (over quota, a deploy that never re-consented to its scopes), so the
@@ -213,7 +267,20 @@ async function checkGasBoard() {
   if (!(board.count >= BOARD_HEALTHY_ITEMS)) {
     return failed(name, 'gas_stale', `count ${board.count} < ${BOARD_HEALTHY_ITEMS}`, res.body);
   }
-  return ok(name, `${board.count} items, crawled ${hours(ageMs(board.generated_at))} h ago, stale=false`);
+  // `answeredInMs` and `attempts` are what let `applyVerdict` ask whether a
+  // browser would have got this answer at all: the probe waits TIMEOUT_MS and
+  // retries four times over 30 s of backoff, `fetchBoard` waits
+  // BOARD_TIMEOUT_MS and spends its whole three-attempt schedule in 2.7 s of
+  // backoff — less than this probe's first wait. A queued or cold Apps Script
+  // sits between them; `servesVisitors` is where that is reasoned about. Both go in the detail too, because they are the numbers that decide
+  // whether a stale mirror beside this board pages, and a reader of the issue
+  // should not have to infer them.
+  const answered = `answered in ${(res.elapsedMs / 1000).toFixed(1)} s${attemptSuffix(res)}`;
+  return {
+    ...ok(name, `${board.count} items, crawled ${hours(ageMs(board.generated_at))} h ago, stale=false, ${answered}`),
+    answeredInMs: res.elapsedMs,
+    attempts: res.attempts,
+  };
 }
 
 /**
@@ -228,6 +295,7 @@ async function checkDiag() {
     skipped('gas_trigger', 'diag unavailable'),
     skipped('gas_incident', 'diag unavailable'),
     skipped('gas_history', 'diag unavailable'),
+    skipped('mirror_dispatch', 'diag unavailable'),
   ];
 
   const name = 'gas_diag';
@@ -236,7 +304,7 @@ async function checkDiag() {
   }
   const res = await getGas(`${API_BASE_URL}?action=diag`);
   const reached = outcome(res);
-  if (!reached.ok) return unavailable(failed(name, 'gas_error', reached.reason, res.body));
+  if (!reached.ok) return unavailable(failed(name, reachabilityCategory(res), reached.reason, res.body));
 
   const parsed = parseObject(res.body);
   if (parsed.problem) {
@@ -251,6 +319,9 @@ async function checkDiag() {
   const triggers = Array.isArray(diag.triggers) ? diag.triggers : [];
   const incidentOpen = alert.incident_open;
   const historyItems = history.items;
+  // Whether the mirror is being republished by the crawl or left to the
+  // fallback cron. Reported, never paged — see `dispatchState`.
+  const dispatch = dispatchState(diag.mirror_dispatch);
 
   return [
     ok(name, 'HTTP 200, JSON'),
@@ -273,10 +344,11 @@ async function checkDiag() {
           `history.items ${JSON.stringify(historyItems)} < ${BOARD_HEALTHY_ITEMS} — baselines stop publishing`,
           res.body,
         ),
+    { name: 'mirror_dispatch', ...dispatch },
   ];
 }
 
-const STATUS_ICON = { ok: '✅', failed: '❌', skipped: '⏭️' };
+const STATUS_ICON = { ok: '✅', failed: '❌', degraded: '⚠️', skipped: '⏭️' };
 
 /** Detail text inside a table cell: a pipe or a newline would break the row. */
 const cell = (text) => (text || '—').replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ');
@@ -291,7 +363,43 @@ function renderSummary(checks, checkedAt) {
     '| --- | --- | --- | --- |',
     ...checks.map((c) => `| ${c.name} | ${STATUS_ICON[c.status]} ${c.status} | ${c.category || '—'} | ${cell(c.detail)} |`),
   ];
-  for (const failure of checks.filter((c) => c.status === 'failed' && c.excerpt)) {
+  // Exactly one of the two softenings can have applied (`probe-verdict.mjs`),
+  // so the note says which — narrating both would tell the reader of a GAS
+  // outage that every visitor is being served by a healthy backend, in the
+  // same summary whose table shows that backend degraded.
+  const degradedMirror = checks.some((c) => c.name === 'mirror' && c.status === DEGRADED);
+  // The softening itself, not "anything that is not the mirror": a check that
+  // is born degraded — `mirror_dispatch` — would otherwise print the note
+  // below, which tells the reader that Apps Script never answered.
+  const degradedBackend = checks.some((c) => c.status === DEGRADED && c.category === GAS_UNREACHABLE);
+  // Only when nothing else in the run pages. A softened mirror beside a
+  // missing `refreshBoardCache` still opens `[prod-alert] trigger_missing`,
+  // and a note headed "not paging" inside that issue would be a plain lie.
+  const paging = checks.some((c) => c.status === 'failed');
+  if (paging) {
+    // Nothing: the table's ⚠️ rows say what was softened, and the reader is
+    // here for the ❌ one.
+  } else if (degradedBackend) {
+    lines.push(
+      '',
+      '> \u26a0\ufe0f **degraded, not paging.** Apps Script never answered, but the mirror above is'
+        + ' young enough and full enough that `useBoard` serves it without ever asking GAS,'
+        + ' so every visitor still sees today\u2019s prices. What is lost: the drawer\u2019s trend'
+        + ' chart, and a search for a crop the board does not carry. Once that mirror stops'
+        + ' moving \u2014 it cannot be refreshed while GAS is down \u2014 visitors start falling'
+        + ' through to the backend, and the next probe run pages.',
+    );
+  } else if (degradedMirror) {
+    lines.push(
+      '',
+      '> \u26a0\ufe0f **degraded, not paging.** The published mirror is past its bound, but the backend'
+        + ' answered a current board on the first attempt and inside the deadline a browser gives'
+        + ' one, so every visitor falls through to it and sees correct, current prices \u2014 paying a'
+        + ' round trip and a GAS execution for them, which is what a late deploy costs.'
+        + ` Past ${MIRROR_BACKSTOP_MS / 3_600_000} h that stops being a late deploy and pages.`,
+    );
+  }
+  for (const failure of checks.filter((c) => (c.status === 'failed' || c.status === DEGRADED) && c.excerpt)) {
     // Fenced with four backticks so an HTML error page containing a code fence
     // cannot break out of the block.
     lines.push(
@@ -308,13 +416,26 @@ function renderSummary(checks, checkedAt) {
   return lines.join('\n');
 }
 
-const [pages, mirror, board, diag] = await Promise.all([
-  checkPages(),
-  checkMirror(),
-  checkGasBoard(),
-  checkDiag(),
-]);
-const checks = [pages, mirror, board, ...diag];
+// `gas_board` runs alone against the backend, and everything else follows.
+// Its latency is evidence — `servesVisitors` compares it with the deadline a
+// browser gives one attempt — and a probe that fired `?action=diag` alongside
+// it would be timing its own contention: `handleDiag` walks the project's
+// triggers and summarises a growing history sheet on every call, where
+// `readBoard` is a cache read. The two static checks cost the backend nothing
+// and stay alongside.
+const [board, pages, mirror] = await Promise.all([checkGasBoard(), checkPages(), checkMirror()]);
+const diag = await checkDiag();
+// The checks report endpoint health; `applyVerdict` decides what that means
+// for a visitor, which is the only thing worth paging about.
+const checks = applyVerdict([pages, mirror, board, ...diag], {
+  // The app's own bar, not the probe's: `useBoard` only skips GAS while the
+  // mirror is fresher than this, and a short board is not a served board.
+  maxAgeMs: BOARD_MAX_AGE_MS,
+  healthyItems: BOARD_HEALTHY_ITEMS,
+  // Past this a late mirror stops being late and starts being a publish
+  // pipeline that is broken, which pages whatever the backend is doing.
+  staleBackstopMs: MIRROR_BACKSTOP_MS,
+});
 const checkedAt = new Date().toISOString();
 const summaryMd = renderSummary(checks, checkedAt);
 

@@ -59,14 +59,30 @@ function recordRefreshOutcome(ok, detail) {
 
     if (ok) {
       props.setProperty(ALERT_STREAK_PROP, '0');
-      if (props.getProperty(ALERT_ACTIVE_PROP) !== '1') return 'ok';
+      if (props.getProperty(ALERT_ACTIVE_PROP) !== '1') {
+        // No incident, so nothing for a silence category to be about. A
+        // reason left over from a closed one would otherwise sit in `diag`
+        // for good, describing a mailbox that is no longer silent.
+        recordSendOutcome(props, null);
+        return 'ok';
+      }
       // Send BEFORE clearing. Clearing first would close the incident even
       // when the mail failed, so the next healthy refresh would skip the
       // all-clear and leave the reader believing the app is still broken.
-      sendAlertMail('[VeggieRadar] 已恢復正常', detail + '\n診斷：' + diagUrl() + '\n');
-      props.deleteProperty(ALERT_ACTIVE_PROP);
-      props.deleteProperty(ALERT_SENT_PROP);
-      return 'recovered';
+      var unsent = sendAlertMail('[VeggieRadar] 已恢復正常', detail + '\n診斷：' + diagUrl() + '\n');
+      // A send that failed keeps the incident open so the next healthy refresh
+      // tries the all-clear again — except when there is no recipient at all.
+      // That is a configuration choice rather than a transient failure, and
+      // retrying it forever would leave `incident_open` true on a backend that
+      // recovered, which is the same lie as #65 with the sign flipped.
+      if (unsent && unsent !== 'no_recipient') {
+        recordSendOutcome(props, unsent); // still open, and this says why
+        return 'recovery_unsent';
+      }
+      // Only deletes, so unlike the failure path below it cannot want space
+      // in a properties store a rejected board has just filled.
+      closeIncident(props);
+      return unsent ? 'recovered_silently' : 'recovered';
     }
 
     var streak = (parseInt(props.getProperty(ALERT_STREAK_PROP) || '0', 10) || 0) + 1;
@@ -74,7 +90,7 @@ function recordRefreshOutcome(ok, detail) {
     if (streak < ALERT_FAILURE_STREAK) return 'counted';
     if (withinCooldown(props)) return 'cooldown';
 
-    sendAlertMail(
+    var unsent = sendAlertMail(
       '[VeggieRadar] 連續 ' + streak + ' 次更新失敗',
       '看板更新連續失敗，使用者看到的行情正在變舊。\n\n' +
       '連續失敗次數：' + streak + '\n' +
@@ -82,8 +98,18 @@ function recordRefreshOutcome(ok, detail) {
       '最後一次成功：' + (props.getProperty(LAST_OK_PROP) || '（無記錄）') + '\n\n' +
       '診斷：' + diagUrl() + '\n' +
       '常見原因：MOA 連續節流、交易日 probe 失敗、Apps Script 配額用盡。\n');
+    // Whatever the send returned. The incident is what the backend knows about
+    // itself, and the cooldown is what stops every later failure re-taking the
+    // lock to attempt a mail that cannot be sent.
+    //
+    // The incident goes FIRST. `recordSendOutcome` creates a key that may not
+    // exist yet, and a rejected board has just written its chunks into the
+    // same properties store (`Board.gs`); a full store would throw on the new
+    // key, `withAlertLock` would swallow it, and the incident would once more
+    // not be opened — this bug, one line further along.
     openIncident(props);
-    return 'alerted';
+    recordSendOutcome(props, unsent);
+    return unsent ? 'alerted_silently' : 'alerted';
   });
 }
 
@@ -96,9 +122,13 @@ function sendAlert(subject, body) {
   return withAlertLock(function () {
     var props = PropertiesService.getScriptProperties();
     if (withinCooldown(props)) return false;
-    sendAlertMail(subject, body);
+    var unsent = sendAlertMail(subject, body);
+    // Same rule and same order as the refresh path: the incident opens on what
+    // the backend knows, not on what it managed to send, and it is written
+    // before the category that explains it.
     openIncident(props);
-    return true;
+    recordSendOutcome(props, unsent);
+    return !unsent;
   }) === true;
 }
 
@@ -120,11 +150,38 @@ function alertRecipient() {
   }
 }
 
-/** Every alert mail goes through here so the recipient is resolved in one place. */
+/**
+ * Every alert mail goes through here, so the recipient is resolved in one
+ * place — and so a send that cannot happen is a RESULT rather than an
+ * exception. Whether the backend knows it is broken must not depend on
+ * whether it can tell anyone: this used to throw, the caller's
+ * `openIncident` never ran, and a deployment with no `ALERT_EMAIL` reported
+ * `incident_open: false` through `diag` for a pipeline that had already given
+ * up — with the external probe reading that as health (#65).
+ * @returns {string|null} null when the mail went out, else a `classifyMailError` category.
+ */
 function sendAlertMail(subject, body) {
   var to = alertRecipient();
-  if (!to) throw new Error('no alert recipient: set the ' + ALERT_EMAIL_PROP + ' script property');
-  MailApp.sendEmail(to, subject, body);
+  if (!to) {
+    Logger.log('sendAlertMail: no alert recipient; set the ' + ALERT_EMAIL_PROP + ' script property');
+    return 'no_recipient';
+  }
+  try {
+    MailApp.sendEmail(to, subject, body);
+    return null;
+  } catch (err) {
+    return classifyMailError(err);
+  }
+}
+
+/**
+ * Records WHY the mailbox is silent, as a category, so `diag` can tell an
+ * incident nobody was told about from one that was mailed out. Cleared by
+ * every successful send.
+ */
+function recordSendOutcome(props, failure) {
+  if (failure) props.setProperty(ALERT_UNSENT_PROP, failure);
+  else props.deleteProperty(ALERT_UNSENT_PROP);
 }
 
 /**
@@ -141,9 +198,30 @@ function withinCooldown(props) {
   return withinWindow(props.getProperty(ALERT_SENT_PROP), ALERT_COOLDOWN_MS);
 }
 
+/**
+ * The flag FIRST, the cooldown timestamp second. Both may be new keys, and a
+ * properties store filled by a rejected board's chunks can throw on either;
+ * whichever comes second is the one that is lost. `incident_open` is what the
+ * external probe reads, so it is the one that must survive. Losing the
+ * cooldown instead costs mail — on the serving path, one attempt per visitor
+ * until the store frees up, which is worse than it sounds and still better
+ * than an incident nobody can see, since a mail nobody receives is exactly the
+ * silence this issue is about.
+ */
 function openIncident(props) {
-  props.setProperty(ALERT_SENT_PROP, new Date().toISOString());
   props.setProperty(ALERT_ACTIVE_PROP, '1');
+  props.setProperty(ALERT_SENT_PROP, new Date().toISOString());
+}
+
+/**
+ * Closes it again, the silence category included: that category describes the
+ * incident's own mail, so leaving it behind would have `diag` explaining a
+ * mailbox that is no longer silent.
+ */
+function closeIncident(props) {
+  props.deleteProperty(ALERT_ACTIVE_PROP);
+  props.deleteProperty(ALERT_SENT_PROP);
+  props.deleteProperty(ALERT_UNSENT_PROP);
 }
 
 /** Best-effort diag link for alert bodies; never throws. */
@@ -163,8 +241,9 @@ function diagUrl() {
  */
 function classifyMailError(err) {
   var text = String((err && err.message) || err || '');
-  Logger.log('alerttest mail failure: ' + text);
-  if (/no alert recipient/i.test(text)) return 'no_recipient';
+  Logger.log('alert mail failure: ' + text);
+  // `no_recipient` is not classified here: it never reaches MailApp, and
+  // `sendAlertMail` returns that category itself.
   if (/permission|authoriz|scope|consent/i.test(text)) return 'mail_scope_unauthorised';
   if (/quota|limit|exceeded/i.test(text)) return 'mail_quota_exhausted';
   if (/invalid|recipient|address/i.test(text)) return 'recipient_rejected';
@@ -188,13 +267,14 @@ function handleAlertTest() {
       var props = PropertiesService.getScriptProperties();
       if (withinWindow(props.getProperty(ALERT_TEST_PROP), ALERT_TEST_INTERVAL_MS)) return { state: 'locked' };
       if (withinWindow(props.getProperty(ALERT_TEST_FAIL_PROP), ALERT_TEST_FAIL_BACKOFF_MS)) return { state: 'backoff' };
-      try {
-        sendAlertMail(
-          '[VeggieRadar] 測試信（非故障）',
-          '這是一封測試信，用來確認警報信管道可用。收到代表故障時你也會收到通知。\n\n診斷：' + diagUrl() + '\n');
-      } catch (err) {
+      var unsent = sendAlertMail(
+        '[VeggieRadar] 測試信（非故障）',
+        '這是一封測試信，用來確認警報信管道可用。收到代表故障時你也會收到通知。\n\n診斷：' + diagUrl() + '\n');
+      if (unsent) {
         props.setProperty(ALERT_TEST_FAIL_PROP, new Date().toISOString());
-        return { state: 'failed', reason: classifyMailError(err) };
+        // Deliberately not `recordSendOutcome`: a probe must not touch what
+        // `diag` says about the real alert channel's last attempt.
+        return { state: 'failed', reason: unsent };
       }
       props.setProperty(ALERT_TEST_PROP, new Date().toISOString());
       props.deleteProperty(ALERT_TEST_FAIL_PROP);

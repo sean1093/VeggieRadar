@@ -1,6 +1,7 @@
 import React from 'react';
 import type { ProduceItem } from '../../types/produce';
 import { marketPrice } from '../../lib/utils/market-price';
+import { trustedBaseline } from '../../lib/utils/baseline';
 
 interface ProduceCardProps {
   item: ProduceItem;
@@ -27,8 +28,10 @@ const ProduceCard: React.FC<ProduceCardProps> = ({ item, onClick, watched = fals
   // days get no badge: the daily-change column already covers that side, and a
   // badge that scolds would just be noise. Wholesale basis, like the change
   // column; the drawer explains the derivation.
-  const vsBaseline = item.vs_baseline_percent;
-  const cheapVsMonth = !suspect && vsBaseline != null && vsBaseline <= -10;
+  // Null for a suspect item as well as for a missing figure: one rule, shared
+  // with the 划算優先 ordering, so the badge and the ranking cannot disagree.
+  const vsBaseline = trustedBaseline(item);
+  const cheapVsMonth = vsBaseline != null && vsBaseline <= -10;
 
   const open = () => onClick(item);
   const onKeyDown = (e: React.KeyboardEvent) => {

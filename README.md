@@ -56,7 +56,10 @@ actually being quoted when one crop trades at two very different prices.
 - **Degrade honestly, never blankly.** The last good board is kept in
   localStorage: when the backend is unreachable the app serves those prices with
   「目前連不上伺服器」 plus a retry, because stale prices beat a blank page in
-  front of a stall. A busy backend during search says 「服務忙碌中」 — never
+  front of a stall. The retry keeps them too — it holds whatever is on screen
+  rather than re-reading the cache, since a stale mirror is painted without
+  being cached and re-reading answered null for the very board being read
+  (#78). A busy backend during search says 「服務忙碌中」 — never
   「查無此品項」, which would be a lie about the produce rather than about us.
 - **Shareable.** Every screen is a URL. The item drawer, a search, the filter
   and the sort all live in the hash (`#/i/高麗菜`, `#/?f=葉菜類&sort=value`),
@@ -82,9 +85,10 @@ MOA open-data API ──▶ GAS refresh (4-hourly trigger) ──▶ CacheServic
                                                                       │
                                                             GET /exec │
                                                                       ▼
-Frontend (GitHub Pages) ◀── validate ◀── GitHub Actions (deploy-pages, cron :20 / 2 h)
-  data/board.json, published inside the bundle's own artifact
-        │
+Frontend (GitHub Pages) ◀── validate ◀── GitHub Actions (deploy-pages)
+  data/board.json, published                 runs when a crawl lands (the
+  inside the bundle's own artifact           backend dispatches it), on
+        │                                    push, and 2-hourly as fallback
         ▼
 Browser: localStorage (paints first) ──▶ data/board.json ──▶ GAS /exec
                                          authoritative          only when the mirror
@@ -222,7 +226,8 @@ Two further robustness measures: `fetchRootRows()` retries roots that came back
 empty once, because a throttled 13-request batch used to drop a whole slice of
 the board (including 高麗菜) without any error; and `writeChunkedProp()` splits
 the ~34 KB board — and the price history — across numbered `ScriptProperties`
-chunks, since a single property value is capped at 9 KB.
+chunks, since a single property value is capped at 9 KB — cut at 8000 UTF-8
+bytes, not characters, since a crop's name takes three bytes a character.
 
 ### The search path: answer, refuse, or crawl
 
@@ -335,12 +340,26 @@ the same `recordRefreshOutcome(false, …)` path feeds the existing 3-failure
 alert — so the reasons arrive by mail rather than only in a log. `diag` exposes
 the last verdict as `last_validation`.
 
+The volume rule compares today with the **previous trading day**, which the
+card carries from the crawl for exactly as long as the guard needs it and no
+longer — `dropTransient` runs on every path that hands cards to a client, the
+refresh before it stores and the live search before it answers and caches. The
+stored board is only the previous trading day on the day's *first* refresh, and
+comparing against it on the second published a flagged item unflagged a few
+hours later, with its badges and its place in 划算優先 back (#77).
+
 Marked items stay **on** the board with `suspect: true`: an old price beats a
 blank. What they lose is everything derived from comparing days — they are
 excluded from the price history (a flagged observation must not bend the 28-day
 median), and the frontend hides their change badge, their 「比近月便宜」 badge
 and the drawer's baseline sentence, replacing the drawer's change block with
-「今日成交異常，暫不顯示漲跌」.
+「今日成交異常，暫不顯示漲跌」. That includes the 「划算優先」 ordering, which
+sank them to the bottom only after #70: a flagged item could take first place
+on the very number its own card refuses to show, above items with real
+discounts. One rule (`lib/utils/baseline.ts`) now answers "can this comparison
+be trusted?" — as a value, since every reader needs the number too — for the
+ordering, the badge, the drawer's sentence and whether the sort is offered at
+all.
 
 ### GAS quotas are the real scaling limit
 
@@ -364,6 +383,230 @@ overlap, and a read-modify-write race would silently drop observations. The
 backfill crawls every window *before* taking the lock, so the critical section
 lasts milliseconds.
 
+### Long-term history (optional)
+
+The rolling history above is 28 trading days, and that is a quota decision:
+ScriptProperties gives the project 500 KB, and the baseline every 「比近月便宜」
+claim is measured against has to fit in it. Anything longer — 「比去年同期」, a
+per-variety baseline — needs somewhere else, so a refresh can also append the
+day to a **Google Sheet the deployer owns** (#22).
+
+It is off unless `HISTORY_SHEET_ID` is set, and it is deliberately the least
+privileged thing in the backend that it can be:
+
+- it runs after the board is stored, never throws, and a day it misses costs
+  the archive rather than the board — the same contract the alerting and the
+  mirror dispatch honour;
+- a trading day is written **once**, and rewritten only when its numbers have
+  moved. MOA completes a day's closing prices through the evening, so a later
+  crawl can carry better ones — but the board keeps a trading date until the
+  next one publishes, so over a weekend the same unchanged Friday is re-crawled
+  for days. What decides is the rows: a revisit inside 6 h is skipped without
+  reading anything, and past that the archived day is compared with what the
+  crawl would write. Comparing crawl times instead would either spend a fixed
+  budget of corrections before the evening completion arrived, or rewrite an
+  unchanged day every few hours until Monday;
+- a date cell is read in the **spreadsheet's** timezone, not the script's. The
+  column is written as text so this does not normally arise; on a tab someone
+  reformatted, reading an instant in the wrong zone would put it on the day
+  before and the replacement would find nothing to replace;
+- it runs under the same lock as `updateHistory` — the same two executions
+  overlap (the 4-hourly trigger and a `?action=warm` rebuild), and a
+  check-then-append race would archive a day twice. That lock is now held
+  across a Sheets round trip rather than a property write, so `backfillHistory`
+  retries the merge once and reports `merged: false` rather than throwing away
+  a crawl that took minutes — and frees its queue lock, so the operator can
+  simply ask again;
+- one tab per calendar year, header `date, item, root, variety, avg_price_kg,
+  volume_kg, markets, share_percent`. A variety row carries the share and
+  leaves volume and markets empty: the breakdown publishes shares and prices
+  and drops the volume it grouped by, so `share × total` would be a number
+  nobody measured sitting in an archive;
+- `diag.sheet_history` reports `configured` and the last write **from the
+  properties alone**. `diag` is public and unauthenticated, and a spreadsheet
+  read there would let anyone spend the deployment's Sheets quota.
+
+Enabling it needs the `spreadsheets` OAuth scope, which is now in
+`appsscript.json` — **so the next deploy asks the deploying owner to
+re-consent before the Web App serves again**. §8 has the canary procedure;
+this is the same step the `script.send_mail` scope needed.
+
+#### Backfilling it from MOA
+
+The archive starts empty on the day it is configured, and both of its readers
+need what came before — 「比去年同期」 a year of it, a per-variety baseline the
+last 45 days. `?action=backfill&sheet=1&months=12` (admin token) fills that in
+from MOA's range queries — the months asked for, plus the week before them,
+which is the far half of the year-ago window the comparison reads for today:
+
+- **A chain of one-off triggers, one window a link.** A year is ~40 windows
+  and one Apps Script execution stops at 6 minutes, so each link crawls one
+  12-day window, writes it and queues the next a second later. It walks
+  **newest first**: the weeks a variety baseline needs land in the first
+  minutes, the year-old days last. A year costs ~40 links of about a minute
+  each — mind the consumer account's 90 minutes of trigger runtime a day,
+  which the 4-hourly refresh also draws on.
+- **A day is built by the same code as a crawled one, and judged by the
+  same guard** — `boardCards`, `validateBoard`, `historyRowsFor`. The guard's
+  board-level rules compare a day with another, and the live path has the
+  board it stored; the past has no such anchor. A chain of "the last day let
+  through" starts every window from a day judged against nothing, and a vote
+  of the two neighbours lets a broken stretch vouch for itself — so a day is
+  judged against **the rest of the 12-day span**, each item at its median
+  price across the other days. A broken day, or a short run of them, is
+  outvoted, and every day has a reference, the first and the newest alike.
+  What it cannot tell from a broken stretch is a real shift that lasts (a
+  typhoon week): the minority side of the span is refused — a missing day over
+  a wrong one — and those days are holes that a later job, whose spans fall
+  differently, judges again. A refused day is not written, and is listed
+  under the job's `rejected`. Each window fetches three
+  extra leading days that are never written: they are the *previous trading
+  day* rule (e) judges the first day against, and without them one day in
+  every nine would go into the archive unjudged. After a longer closure
+  (春節 runs 4–6 days) the first day still has none in reach, so it is
+  deferred: the next window ends on it, with its own days behind it.
+- **A window is written whole or not at all.** A day is skipped by date ever
+  after it is written, so a hole would be permanent. MOA answers a burst with
+  an *empty body* — not an empty `Data` — so a root it did not answer, even
+  after the retry, is told apart from one that did not trade, and fails the
+  window; the next link tries again. Two cases are stepped past once MOA has
+  answered the window the same way three times, or nothing older could ever
+  be reached: no probe rows dated inside the window at all (a hole in MOA's
+  own data; listed under `gaps`), and one or two crops refused while the
+  probe answered (written without them; listed under `partial`). A refused
+  probe, or a batch-sized hole, is a throttle — it hits the same place in
+  every burst — and keeps failing the window instead. Retries waiting on
+  MOA's answer to settle are not charged to the failure budget, so an
+  unrelated failure in between cannot stop the job one answer short.
+- **It never writes a day the live path can.** The job ends the day before
+  the board's trading date, fixed when it starts; the live archive only ever
+  writes that date or a later one. A day already in the Sheet — live or from
+  an earlier backfill — is left alone. That check runs *outside* the history
+  lock, and is safe there only because nothing else writes a date in the
+  job's range and one link writes at a time: a link takes a **lease** on the
+  job under the lock when it begins, appends only while it still holds it
+  (checked under the lock the append runs in) and finishes only while it
+  still holds it — so a link its watchdog has taken over, or one a resume has
+  revoked, can neither write a window twice nor its state over the newer
+  one. The append runs inside the lock, since the live archive appends too. The dates a tab
+  holds are read once per job and cached, not once per link.
+- **A truncated MOA response is refetched, not trusted.** Past ~1,000 rows MOA
+  keeps the newest and sets `Next: true`; the oldest day left can be missing
+  markets, and an average built from it is simply wrong. The window is halved
+  until each piece is whole, and a single day that still truncates leaves that
+  crop out of that day — missing is honest, wrong would be permanent.
+  If the probe root loses a day that way it still counts as trading, so the
+  next day is not judged against the one before it; any crop left out of a
+  day is withheld from the next one too, which has nothing to judge it by.
+  (`calibrate` has always refetched. The rolling history's seed crawls every
+  window in one execution, where open-ended refetches could push it past the
+  limit, so a cut root gets exactly one more request for what was cut; the
+  trend runs on the public path, where one request is the budget, and leaves
+  a cut oldest point out. Both used to average whichever markets MOA left
+  in.)
+- **It survives stopping.** The job — reach, cursor, counts, last error — is
+  one property. A failed window is retried by the next link, 3 then 6 minutes
+  later — a per-IP throttle lasts minutes, and retrying after a second would
+  spend every retry inside it; three in a row stop the chain as `failed`. A
+  link is counted *before* it works and arms a watchdog trigger for after the
+  execution limit, because one the 6-minute limit kills never reaches its
+  `catch` or its `finally` — so the watchdog retries it, and a window that is
+  always too slow ends as `failed` too, rather than stalling for ever. Asking
+  again with the same `months=` resumes a failed job, or a running one that
+  has not moved for 15 minutes, from its cursor; a different reach replaces
+  it (once its last link cannot still be running and write it back);
+  `cancel=1` stops it after the current window, and is kept in a property of
+  its own so the chain's next write cannot undo it. Requests are serialised
+  under the history lock, so two at once cannot start two chains.
+- **A new job skips what earlier ones finished** — but not what they moved
+  past without writing (refused days and gaps: the job's `holes`), which a
+  later job crawls again; a job with more holes than it can keep (40) claims
+  no coverage of its own rather than forget one; and only on the same spreadsheet;
+  pointed at a new one, nothing is skipped, and a running job whose
+  `HISTORY_SHEET_ID` changes under it ends itself as `failed` rather than
+  carry its cursor into another sheet (`cancel=1` works with the id cleared). Re-running a year would crawl ~40
+  windows to write nothing; a new `months=` steps over the range the jobs
+  before it covered without a request, so extending 12 months to 24
+  crawls only the new year. `months` must be a whole number (1–24; more is
+  clamped) — `months=0` is refused rather than read as a year. To redo a range
+  on purpose — after deleting rows by hand — delete the `veggie_sheet_backfill`
+  property.
+
+#### Reading it: the same weeks last year
+
+The archive's first reader is 「比去年同期」 (#22 §2). The refresh reads the
+archived blend rows within a week either side of the trading date a year
+back — column A of the year tab (two, across New Year) to find them, then
+only those rows; the current year's tab under the history lock, which only
+late in December is part of the window, since that is where the live path
+rewrites its day — and takes each crop's median, one value per day, over the SAME number of
+days from each side of the day itself (the nearest ones, and the day if
+archived), so a window with more on one side — a backfill that stopped
+part-way, a gap, a closure — cannot lean to that week. With at least two on
+each side, a crop gets
+`last_year_price` (元/台斤) and `vs_last_year_percent`, wholesale against
+wholesale like the baseline. A window spread too thin over the tab to read
+in a few calls — a tab sorted by another column, most likely — is reported as
+`scattered` in `diag` rather than read around.
+
+The read is the refresh's **last** step, after the board is stored and its
+outcome recorded — a slow Sheets read must never cost the board, and a
+timeout there costs only the comparison. The board is built with the
+medians kept from the last read, which after a new trading date are those of
+a window a day or two older: a ±7-day median barely moves. They are read
+again once a day; every six hours while a backfill that reaches the window
+runs, or after a tab was found too spread to read; and as soon as a backfill
+has finished since the last read — and
+nothing is published for a window a running backfill has not finished
+walking through, whose later days alone would pass for 「去年此時」. A
+refresh that has already run four minutes leaves the read to the next one,
+and `diag.sheet_history.year_ago.skipped_at` says so, with `skipped` saying
+why: `late`, or `failed` (the Sheet unreachable, or the history lock busy past
+the readers' five-second wait). It is shown as one line in the drawer and on no
+card: `drawer_opened` carries `has_last_year`, and whether it earns a badge
+is for those numbers to say. `diag.sheet_history.year_ago` reports which
+trading date it compares and how many crops it covers.
+
+#### Reading it: each variety against its own month
+
+The drawer breaks a blended price into its varieties, and could say what each
+costs today but not whether that is cheap *for that variety*: the 28-day
+baseline is the blend's, and 綠竹筍 at twice 麻竹筍 is not "expensive" (#22 §3).
+The archive keeps each variety's own row a day, so each gets its own median —
+over the item baseline's days (the item's most recent 28 archived trading days
+within the 45 before the board's date, the day itself left out). A variety's
+row is archived only on days the board broke the item down, which takes two
+varieties past the share and volume floors, so a crop nearly all one variety
+has rows for it only on a few contested days; a variety gets a median only
+when it was listed on at least half those 28 days, and ten at least. A
+variety just in season therefore waits a fortnight or so: from these rows it
+cannot be told from a dominant one only lately broken down. The
+row shows 「批發比近月低/高 N%」 as `varieties[].vs_baseline_percent` —
+wholesale, in 元/公斤 as the archive holds it, since the row leads with a
+retail estimate — hidden on a
+suspect day like everything that compares days. It is read exactly as the
+year-ago medians are: the refresh's last step, kept per trading date (chunked
+— a hundred items' varieties are more than one property holds), applied by
+the next build, read again on the same terms, the live year's tab under the
+lock — and not read while a backfill is still walking through the span, whose
+later days alone would give a fortnight's median as the month's
+(`waiting_for_backfill`). `diag.sheet_history.variety_baseline` reports what it covers, and a
+read left undone the same way — `skipped` also `not kept` when the property
+store would not take the result.
+
+Rows land in the order they were written, not in date order — the live days,
+then each window newest-first. Nothing reads the tab in order (the readers
+group by date), so sorting column A in the Sheets UI is safe at any time: the
+header row is frozen (the backfill freezes tabs the live archive made before
+it did), so it stays on row 1, and a sort by date keeps each
+day's rows together, which is all the correction path and the readers rely
+on. (Sort by any other column and a later correction reports the day
+`scattered` and leaves it alone. A reader checks every row's date, so order
+matters to it only as cost: a span it would need more than
+`ARCHIVE_MAX_READS` (20) separate reads for — a block an item — is reported
+`scattered` rather than read.)
+
+
 ### Static board mirror
 
 `data/board.json` is published *inside the frontend's own Pages artifact* by
@@ -384,26 +627,71 @@ Three reasons, none of which the client-side fallback could reach:
   that has already loaded the board once. The mirror is the last good board for
   *every* visitor, including a first-time one arriving while GAS is down.
 
-The mirror is republished every two hours (plus on every code deploy), so it
-trails the backend by at most ~2 h and a build. Two hours rather than the
-backend's own four: the refresh trigger is installed by hand, so its phase is
-arbitrary, and a 4-hourly fetch that lands minutes *before* it lands there
-forever — mirroring a board already 4 h old. That is not a hypothetical; the
-probe (§8) opened `[prod-alert] mirror_stale` on a mirror 8.4 h old while GAS
-held one 0.4 h old, which is what set this cadence. Halving it keeps the mirror
-inside the client's 6 h authority window below whatever the trigger's phase
-is. For a board of wholesale *closing* prices, published once a day after
-market close, the remaining lag is invisible.
+The mirror is republished **when a crawl lands**, plus on every code deploy and
+on a 2-hourly cron as the fallback. The dispatch is the mechanism: after a
+successful `refreshBoardCache()` the backend POSTs `{"event_type":
+"board-crawled"}` to this repository's `/dispatches`, which
+`deploy-pages.yml` listens for. API-triggered runs are not subject to the
+schedule throttling described below, so the mirror is published minutes after
+the board it mirrors exists, and its age is then bounded by the backend's own
+4 h refresh cycle — inside the client's 6 h authority window and the probe's
+8 h bound.
+
+That took two measurements to arrive at. The mirror trails the backend by the
+board's age when the deploy ran — 0–4 h, since the refresh trigger is installed
+by hand and its phase is arbitrary — plus everything since that deploy, and
+**that second term is not what the cron says it is.** Over the 222 h to
+2026-09-16 a `20 */2 * * *` schedule asked for ~111 runs and GitHub created 46:
+a median gap of 4.5 h against the 2 h it was written for, a worst of 11.2 h,
+none cancelled or skipped. So a typical mirror sat near the client's 6 h
+authority window, past which every visitor falls through to GAS, and the tail
+sat past the probe's 8 h bound — `[prod-alert] mirror_stale` on a mirror 8.8 h
+old beside a board crawled 0.8 h earlier (#66), the same fault as #42 one
+cadence earlier.
+
+[#67](https://github.com/sean1093/VeggieRadar/pull/67) then asked hourly for a
+week, to tell a ~59 % drop rate from an effective floor near 4 h. Over the
+137 h to 2026-09-21 that produced 33 successful runs: a median gap of 4.64 h, a
+worst of 7.34 h, a best of 2.07 h. The median did not move — twelve times the
+asks for a quarter of the runs is a throttle, not a lottery — so the cron went
+back to 2-hourly and the mirror's freshness moved onto the dispatch
+([#68](https://github.com/sean1093/VeggieRadar/issues/68)). The tail did
+improve, which is worth having but is not the number mirror age turns on. The
+`schedule:` comment in `.github/workflows/deploy-pages.yml` carries the
+re-measurement recipe — gaps between runs that *succeeded*, slurped with
+`jq -s` rather than gh's per-page `--jq`, both of which change the answer.
+
+The dispatch needs a `GH_DISPATCH_TOKEN` script property: a fine-grained PAT
+scoped to this repository with `contents: write` (§8). **Unset, the backend
+skips the POST entirely** and the 2-hourly schedule is all there is — the state
+this section described before the dispatch existed. A failure to dispatch is
+logged and swallowed, never thrown: it must not cost a crawl that succeeded.
+Every attempt is recorded as `diag.mirror_dispatch`
+(`{ at, outcome, last_ok }` — `last_ok` being when the mirror was last actually
+asked to publish, which the outcome alone cannot say), so an expired PAT reads
+as `rejected 401` where an operator looks rather than only in a log — otherwise
+mirror freshness would revert to the cron with nothing saying so. The dispatch also keeps a 30-minute floor: `?action=warm` is public and
+releases its lock when the crawl ends, so a visitor can drive crawls every few
+minutes, and a crawl costs the backend while a deploy costs a minute of CI
+against Pages' ten-an-hour soft limit. A crawl inside that window is dropped
+rather than deferred — the mirror keeps the previous board until the next
+crawl, and that board is at most one window older. Only an accepted dispatch
+arms the floor, since only that one cost a deploy; a rejection is retried by
+the next crawl, behind a 5-minute backoff of its own so an expired PAT cannot
+POST a doomed request every few minutes for as long as anyone keeps crawling.
+For a board of wholesale *closing* prices, published once a day after market
+close, the remaining lag is invisible.
 
 **A mirror is a file, and a file cannot know it went stale.** The `stale: false`
 and `age_ms` inside it froze the moment it was written, so the client recomputes
 the age from `generated_at` against the backend's own `BOARD_MAX_AGE_MS` (6 h,
 mirrored in `src/lib/utils/freshness.ts`): under it, the mirror answers the
-visit outright and is written to localStorage; over it, the prices still paint
-immediately and the read continues to GAS. **The self-heal chain is therefore
-unchanged** — a stale mirror sends the client to `/exec`, whose `readBoard`
-queues the rebuild exactly as before. The mirror is a layer in front of GAS,
-never a replacement for it.
+visit outright and is written to localStorage; over it, it is ranked against
+whatever is already on screen — it paints immediately when it is the newer of
+the two (see the table below) — and the read continues to GAS either way.
+**The self-heal chain is therefore unchanged** — a stale mirror sends the
+client to `/exec`, whose `readBoard` queues the rebuild exactly as before. The
+mirror is a layer in front of GAS, never a replacement for it.
 
 What each failure does, in the order the client meets them:
 
@@ -412,14 +700,22 @@ What each failure does, in the order the client meets them:
 | No mirror deployed yet (404) | the pre-mirror path: GAS, with the localStorage fallback |
 | Mirror is a truncated file, an error page, or breaks the §3 contract | reports `board_schema_mismatch` and asks GAS |
 | Mirror does not answer within 3 s | asks GAS — a CDN that slow is only delaying the request its absence makes necessary |
-| Mirror is stale **and** GAS is down | the stale mirror stays on screen with the connection note (`board_fallback`, `served: 'static'`) |
+| Mirror is stale **and** GAS is down | the newer of the stale mirror and whatever is already on screen stays there with the connection note (`board_fallback` names which: `static`, `cache`, or `gas` for a retry over prices GAS gave us earlier) |
+
+Past the authority window neither of those two is "what the app serves" — they
+are two copies of the past, ranked by the only thing that can rank them: when
+the backend crawled each one. Ranking them by source instead let a mirror
+whose deploy pipeline had been stuck for days outrank a board this browser
+loaded an hour earlier (#79). A board whose `generated_at` cannot be parsed
+never wins: its real age is unknown, which is the same reason `boardAgeMs`
+counts it stale.
 
 The publish side is symmetric: a mirror is only overwritten by a payload that
 passes `frontend/scripts/validate-board.mjs` (the §3 contract, ≥ 60 items,
 crawled < 8 h ago, every item priced), and a failed fetch or a rejected board
 re-publishes the *previous* mirror rather than failing the deploy — a code
 change must not be blocked by a backend outage, and an unvalidated file would
-serve wrong prices for two hours (§8).
+serve wrong prices until the next deploy republishes the mirror (§8).
 
 ### Alerting: a broken pipeline has to reach a human
 
@@ -447,13 +743,29 @@ observation.
 Alerting swallows every error by design: it sits on both the refresh and the
 serving path, and no mail-quota, properties or lock failure may take the board
 down with it. `diag` reports `alert.failure_streak` / `alert.incident_open` /
-`alert.last_sent` / `alert.recipient_configured` — never the address, since
-`diag` is public. The recipient is not in the source either: `alertRecipient()`
-reads the `ALERT_EMAIL` script property, and that property is **required** —
-there is deliberately no fallback to the deploying account's e-mail, because
-reading it needs the `userinfo.email` scope the manifest does not grant, and
-adding a scope forces re-consent before the Web App runs again. Unset, every
-mail fails as `no_recipient` and `diag` shows `recipient_configured: false`.
+`alert.last_attempt` / `alert.recipient_configured` / `alert.last_send_failure` —
+never the address, since `diag` is public. The recipient is not in the source
+either: `alertRecipient()` reads the `ALERT_EMAIL` script property, and that
+property is **required** — there is deliberately no fallback to the deploying
+account's e-mail, because reading it needs the `userinfo.email` scope the
+manifest does not grant, and adding a scope forces re-consent before the Web
+App runs again. Unset, every mail fails as `no_recipient` and `diag` shows
+`recipient_configured: false`.
+
+Opening an incident does **not** depend on being able to send one, which is
+also why the timestamp is `last_attempt` rather than `last_sent`: it is when
+the incident window armed, and `last_send_failure` is what says whether
+anything left the building.
+`sendAlertMail` returns a failure *category* rather than throwing, and both
+callers open the incident either way, so `incident_open` says what the backend
+knows about itself and `last_send_failure` says why the mailbox is silent. It
+used to throw: `openIncident` never ran, the cooldown never armed, and a
+deployment with no `ALERT_EMAIL` reported `incident_open: false` for a pipeline
+that had already given up — which the external probe reads as health (#65).
+Recovery is the mirror of that rule: a failed all-clear keeps the incident open
+so the next healthy refresh retries it, except for `no_recipient`, where no
+retry can ever deliver and holding it open would page the probe forever for a
+backend that recovered.
 `?action=alerttest` needs the operator token; its limiter stays
 as defence in depth and is a durable timestamp rather than a cache key, since
 cache eviction would otherwise re-open the endpoint.
@@ -521,8 +833,8 @@ GET {WEB_APP_URL}/exec
 }
 ```
 `avg_price` is `元/公斤`. `catty_price`, the three `retail_*` fields,
-`baseline_price` and both `varieties[].catty_price` / `varieties[].retail_price`
-are `元/台斤`.
+`baseline_price`, `last_year_price` and both `varieties[].catty_price` /
+`varieties[].retail_price` are `元/台斤`.
 `retail_estimated` is always `true` — see §4.
 
 **Every derived field is optional and clients must treat it as such**: an older
@@ -533,8 +845,10 @@ does not justify publishing.
 | --- | --- |
 | `retail_*` | the cached board predates the retail band |
 | `baseline_price`, `vs_baseline_percent` | fewer than 10 in-horizon observations for that crop (§5) |
+| `last_year_price`, `vs_last_year_percent` | no long-term archive configured, or fewer than two archived trading days for that crop on either side of this date a year back, within a week of it (§2) |
 | `varieties` | fewer than 2 varieties clear the share and volume thresholds (§5) |
-| `suspect` | the item's numbers are plausible; it appears only on an item the guard flagged (§2), whose change and baseline the client must then hide |
+| `varieties[].vs_baseline_percent` | no long-term archive configured, or fewer than 10 archived days for that variety within the 45 days before this date (§2) |
+| `suspect` | the item's numbers are plausible; it appears only on an item the guard flagged (§2), whose change, baseline and year-ago comparison the client must then hide — everything that compares today with another day |
 
 `date` is the trading date; `generated_at` is when the backend crawled. See
 "Trading date vs. refresh time" in §2 — clients must not present the trading date
@@ -605,19 +919,36 @@ GET {WEB_APP_URL}/exec?action=backfill&token=…[&force=1]
      "history": { "items": 97, "min_days": 1, "max_days": 24 } }
 → { "type": "backfill", "error": "unauthorized", "message": "此操作需要 token 參數" }   # wrong or missing token
 
+GET {WEB_APP_URL}/exec?action=backfill&sheet=1&token=…[&months=12 | &cancel=1]
+→ { "type": "backfill", "sheet": true, "queued": true, "message": "已排入背景回填",
+     "job": { "status": "running", "months": 12, "from": "2025-09-21", "to": "2026-09-20",
+              "cursor": "2026-09-20", "windows": 0, "days_written": 0, "days_skipped": 0,
+              "rows_written": 0, "failures": 0, "last_error": null, ... } }
+→ without `months` — status only, nothing crawled or queued, plus what the Sheet holds
+   (counted at most every ten minutes; `as_of` says when):
+   { ..., "queued": false, "archive": { "rows": 61234, "days": 249, "first_date": "2025-09-22",
+                                        "last_date": "2026-09-22", "as_of": "…" } }
+
 GET {WEB_APP_URL}/exec?action=diag[&token=…]
 → { "type": "diag", "board": { "generated_at": ..., "stale": false },
      "triggers": ["refreshBoardCache"], "last_refresh_ok": "...", "last_refresh_fail": null,
      "last_validation": { "at": "2026-09-02T16:05:08.087Z", "ok": true, "reasons": [], "suspects": [] },
      "history": { "items": 97, "min_days": 1, "max_days": 24 },
-     "alert": { "failure_streak": 0, "incident_open": false, "last_sent": null, "recipient_configured": true } }
+     "mirror_dispatch": { "at": "2026-09-21T16:04:11.201Z", "outcome": "dispatched",
+                          "last_ok": "2026-09-21T16:04:11.201Z" },
+     "sheet_history": { "configured": true, "last_write": { "date": "2026-09-22", "generated_at": "…" },
+                        "backfill": { "status": "running", "cursor": "2026-06-14", "windows": 11, ... } },
+     "alert": { "failure_streak": 0, "incident_open": false, "last_attempt": null, "recipient_configured": true,
+                "last_send_failure": null } }
 
 GET {WEB_APP_URL}/exec?action=alerttest&token=…
 → { "type": "alerttest", "sent": true, "message": "已寄出測試信" }
 ```
 `warm` and `backfill` both queue their crawl in a one-off trigger and answer at
 once — the crawls take minutes and would blow the Web App response window.
-`backfill` is idempotent per trading date, so re-running only fills gaps. `diag`
+`backfill` is idempotent per trading date, so re-running only fills gaps; with
+`sheet=1` it backfills the long-term archive instead (§2), and `diag` publishes
+that job's progress but never its `last_error`, which is platform text. `diag`
 is how you tell "markets closed" from "refresh pipeline dead" without the GAS
 console, and how you confirm history coverage after a backfill.
 
@@ -840,12 +1171,12 @@ wrapper, `src/lib/analytics.ts`. Each event exists to settle a decision:
 | Event | Params | Decision it informs |
 | --- | --- | --- |
 | `board_loaded` | `source` (`static` / `gas`), `stale`, `age_bucket` | Baseline for every ratio below; `source` is how the mirror's share of the reads is measured — the number that says whether GAS still carries the board (§2). A cache paint sends nothing: it is not yet a load |
-| `board_fallback` | `served` (`static` / `cache` / `none`) | Fallback rate. `static` means the mirror went stale *and* GAS is down — a pipeline incident; `cache` is one browser's own copy saving one visit |
+| `board_fallback` | `served` (`static` / `cache` / `gas` / `none`) | Fallback rate. `static` means the mirror went stale *and* GAS is down — a pipeline incident; `cache` is one browser's own copy saving one visit; `gas` is a retry over a board GAS itself gave us earlier |
 | `search_result` | `outcome` (`local_hit` / `remote_hit` / `not_found` / `transient`), `query_length` | Live-miss and busy rates → the search index in #21; whether the 15 s deadline holds |
 | `sort_changed` | `mode` | 划算優先 adoption → 「今日推薦」 (§9) |
 | `filter_changed` | `filter` | Which categories and 關注 get used |
 | `watch_toggled` | `on`, `count_bucket` | Whether a watchlist summary is worth building |
-| `drawer_opened` | `has_varieties`, `has_baseline`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen |
+| `drawer_opened` | `has_varieties`, `has_baseline`, `has_last_year`, `has_retail` | Whether §5's variety breakdown and baseline are ever seen; `has_last_year` is how #22 decides whether 「比去年同期」 earns a place on the card (it is drawer-only until then). Sent once per open, with what the user saw: when the board's read finishes (`useBoard().settled`), or when the drawer closes first — so an open that lasts into the fresh board is not counted with a cached copy's flags, and one closed before it is still counted |
 | `share` | `method` (`web_share` / `clipboard`), `has_retail` | Whether sharing earns the per-item preview pages (§9), and how much of it goes through the native sheet |
 | `trend_result` | `outcome` (`ok` / `empty` / `failed`), `reason` | Whether the trend deadline is right; memo hits are not reported |
 | `chunk_failed` | `chunk` | Cost of the code split |
@@ -884,7 +1215,7 @@ npm run test:coverage  # v8 coverage report
 ./scripts/icons.sh     # rasterise public/icon-*.png from favicon.svg (needs librsvg);
                        # only after the brand mark changes — the PNGs are committed
 ```
-504 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
+577 tests at ~97% statement / ~93% branch coverage. `vitest.config.ts` pins
 `TZ=Asia/Taipei`: the freshness assertions are written in the audience's local
 time and would otherwise pass only on machines in that zone (a UTC CI runner
 caught exactly that).
@@ -1000,9 +1331,29 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
      There is one token, with no expiry or scope: rotating it means changing
      both places.
    - `ALERT_EMAIL` — **required**: where failure alerts go. Unset, no alert
-     can be sent (`diag` shows `recipient_configured: false`, and
-     `?action=alerttest` answers `no_recipient`). See §2 for why there is no
-     fallback to the deploying account.
+     can be sent (`diag` shows `recipient_configured: false` and, once
+     something has failed, `last_send_failure: "no_recipient"`;
+     `?action=alerttest` answers `no_recipient`). The incident still opens, so
+     the external probe still sees it. See §2 for why there is no fallback to
+     the deploying account.
+   - `GH_DISPATCH_TOKEN` — optional, and the difference between a mirror that
+     follows the crawl and one that follows a cron. A **fine-grained PAT
+     scoped to this repository with `contents: write`** — which is what
+     `POST /dispatches` requires, and it is push access to this repository, so
+     the Apps Script project holds it. With it set, every
+     successful refresh asks GitHub to republish the mirror; unset, the
+     backend skips the POST and `deploy-pages.yml`'s 2-hourly schedule is the
+     fallback (§2). Rotating it is one property: a stale token logs
+     `requestMirrorDeploy: GitHub answered 401` and costs nothing else.
+   - `HISTORY_SHEET_ID` — optional: the id of a Google Sheet you own, and the
+     whole of the long-term archive's configuration (§2). Unset, nothing is
+     written and nothing is opened. **The `spreadsheets` scope is declared
+     whether or not you set this**, so the next deploy asks you to re-consent
+     either way — verify it on a canary deployment first, as with the mail
+     scope. `diag.sheet_history` says whether it is configured and what was
+     last written, from the properties alone. Once a refresh has stored a
+     board, `?action=backfill&sheet=1&months=12&token=…` fills in the past
+     year (§2); `diag.sheet_history.backfill` shows it walking back.
 3. Run `installDailyTrigger()` once in the editor — it installs the refresh
    trigger on `REFRESH_INTERVAL_HOURS` and warms the board so the first visitor
    never hits a cold crawl. Confirm with `?action=diag`: `triggers` must list
@@ -1030,12 +1381,24 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   the default branch runs the tests, builds `frontend/` and publishes to Pages. In
   the repo, set **Settings → Pages → Source: GitHub Actions**. Live at
   `https://<user>.github.io/VeggieRadar/` (`vite.config.ts` `base` is `/VeggieRadar/`).
-  It also runs on `schedule: '20 */2 * * *'`, because the static board mirror
-  (§2) is only as fresh as the last deploy — and the backend's refresh trigger
-  is installed by hand, so a fetch on the *same* 4-hourly period can sit
-  permanently on the wrong side of it. Twelve deploys a day sits far below
-  Pages' soft limit of ten per hour, and `concurrency: pages` still keeps one
-  deploy at a time.
+  It also runs on `repository_dispatch: [board-crawled]` — the backend asks for
+  the deploy when a crawl lands (§2), which is what keeps the static board
+  mirror fresh — and on `schedule: '20 */2 * * *'` as the fallback for a
+  deployment with no `GH_DISPATCH_TOKEN` set. The schedule used to be the
+  mechanism; a week of hourly ticks showed GitHub throttling them to a 4.64 h
+  median whatever the cron asks, so the asks went back to 2-hourly (§2). At
+  most 12 scheduled deploys a day plus one per crawl — the backend refreshes
+  4-hourly, and the dispatch keeps a 30-minute floor of its own, since
+  `?action=warm` is public — sits well below Pages'
+  soft limit of ten per hour, and `concurrency: pages` keeps one deploy at a
+  time — with `cancel-in-progress: false`, so a scheduled tick can never kill a
+  push deploy inside `actions/deploy-pages`. Both jobs carry
+  `timeout-minutes: 15` for the same reason: a hung run holds the group for the
+  whole workflow, so the worst case is half an hour of ticks queuing and being
+  cancelled with nothing republished, against the 12 h two jobs at the default
+  would allow. Every run lints and tests before
+  publishing, scheduled ones included: skipping that would let the next tick
+  publish a master whose own deploy had just failed on a red test.
   The **Fetch board mirror** step runs after the suite and before the build:
   it fetches `?action=board` with `scripts/fetch-retry.mjs` (the URL read from
   the committed `frontend/.env`, so no secret), validates it with
@@ -1049,7 +1412,7 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
   validator's question, an empty one is refused outright. The Pages fetch runs
   in `static` mode, where a 404 is the final answer ("nothing published") and
   only a 5xx or a dead connection is retried. One attempt was how the mirror froze for a whole day
-  on 2026-09-13 (#53): Apps Script answered each 2-hourly fetch with its
+  on 2026-09-13 (#53): Apps Script answered each scheduled fetch with its
   cold-start 404 after queueing it for ~15 s, every run "succeeded" by
   republishing the same 04:22 board, and GAS itself was healthy the entire
   time. **The step never fails the job**: a failed fetch or a rejected board
@@ -1085,7 +1448,9 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
     rotate it if the secret ever leaks.
 
 > A board rebuilt out of band — after `warm`, or after a backfill — reaches the
-> mirror only on the next scheduled deploy, up to two hours later. Running
+> mirror only on the next scheduled deploy — and §2 measures that wait at a
+> median 4.5 h under the previous cadence, rather than the interval the cron
+> asks for. Running
 > `deploy-pages` by `workflow_dispatch` refreshes it immediately; visitors see
 > the new prices either way, since a mirror older than 6 h sends the client to
 > GAS (§2).
@@ -1108,11 +1473,27 @@ could drift:
 | --- | --- | --- |
 | `pages` | 200, `<title>` still contains 今日菜價, and a `<script type="module">` is present — a Pages deploy that lost its bundle still serves a plausible shell | `pages_down` |
 | `mirror` | `data/board.json` is 200, matches the schema and was crawled < 8 h ago — the same bound the publish-side validator applies (§2). **A 404 stays `skipped`**, not a failure: a deploy that could obtain no mirror at all publishes without one on purpose, and the visitors it sends to GAS are covered by `gas_board` below | `mirror_stale` |
-| `gas_board` | the body is JSON (Apps Script answers platform errors with HTML and HTTP 200), matches the schema, `stale === false`, `count ≥ 60`, crawled < 8 h ago | `gas_error` / `gas_stale` |
-| `gas_diag` | `?action=diag` answers JSON | `gas_error` |
+| `gas_board` | the body is JSON (Apps Script answers platform errors with HTML and HTTP 200), matches the schema, `stale === false`, `count ≥ 60`, crawled < 8 h ago | `gas_unreachable` / `gas_error` / `gas_stale` |
+| `gas_diag` | `?action=diag` answers JSON | `gas_unreachable` / `gas_error` |
 | `gas_trigger` | `triggers` includes `refreshBoardCache` | `trigger_missing` |
 | `gas_incident` | `alert.incident_open === false` | `incident_open` |
 | `gas_history` | `history.items ≥ 60` | `history_thin` |
+| `mirror_dispatch` | the dispatch is working, or failed within the last 8 h of an accepted one | `dispatch_failing` (⚠️ only, never a page) |
+
+`mirror_dispatch` is the one check that can never page. With no
+`GH_DISPATCH_TOKEN` it is *skipped* — that is how the backend ships, and the
+2-hourly cron is the mechanism (§2). With one configured, a rejection (an
+expired PAT answers 401 on every crawl) costs freshness, not availability: the
+cron still publishes and the `mirror` check above is what bounds how old the
+file may get. So it is reported and named, with the property to look at, and
+the run stays green.
+
+What it reports is the *silence*, not a single bad POST: one rejection minutes
+after an accepted dispatch is a missed deploy the next crawl retries, so it
+warns only once nothing has been accepted for 8 h — two missed crawls at the
+backend's 4 h cadence, which is also the age at which the `mirror` check itself
+starts calling a board too old. A record with neither a known outcome nor a
+timestamp is `skipped` rather than assumed healthy.
 
 `60` is `BOARD_HEALTHY_ITEMS` in `board.schema.ts`: a typical day publishes
 ~90 of ~100 defined items (§1), and MOA throttling a batch shows up as a board
@@ -1125,24 +1506,121 @@ today.** The trading date legitimately stands still over weekends, holidays and
 typhoon closures (§2, "Trading date vs. refresh time"), so a `date`-based check
 would page a human every Sunday and be ignored by the second one.
 
-**The two GAS checks retry, and so do the deploy's two mirror fetches (§8);
-nothing else does** — all through `scripts/gas-retry.mjs`, so there is one
-policy to tune.
+**Every scheduled request this repo makes retries** — the probe's four checks
+and the deploy's two mirror fetches (§8), all through `scripts/gas-retry.mjs`,
+so there is one policy to tune. What differs is whose 404 it is: on Apps
+Script a 404 is a cold start and is asked again, while on GitHub Pages it is
+the definitive “nothing published here” and is final (`isTransientStatic`).
+The two static checks matter more than they look, because `mirror` passing is
+what softens an unreachable backend — a lone CDN blip there would withdraw the
+softening and open the false alarm this policy exists to prevent.
 Apps Script answers a cold start on `/exec` with a platform 404 HTML page, and
 an account near its quota queues a request until the deadline expires — the app
 itself makes three attempts for exactly this reason (§2). The probe made one,
 so two cold starts in two days opened two `prod-alert` issues that the next run
 closed again, with an e-mail each time. Reachability failures (a timeout, DNS,
-404, 5xx) are therefore retried up to 3 times with a 2 s then 4 s backoff, and
-the alert says `after 3 attempts` so a blip stays distinguishable from an
-outage. A **200 is never retried**, whatever its body: a stale board, a short
+404, 5xx) are therefore retried, and the alert says `after N attempts` so a
+blip stays distinguishable from an outage. The shared default is 3 attempts
+with a 2 s then 4 s backoff; the probe's two GAS checks widen that to **4
+attempts, 5 s linear**, because on 2026-09-15 a cold-start window outlasted the
+default and opened one more self-closing issue. How long that actually takes
+depends on the symptom: a cold-start 404 comes back in about a second, so the
+default spent ~10 s and the widened budget spends ~35 s, while a request queued
+against the 30 s deadline can stretch either to 3 × or 4 × that plus the
+backoff (96 s and 150 s respectively). That deadline is deliberately no
+shorter than the deploy's: the deploy still refreshing the mirror is what
+softens an unreachable backend, so a probe that gave up sooner than the deploy
+does would hold a queued backend green forever. A **200 is never retried**, whatever its body: a stale board, a short
 count, schema drift or a platform HTML page is evidence that `doGet` answered,
 and a second attempt would only hide a real fault for a minute.
 
+**An unreachable backend does not page while the mirror is serving.** The app
+reads `data/board.json` before it ever reaches GAS (§3), so `/exec` answering
+404 for a minute still leaves every visitor with today's prices. Two things do
+degrade meanwhile: the drawer's trend sparkline is empty, and a search for a
+crop the board does not carry answers 「服務忙碌中，請稍後再試」 instead of a
+result. Both are bounded; neither is the board going dark. So
+`gas_unreachable` — a request that never reached `doGet` — is reported as ⚠️
+**`degraded`** rather than failed while the mirror is genuinely carrying
+visitors: a row in the summary and a run annotation, no issue and no red run.
+`frontend/scripts/probe-verdict.mjs` holds that one rule, and four guards keep
+it honest:
+
+- **“Carrying visitors” is the app's bar, not the probe's.** `useBoard` serves
+  the mirror without asking GAS only while it is under `BOARD_MAX_AGE_MS`
+  (6 h) — not the 8 h the `mirror` check allows. A mirror in the 6–8 h band
+  passes its own check while every visitor falls through to a backend that is
+  not answering, and that band is exactly where an outage lands, because the
+  deploy cannot refresh the mirror while GAS is down. Above 6 h, the probe
+  pages.
+- **Only the board endpoint may be softened.** The 8 h backstop exists because
+  `deploy-pages.yml` refreshes the mirror from `?action=board`, so it engages
+  when *that* endpoint is silent. A quiet `?action=diag` beside a healthy board
+  has no backstop at all — the mirror would keep refreshing forever while
+  `gas_trigger`, `gas_incident` and `gas_history` sat at `skipped` and nobody
+  learned the baselines stopped publishing — so it pages. `handleDiag` does
+  real work per call while `readBoard` is a cache read, which is exactly how
+  diag fails alone.
+- **A stale mirror beside a healthy backend is degraded too.** The rule runs
+  both ways, because the app reads a board from two places: an outage is one
+  path down, a fault is both. `useBoard` paints the stale mirror and
+  `fetchBoard` then replaces it with current prices, so what a late deploy
+  costs is the CDN fast path — a round trip and a GAS execution per visit —
+  not the board. That softening needs `gas_board` to be **`ok` and to have
+  answered on its first attempt, inside `BOARD_TIMEOUT_MS`** — the probe is
+  more patient than the app in two directions, and neither may count here. It
+  waits 30 s per attempt where the browser waits 12, so an answer a queued Apps
+  Script took 25 s to give is one every visitor timed out on; and it retries
+  four times over 30 s where `fetchBoard` spends three attempts in about 2.7 s,
+  so a board won on the fourth attempt is fast on arrival and still a board
+  nobody was served. Either way a stale mirror must still page. Both numbers
+  are in the `gas_board` row, so the issue says why. It stops at **16 h**: the worst lateness this project has produced is
+  the 11.2 h deploy gap plus a 4 h crawl, and the margin above that is kept
+  small because every hour of it is an hour the CDN fast path is bypassed with
+  nobody told. That is a bound on the verdict, not on the alert: the probe's
+  own schedule is measured at a 6.6 h median and an 8.8 h worst, so a frozen
+  mirror can go unreported until about 25 h, against 17 h before any softening
+  existed. Past it the mirror is not late — #53's
+  froze while the deploys themselves kept succeeding, which no gap bounds. A mirror whose
+  `generated_at` is missing, unparsable or in the future is corrupt rather
+  than late and is never softened. Each softening requires the other path to
+  be healthy, so they are mutually exclusive and a run where neither serves
+  always pages.
+- **A short board is not a served board.** The mirror must also carry
+  `BOARD_HEALTHY_ITEMS`. A throttled MOA batch is normally caught by
+  `gas_board`'s count guard, which during an outage never gets a body to
+  measure.
+- **Only what was retried counts as unreachable** (404, 5xx, no answer at
+  all). A 403 on a deployment whose access was narrowed, a redirect, or a 200
+  with an empty body came *from* the backend and pages as `gas_error`.
+- **A run closes only what it actually verified.** A category counts as
+  verified when every check that could report it came back `ok`, derived from
+  the run rather than assumed — and a `degraded` check is not `ok`. So a run
+  with a silent backend closes an alert naming only `pages_down` or
+  `mirror_stale`, while one with a late mirror holds `mirror_stale` open and
+  closes `pages_down`. Whatever a run did not measure stays open with a
+  「still degraded」 comment: `gas_board` got no body, the three checks behind
+  `diag` are `skipped`, and an over-quota backend moves between answering
+  wrongly and not answering at all.
+  The same rule catches a quieter case — a deploy that published no mirror
+  leaves `mirror` at `skipped`, which is no evidence that a `mirror_stale`
+  alert recovered, so it is held open as 「not verified」. A title that does
+  not name known categories is read as covering everything, and closes only on
+  a run that measured the lot.
+
+With no mirror published at all the `mirror` check is `skipped`, GAS is the
+only path a visitor has, and its silence pages like any other outage. Contract
+failures (`gas_error`, `gas_stale`) always page — something answered, and
+answered wrongly.
+
 A failing run comments on the open issue labelled **`prod-alert`**, and only
 opens `[prod-alert] <categories> since <date>` when there is none (creating the
-label on first use). A fully passing run comments 「recovered」 on that issue
-and closes it. So at most one alert is ever open: a fresh issue every 6 hours
+label on first use). It also folds any category it found into that title, so
+the title always states what the whole incident covers — later runs only
+comment, and the recovery rule above reads the title to decide what a degraded
+run is allowed to close. A fully passing run comments 「recovered」 on that issue
+and closes it, except for the categories a degraded run cannot vouch for
+(above), which keep it open. So at most one alert is ever open: a fresh issue every 6 hours
 would bury the first one and train its reader to ignore the label — the same
 reason the e-mail alerting has an incident window. The job also goes red
 whenever the probe did, and appends the summary table to the run's step
@@ -1150,12 +1628,20 @@ summary. It needs no secret; every endpoint it touches is public (§2).
 
 ```bash
 cd frontend
-node --experimental-strip-types scripts/prod-probe.mjs   # writes probe-result.json, exit 1 on any failure
+node --experimental-strip-types scripts/prod-probe.mjs   # writes probe-result.json, exit 1 on anything that pages
+npx vitest run scripts/                                 # the verdict rules, and the probe end to end
 ```
-The flag is required on Node 22.6–22.17 and a no-op from 22.18 on.
+The flag is required on Node 22.6–22.17 and a no-op from 22.18 on. A degraded
+run exits **0** — the exit code is the paging decision, not a health score, and
+`probe-result.json` carries the per-check detail either way.
+
 `workflow_dispatch` takes `pages_url` / `api_base_url` inputs, so the alert
-path can be exercised against a deliberately bad URL instead of waiting for a
-real outage.
+path can be rehearsed against a deliberately bad URL instead of waiting for a
+real outage. Use `pages_url`: a bad `api_base_url` alongside the real, fresh
+mirror is precisely the case the degraded rule absorbs, so it now ends green
+with two ⚠️ rows and no issue — which rehearses the *softening*, not the
+alert. To exercise the alert through GAS, point `pages_url` somewhere with no
+`data/board.json`, so the mirror check is `skipped` and nothing is softened.
 
 Not UptimeRobot or a similar service: Actions is already free here, and what
 has to be verified is the schema and the freshness rather than an HTTP 200 —

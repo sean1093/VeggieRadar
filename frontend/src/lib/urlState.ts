@@ -77,11 +77,19 @@ export function serializeUrlState(state: UrlState): string {
 
 /**
  * The absolute link the share button hands out. Deliberately just the item:
- * the sharer's filter, sort and search are how *he* was reading the board.
+ * the sharer's filter and sort are how *he* was reading the board.
+ *
+ * `query` is the one exception, and only the caller knows when it applies. A
+ * card that came back from live search is on nobody's board — not the
+ * sharer's and not the recipient's — so the query that found it is the only
+ * thing that can make it reappear. Without it the recipient's `useBoardView`
+ * finds nothing under that name and answers 「今日無交易資料」 for a price
+ * the sharer was looking at seconds earlier. For an item on the board it is
+ * omitted, so ordinary links stay short.
  */
-export function itemUrl(name: string): string {
+export function itemUrl(name: string, query = ''): string {
   const { origin, pathname } = window.location;
-  return `${origin}${pathname}${serializeUrlState({ ...BOARD, item: name })}`;
+  return `${origin}${pathname}${serializeUrlState({ ...BOARD, item: name, query: query.trim() })}`;
 }
 
 const listeners = new Set<() => void>();
@@ -127,7 +135,12 @@ function write(patch: Partial<UrlState>, mode: 'push' | 'replace'): void {
   // The pushed entry is marked so `closeDrawerUrl` can tell it apart from a
   // deep link that arrived on its own entry.
   if (mode === 'push') history.pushState({ drawer: true }, '', url);
-  else history.replaceState(null, '', url);
+  // `history.state`, not null: a replace changes what the entry *points at*,
+  // never which entry it is. Passing null wiped the `{ drawer: true }` marker
+  // — reachable when a settling word rewrites the URL over an open drawer —
+  // and `closeDrawerUrl` then rewrote the entry in place instead of going
+  // back, so ✕ left the drawer's entry in the history for the back key.
+  else history.replaceState(history.state, '', url);
   for (const onChange of listeners) onChange();
 }
 
