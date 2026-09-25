@@ -148,6 +148,47 @@ describe('marketSightings', () => {
     expect(seen[0]).toMatchObject({ name: '台北二', codes: ['104'], region: '北', days: 2, volume: 1500 });
   });
 
+  it('counts a transaction once when two roots’ responses overlap', () => {
+    // MOA substring-matches CropName, so a request for 蘿蔔 also answers with
+    // 胡蘿蔔's rows: the same transaction arrives under both roots. Summed raw
+    // it would double that market's volume, and with it the 占全國 column and
+    // the unmapped-volume share the whole report is gated on.
+    const shared = { TransDate: '115.09.01', CropName: '胡蘿蔔', MarketName: '台北一',
+                     MarketCode: '109', Avg_Price: 20, Trans_Quantity: 1000 };
+    const seen = marketSightings(new Map([
+      ['蘿蔔', [shared, { ...shared, CropName: '蘿蔔', Trans_Quantity: 500 }]],
+      ['胡蘿蔔', [shared]],
+    ]));
+    expect(seen).toHaveLength(1);
+    // 1000 for 胡蘿蔔 once, plus 500 for 蘿蔔 — not 2000 + 500.
+    expect(seen[0].volume).toBe(1500);
+  });
+
+  it('keeps a row that differs in price or quantity, however alike it looks', () => {
+    // De-duplication may only remove the overlap, which is the same row field
+    // for field. Anything else is a transaction, and dropping one would
+    // understate a market exactly as double-counting overstates it.
+    const base = { TransDate: '115.09.01', CropName: '甘藍', MarketName: '台北一',
+                   MarketCode: '109', Avg_Price: 20, Trans_Quantity: 1000 };
+    const seen = marketSightings(new Map([['甘藍', [
+      base,
+      { ...base, Trans_Quantity: 700 },
+      { ...base, Avg_Price: 25 },
+      base, // the overlap: identical, counted once
+    ]]]));
+    expect(seen[0].volume).toBe(1000 + 700 + 1000);
+  });
+
+  it('keeps the same crop in two markets, or on two days, as two transactions', () => {
+    const base = { CropName: '甘藍', Avg_Price: 20, Trans_Quantity: 1000 };
+    const seen = marketSightings(new Map([['甘藍', [
+      { ...base, TransDate: '115.09.01', MarketName: '台北一', MarketCode: '109' },
+      { ...base, TransDate: '115.09.01', MarketName: '台中市', MarketCode: '400' },
+      { ...base, TransDate: '115.09.02', MarketName: '台北一', MarketCode: '109' },
+    ]]]));
+    expect(seen.map((m) => m.volume).sort()).toEqual([1000, 2000]);
+  });
+
   it('surfaces a market the region table has never been confirmed to contain', () => {
     const seen = marketSightings(new Map([['甘藍', [row('115.09.01', '新竹市', 20, 1000)]]]));
     expect(seen[0].region).toBe('其他');

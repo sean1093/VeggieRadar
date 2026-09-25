@@ -46,12 +46,19 @@ export type CropDef = {
 
 export type WeightedAverage = { avg: number; volume: number; markets: number };
 
+/** What `parsePage` makes of one MOA response. */
+export type MoaPage = { rows: MoaRow[]; answered: boolean; next: boolean };
+
+/** The two methods `parsePage` calls on a GAS `HTTPResponse`. */
+export type ResponseLike = { getResponseCode: () => number; getContentText: () => string };
+
 export type Backend = {
   BOARD_ITEMS: CropDef[];
   MIN_TRADE_VOLUME: number;
   CATTY_PER_KG: number;
   BACKFILL_WINDOW_DAYS: number;
   AGRICULTURE_API_URL: string;
+  parsePage: (resp: ResponseLike) => MoaPage;
   selectRows: (rows: MoaRow[], def: CropDef) => MoaRow[];
   tradedRows: (rows: MoaRow[]) => MoaRow[];
   weightedAverage: (rows: MoaRow[]) => WeightedAverage;
@@ -64,7 +71,7 @@ export type Backend = {
 
 const EXPORTED = [
   'BOARD_ITEMS', 'MIN_TRADE_VOLUME', 'CATTY_PER_KG', 'BACKFILL_WINDOW_DAYS',
-  'AGRICULTURE_API_URL', 'selectRows', 'tradedRows', 'weightedAverage',
+  'AGRICULTURE_API_URL', 'parsePage', 'selectRows', 'tradedRows', 'weightedAverage',
   'median', 'boardRoots', 'dateToROC', 'rocToISO', 'cropUrl',
 ];
 

@@ -20,7 +20,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadBackend } from './backend.ts';
-import type { MoaRow } from './backend.ts';
+import type { MoaPage, MoaRow } from './backend.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 /**
@@ -41,9 +41,21 @@ export const RETRY_PAUSE_MS = 1_500;
 const TIMEOUT_MS = 120_000;
 
 export type DateRange = { from: string; to: string };
-export type FetchStats = { requests: number; cacheHits: number; retries: number; failures: number };
+export type FetchStats = {
+  requests: number;
+  cacheHits: number;
+  retries: number;
+  failures: number;
+  /**
+   * Single-day windows MOA still truncated. Halving has a floor, so such a day
+   * keeps only the newest rows — a partial market set, which is the fabricated
+   * regional move this tool exists to rule out. It cannot be fixed by fetching
+   * differently, so it is counted and reported instead of passing silently.
+   */
+  truncatedDays: number;
+};
 
-export const stats: FetchStats = { requests: 0, cacheHits: 0, retries: 0, failures: 0 };
+export const stats: FetchStats = { requests: 0, cacheHits: 0, retries: 0, failures: 0, truncatedDays: 0 };
 
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
@@ -87,70 +99,84 @@ export async function fetchRoot(root: string, from: string, to: string): Promise
     const batch = pending.splice(0, pending.length);
     const results = await inBatches(batch, async (window) => {
       const url = backend.cropUrl(root, roc(window.from), roc(window.to));
-      const body = await cachedText(url);
-      return { window, payload: JSON.parse(body) as { Data?: MoaRow[]; Next?: boolean } };
+      return { window, page: await cachedPage(url) };
     });
-    for (const { window, payload } of results) {
+    for (const { window, page } of results) {
       const span = spanDays(window);
-      if (payload.Next === true && span > 1) {
+      if (page.next && span > 1) {
         const half = Math.ceil(span / 2);
         pending.push({ from: window.from, to: addDays(window.from, half - 1) });
         pending.push({ from: addDays(window.from, half), to: window.to });
         continue;
       }
-      rows.push(...(payload.Data ?? []));
+      if (page.next) stats.truncatedDays += 1;
+      rows.push(...page.rows);
     }
   }
   return rows;
 }
 
 /**
- * A settled MOA answer, told apart from a throttled one by the `RS` envelope
- * key the feed wraps every real response in — including a real "this crop did
- * not trade", which is an empty `Data` rather than an empty body.
+ * What the board's own parser makes of one attempt.
+ *
+ * `parsePage` is `backend/Moa.gs`: an answer is `RS: "OK"` or a real `Data`
+ * array — anything else, an error envelope or a throttle, is MOA saying
+ * something other than "nothing traded". Judging that here instead would let
+ * this tool accept a body the board would reject, and a rejected body accepted
+ * as "nothing traded" is a day whose regional split silently loses whichever
+ * markets that request covered.
+ *
+ * A failed request is handed over as a non-200 rather than judged separately,
+ * so there is exactly one definition of an answer in the run.
  */
-function usableBody(body: string | null): body is string {
-  return body !== null && body.includes('"RS"');
+function judge(body: string | null): MoaPage {
+  return loadBackend().parsePage({
+    getResponseCode: () => (body === null ? 0 : 200),
+    getContentText: () => body ?? '',
+  });
 }
 
 /**
- * Fetches `url` as text through the on-disk cache.
+ * Fetches `url` through the on-disk cache, returning the parsed page.
  *
- * Only a settled body may be cached OR returned. `.cache/` is keyed by URL with
- * no expiry, so a throttled empty response stored once is read back by every
- * later run until someone deletes the directory by hand — `tools/calibrate`
- * shipped exactly that bug (#69) and its fix is mirrored here. For this tool
- * the stake is higher than a wasted run: an empty day for one root is a day
- * whose regional split silently loses whichever markets that request covered,
- * which is a fabricated regional price move rather than a visible failure.
+ * Only a body the board would accept may be cached OR returned. `.cache/` is
+ * keyed by URL with no expiry, so a throttled empty response stored once is
+ * read back by every later run until someone deletes the directory by hand —
+ * `tools/calibrate` shipped exactly that bug (#69) and its fix is mirrored
+ * here. For this tool the stake is higher than a wasted run: an empty day does
+ * not surface as a failure, it surfaces as a fabricated regional price move.
  *
  * The two failures are distinguished because they are acted on differently:
- * one is the network, the other is the feed throttling us.
+ * one is the network, the other is the feed refusing us.
  */
-async function cachedText(url: string): Promise<string> {
+async function cachedPage(url: string): Promise<MoaPage> {
   const digest = createHash('sha256').update(url).digest('hex').slice(0, 32);
   const file = resolve(CACHE_DIR, `${digest}.json`);
   if (existsSync(file)) {
     stats.cacheHits += 1;
-    return readFileSync(file, 'utf8');
+    // Only an answered body was ever written, so this re-parse cannot fail the
+    // run — it is how the cached rows are read back, not a second gate.
+    return judge(readFileSync(file, 'utf8'));
   }
 
   let body = await once(url);
-  if (!usableBody(body)) {
+  let page = judge(body);
+  if (!page.answered) {
     stats.retries += 1;
     await sleep(RETRY_PAUSE_MS);
     // The retry's outcome replaces the first attempt's outright, so the error
     // below describes the attempt it is reporting on.
     body = await once(url);
+    page = judge(body);
   }
-  if (!usableBody(body)) {
+  if (!page.answered) {
     stats.failures += 1;
     throw new Error(body === null ? `fetch failed: ${url}` : `unusable response: ${url}`);
   }
 
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, body);
-  return body;
+  writeFileSync(file, body as string);
+  return page;
 }
 
 async function once(url: string): Promise<string | null> {
@@ -176,7 +202,11 @@ async function inBatches<T, R>(items: T[], work: (item: T) => Promise<R>): Promi
   for (let start = 0; start < items.length; start += CONCURRENCY) {
     const slice = items.slice(start, start + CONCURRENCY);
     out.push(...(await Promise.all(slice.map(work))));
-    if (start + CONCURRENCY < items.length) await sleep(BATCH_PAUSE_MS);
+    // After EVERY batch, including the last. A root's windows are one short
+    // batch, so a "skip the trailing pause" guard would mean ~100 roots'
+    // bursts went out back to back with no pause anywhere — the burst pattern
+    // the backend documents MOA answering with empty bodies.
+    await sleep(BATCH_PAUSE_MS);
   }
   return out;
 }

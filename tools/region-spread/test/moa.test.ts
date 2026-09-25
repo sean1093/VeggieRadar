@@ -34,7 +34,7 @@ afterAll(() => rmSync(CACHE, { recursive: true, force: true }));
 afterEach(() => {
   vi.unstubAllGlobals();
   rmSync(CACHE_DIR, { recursive: true, force: true });
-  Object.assign(stats, { requests: 0, cacheHits: 0, retries: 0, failures: 0 });
+  Object.assign(stats, { requests: 0, cacheHits: 0, retries: 0, failures: 0, truncatedDays: 0 });
 });
 
 /** Everything the cache holds, so "nothing was written" is a real assertion. */
@@ -121,6 +121,25 @@ describe('the cache', () => {
     );
     expect(cached()).toEqual([]);
   });
+
+  it('rejects an error envelope, which mentions RS but is not an answer', async () => {
+    // The gate is the board's own `parsePage`: `RS: "OK"` or a real `Data`
+    // array. A substring check for `"RS"` would take this for "nothing
+    // traded", cache it forever, and delete that window from the measurement.
+    const envelope = JSON.stringify({ RS: 'ERROR', Message: 'rate limit exceeded' });
+    serve(envelope, envelope);
+    await expect(withoutThePause(() => fetchRoot('甘藍', '2026-09-01', '2026-09-01'))).rejects.toThrow(
+      /unusable response/,
+    );
+    expect(cached()).toEqual([]);
+  });
+
+  it('survives a Data that is not an array, rather than throwing past the cache write', async () => {
+    // `RS: "OK"` makes it an answer; `parsePage` yields no rows from a
+    // malformed `Data` instead of letting a spread throw on the way out.
+    serve(JSON.stringify({ RS: 'OK', Data: { unexpected: true } }));
+    expect(await fetchRoot('甘藍', '2026-09-01', '2026-09-01')).toEqual([]);
+  });
 });
 
 describe('truncation', () => {
@@ -141,9 +160,23 @@ describe('truncation', () => {
     expect(rows.map((r) => r.TransDate).sort()).toEqual(['115.09.01', '115.09.03']);
   });
 
-  it('accepts a single day that still truncates, because halving has a floor', async () => {
+  it('counts a single day that still truncates instead of passing it silently', async () => {
+    // Halving has a floor, so the day is kept — but it holds only the newest
+    // rows, i.e. some of its markets are missing. That reads exactly like a
+    // real regional price difference, so the run has to say it happened.
     serve(answer([row('115.09.01')], true));
     expect(await fetchRoot('甘藍', '2026-09-01', '2026-09-01')).toHaveLength(1);
+    expect(stats.truncatedDays).toBe(1);
+  });
+
+  it('does not count a window it could still halve', async () => {
+    let call = 0;
+    vi.stubGlobal('fetch', async () => {
+      call += 1;
+      return { ok: true, text: async () => answer([row('115.09.02')], call === 1) };
+    });
+    await fetchRoot('甘藍', '2026-09-01', '2026-09-02');
+    expect(stats.truncatedDays).toBe(0);
   });
 });
 

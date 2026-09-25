@@ -91,6 +91,7 @@ async function main(): Promise<void> {
     cacheHits: stats.cacheHits,
     retries: stats.retries,
     failures: stats.failures,
+    truncatedDays: stats.truncatedDays,
     itemsRequested: items.length,
   };
 

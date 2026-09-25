@@ -20,6 +20,7 @@ export type RunMeta = {
   cacheHits: number;
   retries: number;
   failures: number;
+  truncatedDays: number;
   itemsRequested: number;
 };
 
@@ -52,6 +53,12 @@ function heading(meta: RunMeta, measured: CropStats[], markets: MarketSighting[]
     `| 市場 | ${markets.length} |`,
     `| MIN_TRADE_VOLUME | ${meta.minTradeVolume} kg（沿用後端設定） |`,
     `| MOA 請求 | ${meta.requests}（快取命中 ${meta.cacheHits}、重試 ${meta.retries}、失敗 ${meta.failures}） |`,
+    // Halving has a floor, so a single day MOA still truncated keeps only its
+    // newest rows: a partial market set, which reads exactly like a real
+    // regional price difference. It cannot be re-fetched away, so it is stated.
+    meta.truncatedDays
+      ? `| ⚠️ 被截斷的單日 | ${meta.truncatedDays} —— 這些日子只拿到最新的部分市場，分區數字會偏 |`
+      : `| 被截斷的單日 | 0 |`,
     '',
     '所有價格為 `元/台斤`，與看板顯示的單位一致；成交量為公斤。',
     '每日的全台與分區均價都由後端自己的 `selectRows` → `weightedAverage` 算出，',

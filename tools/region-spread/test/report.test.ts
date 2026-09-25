@@ -13,7 +13,7 @@ const CABBAGE: CropDef = { name: '高麗菜', official: '甘藍', category: '葉
 
 const META: RunMeta = {
   from: '2026-09-01', to: '2026-09-03', minTradeVolume: 200,
-  requests: 4, cacheHits: 0, retries: 0, failures: 0, itemsRequested: 1,
+  requests: 4, cacheHits: 0, retries: 0, failures: 0, truncatedDays: 0, itemsRequested: 1,
 };
 
 function row(date: string, market: string, price: number, qty: number): MoaRow {

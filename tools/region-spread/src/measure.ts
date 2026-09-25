@@ -233,14 +233,30 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
  * "to be verified against the actual MarketCode" and nothing in the repository
  * has ever held MOA's roster. Sightings are counted over `tradedRows` so that
  * `休市` placeholders cannot invent a market that did not trade.
+ *
+ * Rows are de-duplicated first, because MOA matches `CropName` as a SUBSTRING:
+ * a request for 蘿蔔 also answers with 胡蘿蔔's rows, so the two roots' responses
+ * overlap and the same transaction arrives twice (甘薯/甘薯葉, 番茄/小番茄 and
+ * several more are the same shape). Summing them raw would inflate those
+ * markets' volume — and with it the 占全國 column and the unmapped-volume share
+ * that decides whether the whole report can be trusted.
  */
 export function marketSightings(rowsByRoot: Map<string, MoaRow[]>): MarketSighting[] {
   const backend = loadBackend();
   const seen = new Map<string, { codes: Set<string>; dates: Set<string>; volume: number }>();
+  const counted = new Set<string>();
   for (const rows of rowsByRoot.values()) {
     for (const row of backend.tradedRows(rows)) {
       const name = normalizeMarket(row.MarketName);
       if (!name) continue;
+      // The overlapping responses carry the SAME row, field for field, so the
+      // price and quantity go into the identity too: a row that differs in any
+      // of them is a different transaction and is kept, whatever MOA's
+      // per-market-per-day shape turns out to be.
+      const identity = [row.TransDate, row.MarketCode, name, row.CropName,
+                        row.Avg_Price, row.Trans_Quantity].join('\u0000');
+      if (counted.has(identity)) continue;
+      counted.add(identity);
       let entry = seen.get(name);
       if (!entry) {
         entry = { codes: new Set(), dates: new Set(), volume: 0 };
