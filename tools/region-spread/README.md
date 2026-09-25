@@ -56,9 +56,11 @@ the run rather than being quietly skipped.
 The run header also reports **被截斷的品項×日**: MOA caps a response near 1,000
 rows and drops the oldest, so an over-long window is halved and refetched — but
 halving stops at one day. A day that still truncates keeps only part of its
-market set, which reads exactly like a regional price difference, so each one
-is named (crop and date) rather than passed silently — five crops truncating on
-one date is a different problem from one crop truncating on five.
+market set, which reads exactly like a regional price difference, so those days
+are **dropped from the measurement** and each one is named (crop and date) —
+five crops truncating on one date is a different problem from one crop
+truncating on five. Dropping them shrinks that crop's 交易日 and every 覆蓋率
+denominator, which is why the header says how many went.
 
 A `--root` run writes to its own filename, so a quick look cannot overwrite the
 full-board report a conclusion was drawn from.
@@ -72,7 +74,7 @@ issue, not into the tree.
 
 | Section | Answers |
 | --- | --- |
-| 1. 市場對照表 | Every market seen, its codes, and the region `src/regions.ts` gave it. **Stays red while any market is unmapped** — unmapped volume still counts nationwide, so the regional numbers would describe a board nobody would ship. Volume is de-duplicated first: MOA substring-matches `CropName`, so 蘿蔔 and 胡蘿蔔 are answered with overlapping rows. |
+| 1. 市場對照表 | Every market seen, its codes, and the region `src/regions.ts` gave it. **Stays red while any market is unmapped** — unmapped volume still counts nationwide, so the regional numbers would describe a board nobody would ship. Volume is counted over the same rows sections 2–5 use (each item's `selectRows` output), so the share that gates the report is a share of what the report is built from. |
 | 2. 區域價差 | Per crop and per day, the gap between the dearest and cheapest qualifying region as a share of today's nationwide price. Median and p90. |
 | 3. 樣本量 | Per region, the share of trading days it clears `MIN_TRADE_VOLUME`, and how many crops could support 0–4 regions. |
 | 4. 分區漲跌 | `changeGap` (how far the regional move lands from the nationwide one over the same date pair) and `mixChurn` (how often the contributing markets changed between consecutive qualifying days). |

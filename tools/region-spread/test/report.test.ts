@@ -22,7 +22,7 @@ function row(date: string, market: string, price: number, qty: number): MoaRow {
 
 function render(rows: MoaRow[]): string {
   const days = dailySplit(rows, CABBAGE);
-  return renderReport(META, marketSightings(new Map([['甘藍', rows]])), [cropStats(CABBAGE, days)]);
+  return renderReport(META, marketSightings([CABBAGE], new Map([['甘藍', rows]])), [cropStats(CABBAGE, days)]);
 }
 
 const NORTH_AND_CENTRAL = [
@@ -48,7 +48,7 @@ describe('renderReport', () => {
 
   it('will not let a --root run’s green mapping check stand for the whole roster', () => {
     const md = renderReport({ ...META, partial: true },
-      marketSightings(new Map([['甘藍', NORTH_AND_CENTRAL]])),
+      marketSightings([CABBAGE], new Map([['甘藍', NORTH_AND_CENTRAL]])),
       [cropStats(CABBAGE, dailySplit(NORTH_AND_CENTRAL, CABBAGE))]);
     // Those roots only ever traded in the markets they traded in; the roster
     // this report is the verification of is the whole board's.
@@ -57,7 +57,7 @@ describe('renderReport', () => {
 
   it('names the truncated days rather than counting them', () => {
     const md = renderReport({ ...META, truncated: ['甘藍 2026-09-02', '蕹菜 2026-09-02'] },
-      marketSightings(new Map([['甘藍', NORTH_AND_CENTRAL]])),
+      marketSightings([CABBAGE], new Map([['甘藍', NORTH_AND_CENTRAL]])),
       [cropStats(CABBAGE, dailySplit(NORTH_AND_CENTRAL, CABBAGE))]);
     // Five roots truncating on one date is a different problem from one root
     // truncating on five, and the header has to let a reader tell them apart.

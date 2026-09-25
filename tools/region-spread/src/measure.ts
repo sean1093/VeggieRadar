@@ -241,19 +241,25 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
  * has ever held MOA's roster. Sightings are counted over `tradedRows` so that
  * `休市` placeholders cannot invent a market that did not trade.
  *
- * Rows are de-duplicated first, because MOA matches `CropName` as a SUBSTRING:
- * a request for 蘿蔔 also answers with 胡蘿蔔's rows, so the two roots' responses
- * overlap and the same transaction arrives twice (甘薯/甘薯葉, 番茄/小番茄 and
- * several more are the same shape). Summing them raw would inflate those
- * markets' volume — and with it the 占全國 column and the unmapped-volume share
- * that decides whether the whole report can be trusted.
+ * The population is the one the rest of the report measures: each item's own
+ * `selectRows` output, not every row MOA returned. The unmapped-volume share
+ * here is what decides whether the whole report can be trusted, so it has to
+ * be a share OF the rows sections 2–5 are built from — counting crops no board
+ * item accepts would have it quantify distortion in a different population
+ * than the one it gates.
+ *
+ * `selectRows` also settles MOA's SUBSTRING matching on its own: a request for
+ * 蘿蔔 answers with 胡蘿蔔's rows too (as 甘薯/甘薯葉 and 番茄/小番茄 do), and an
+ * exact root match drops them. Rows are still de-duplicated, because two board
+ * items can share a root, and a transaction counted twice would inflate that
+ * market's volume and the gate with it.
  */
-export function marketSightings(rowsByRoot: Map<string, MoaRow[]>): MarketSighting[] {
+export function marketSightings(defs: CropDef[], rowsByRoot: Map<string, MoaRow[]>): MarketSighting[] {
   const backend = loadBackend();
   const seen = new Map<string, { codes: Set<string>; dates: Set<string>; volume: number }>();
   const counted = new Set<string>();
-  for (const rows of rowsByRoot.values()) {
-    for (const row of backend.tradedRows(rows)) {
+  for (const def of defs) {
+    for (const row of backend.selectRows(rowsByRoot.get(def.official) ?? [], def)) {
       const name = normalizeMarket(row.MarketName);
       if (!name) continue;
       // The overlapping responses carry the SAME row, field for field, so the

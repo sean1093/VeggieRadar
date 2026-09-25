@@ -70,6 +70,21 @@ export function addDays(iso: string, days: number): string {
   return at.toISOString().slice(0, 10);
 }
 
+/**
+ * Today as an ISO date in the machine's own timezone.
+ *
+ * The LOCAL calendar, because that is what the rest of the pipeline runs on:
+ * `backend/Moa.gs`'s `dateToROC` reads local date parts, and `tools/catalog`
+ * walks the local calendar too. `toISOString().slice(0, 10)` would be UTC —
+ * run from Taipei before 08:00 it names yesterday, so the window silently
+ * shifts a day, misses the whole cache, and writes a second report file.
+ */
+export function localToday(now: Date = new Date()): string {
+  const month = `${now.getMonth() + 1}`.padStart(2, '0');
+  const day = `${now.getDate()}`.padStart(2, '0');
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
 /** Inclusive length of a closed date range, in calendar days. */
 export function spanDays(range: DateRange): number {
   const from = Date.parse(`${range.from}T00:00:00Z`);

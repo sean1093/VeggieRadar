@@ -59,8 +59,12 @@ function heading(meta: RunMeta, measured: CropStats[], markets: MarketSighting[]
     // Halving has a floor, so a single day MOA still truncated keeps only its
     // newest rows: a partial market set, which reads exactly like a real
     // regional price difference. It cannot be re-fetched away, so it is stated.
+    // These days are DROPPED from the measurement (`dailySplit`), because a
+    // partial market set reads exactly like a regional price difference. What
+    // remains for a reader to know is that they are gone: the item's 交易日 and
+    // every 覆蓋率 denominator are smaller by this much.
     meta.truncated.length
-      ? `| ⚠️ 被截斷的品項×日 | ${meta.truncated.length}：${truncatedList(meta.truncated)} —— 這些只拿到最新的部分市場，分區數字會偏 |`
+      ? `| ⚠️ 被截斷的品項×日 | ${meta.truncated.length}：${truncatedList(meta.truncated)} —— 只拿到部分市場，已從第 2–5 節剔除（該品項的交易日與覆蓋率分母相應減少） |`
       : `| 被截斷的品項×日 | 0 |`,
     '',
     '所有價格為 `元/台斤`，與看板顯示的單位一致；成交量為公斤。',
@@ -76,6 +80,8 @@ function heading(meta: RunMeta, measured: CropStats[], markets: MarketSighting[]
  * numbers describe a board nobody would ship.
  */
 function marketSection(markets: MarketSighting[], partial: boolean): string {
+  // The denominator is the measured population — the rows the board's own
+  // items accept — so this share is a share of what sections 2–5 are built on.
   const total = markets.reduce((sum, m) => sum + m.volume, 0) || 1;
   const unmapped = markets.filter((m) => m.region === '其他');
   const unmappedShare = (unmapped.reduce((sum, m) => sum + m.volume, 0) / total) * 100;
@@ -92,6 +98,9 @@ function marketSection(markets: MarketSighting[], partial: boolean): string {
         // green check here says nothing about the roster as a whole.
         ? `> ✅ 這次抓到的市場都有對應區域 —— 但這是 \`--root\` 的局部執行，不能當成整份名單已驗證。`
         : `> ✅ 所有市場都有對應區域。`,
+    '',
+    '',
+    '成交量只計入看板品項自己的交易（與第 2–5 節同一份資料），不是 MOA 當日全部的量。',
     '',
     `| 市場 | MarketCode | 區域 | 交易日 | 成交量（噸） | 占全國 |`,
     `| --- | --- | --- | --- | --- | --- |`,

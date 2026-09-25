@@ -151,7 +151,7 @@ describe('cropStats', () => {
 
 describe('marketSightings', () => {
   it('collects every market the feed really traded in, with its codes', () => {
-    const seen = marketSightings(new Map([['甘藍', [
+    const seen = marketSightings([CABBAGE], new Map([['甘藍', [
       { ...row('115.09.01', '台北二', 20, 1000), MarketCode: '104' },
       { ...row('115.09.02', ' 104 台北二 ', 20, 500), MarketCode: '104' },
       { TransDate: '115.09.01', CropName: '休市', MarketName: '花蓮市', Avg_Price: 0, Trans_Quantity: 0 },
@@ -167,7 +167,9 @@ describe('marketSightings', () => {
     // the unmapped-volume share the whole report is gated on.
     const shared = { TransDate: '115.09.01', CropName: '胡蘿蔔', MarketName: '台北一',
                      MarketCode: '109', Avg_Price: 20, Trans_Quantity: 1000 };
-    const seen = marketSightings(new Map([
+    const RADISH: CropDef = { name: '白蘿蔔', official: '蘿蔔', category: '根莖類' };
+    const CARROT: CropDef = { name: '紅蘿蔔', official: '胡蘿蔔', category: '根莖類' };
+    const seen = marketSightings([RADISH, CARROT], new Map([
       ['蘿蔔', [shared, { ...shared, CropName: '蘿蔔', Trans_Quantity: 500 }]],
       ['胡蘿蔔', [shared]],
     ]));
@@ -176,13 +178,25 @@ describe('marketSightings', () => {
     expect(seen[0].volume).toBe(1500);
   });
 
+  it('counts only the rows the board’s own items accept, like the rest of the report', () => {
+    // MOA substring-matches, so a 甘藍 request also answers with 甘藍芽's rows.
+    // Counting them would make 占全國 — and the unmapped share the whole report
+    // is gated on — a share of a population sections 2–5 never look at.
+    const seen = marketSightings([CABBAGE], new Map([['甘藍', [
+      row('115.09.01', '台北一', 20, 1000),
+      { TransDate: '115.09.01', CropName: '甘藍芽', MarketName: '新竹市', MarketCode: '999',
+        Avg_Price: 90, Trans_Quantity: 9000 },
+    ]]]));
+    expect(seen.map((m) => m.name)).toEqual(['台北一']);
+  });
+
   it('keeps a row that differs in price or quantity, however alike it looks', () => {
     // De-duplication may only remove the overlap, which is the same row field
     // for field. Anything else is a transaction, and dropping one would
     // understate a market exactly as double-counting overstates it.
     const base = { TransDate: '115.09.01', CropName: '甘藍', MarketName: '台北一',
                    MarketCode: '109', Avg_Price: 20, Trans_Quantity: 1000 };
-    const seen = marketSightings(new Map([['甘藍', [
+    const seen = marketSightings([CABBAGE], new Map([['甘藍', [
       base,
       { ...base, Trans_Quantity: 700 },
       { ...base, Avg_Price: 25 },
@@ -193,7 +207,7 @@ describe('marketSightings', () => {
 
   it('keeps the same crop in two markets, or on two days, as two transactions', () => {
     const base = { CropName: '甘藍', Avg_Price: 20, Trans_Quantity: 1000 };
-    const seen = marketSightings(new Map([['甘藍', [
+    const seen = marketSightings([CABBAGE], new Map([['甘藍', [
       { ...base, TransDate: '115.09.01', MarketName: '台北一', MarketCode: '109' },
       { ...base, TransDate: '115.09.01', MarketName: '台中市', MarketCode: '400' },
       { ...base, TransDate: '115.09.02', MarketName: '台北一', MarketCode: '109' },
@@ -205,7 +219,7 @@ describe('marketSightings', () => {
     // `tradedRows` gates on parseFloat, so a row it passed can still be a
     // string `Number` refuses — and one NaN in a plain sum renders every
     // 占全國 cell, and the unmapped-volume gate, as NaN%.
-    const seen = marketSightings(new Map([['甘藍', [
+    const seen = marketSightings([CABBAGE], new Map([['甘藍', [
       { TransDate: '115.09.01', CropName: '甘藍', MarketName: '台北一', MarketCode: '109',
         Avg_Price: 20, Trans_Quantity: '1200 ' as unknown as number },
     ]]]));
@@ -213,7 +227,7 @@ describe('marketSightings', () => {
   });
 
   it('surfaces a market the region table has never been confirmed to contain', () => {
-    const seen = marketSightings(new Map([['甘藍', [row('115.09.01', '新竹市', 20, 1000)]]]));
+    const seen = marketSightings([CABBAGE], new Map([['甘藍', [row('115.09.01', '新竹市', 20, 1000)]]]));
     expect(seen[0].region).toBe('其他');
   });
 });
