@@ -7,7 +7,7 @@
  * detail. Nothing here draws the conclusion — the report states what was
  * measured and how much of the board it covers, and a human decides.
  */
-import { VIABLE_COVERAGE, quantile } from './measure.ts';
+import { VIABLE_COVERAGE, VIABLE_MIN_DAYS, UNNAMED_MARKET, quantile } from './measure.ts';
 import type { CropStats, MarketSighting, RegionStats } from './measure.ts';
 import { REGIONS } from './regions.ts';
 import type { Region } from './regions.ts';
@@ -98,7 +98,18 @@ function marketSection(markets: MarketSighting[], partial: boolean): string {
       // No roster is not a clean roster: nothing was checked.
       ? `> ⚠️ 這次沒有抓到任何成交資料，對照表等於沒有驗證過。先確認期間內有交易日（\`--days\` 太短會整段遇到休市）。`
       : unmapped.length
-      ? `> ⚠️ **${unmapped.length} 個市場未對應到區域**（占成交量 ${pct(unmappedShare)}）：${unmapped.map((m) => m.name).join('、')}。\n> 請把它們補進 \`src/regions.ts\` 的 \`REGION_BY_MARKET\` 後重跑（快取已在本機，重跑不再發請求）。`
+      ? [
+          `> ⚠️ **${unmapped.length} 個市場未對應到區域**（占成交量 ${pct(unmappedShare)}）：${unmapped.map((m) => m.name).join('、')}。`,
+          namedUnmapped(unmapped).length
+            ? `> 請把 ${namedUnmapped(unmapped).join('、')} 補進 \`src/regions.ts\` 的 \`REGION_BY_MARKET\` 後重跑（快取已在本機，重跑不再發請求）。`
+            : '',
+          // The sentinel stands for rows the feed gave no market name at all.
+          // Putting it in the table would turn this check green while those
+          // rows stay in 其他, so the gate would clear with nothing placed.
+          unmapped.some((m) => m.name === UNNAMED_MARKET)
+            ? `> \`${UNNAMED_MARKET}\` 是 MOA 沒有給市場名稱的資料列，**不要**把它加進對照表 —— 加了只會讓這個檢查變綠，那些列仍然落在 其他。`
+            : '',
+        ].filter(Boolean).join('\n')
       : partial
         // A --root run only ever saw the markets those roots traded in, so a
         // green check here says nothing about the roster as a whole.
@@ -169,7 +180,8 @@ function coverageSection(measured: CropStats[]): string {
   return [
     `## 3. 每一區的樣本量夠不夠`,
     '',
-    `「可行」= 該區在 ≥ ${pct(VIABLE_COVERAGE * 100)} 的交易日達到 \`MIN_TRADE_VOLUME\`，也就是切過去不會常常是空的。`,
+    `「可行」= 該區在 ≥ ${pct(VIABLE_COVERAGE * 100)} 的交易日達到 \`MIN_TRADE_VOLUME\`，而且至少有 ${VIABLE_MIN_DAYS} 個這樣的交易日。`,
+    `比例本身不是證據：2 天中的 2 天也是 100%。期間太短的執行會全部顯示不可行，那是誠實的答案。`,
     '',
     `| 區域 | 可行品項 | 完全沒資格的品項 | 可行率 |`,
     `| --- | --- | --- | --- |`,
@@ -235,6 +247,11 @@ function detailSection(byVolume: CropStats[]): string {
       return `| ${c.name} | ${c.category} | ${c.days} | ${tonnes(c.volume)} | ${c.spreadDays ? pct(c.medianSpreadPct) : '—'} | ${c.viableRegions} | ${cells.join(' | ')} |`;
     }),
   ].join('\n');
+}
+
+/** The unmapped markets a human can actually add to the table. */
+function namedUnmapped(unmapped: MarketSighting[]): string[] {
+  return unmapped.map((m) => m.name).filter((name) => name !== UNNAMED_MARKET);
 }
 
 /** At most a handful of names, so the header stays a header. */

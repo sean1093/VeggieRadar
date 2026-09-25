@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import { loadBackend } from '../src/backend.ts';
 import type { CropDef, MoaRow } from '../src/backend.ts';
-import { dailySplit, cropStats, marketSightings, quantile } from '../src/measure.ts';
+import { dailySplit, cropStats, marketSightings, quantile, VIABLE_MIN_DAYS } from '../src/measure.ts';
 
 const CABBAGE: CropDef = { name: '高麗菜', official: '甘藍', category: '葉菜類' };
 
@@ -117,13 +117,31 @@ describe('cropStats', () => {
     expect(central.medianDeviationPct).toBeCloseTo(-20, 6);
   });
 
-  it('counts coverage over the days the board published, and calls a region viable on it', () => {
+  it('counts coverage over the days the board published', () => {
     expect(stats.days).toBe(3);
     expect(north.coverage).toBe(1);
-    expect(north.viable).toBe(true);
     expect(east.qualifiedDays).toBe(0);
-    expect(east.viable).toBe(false);
-    expect(stats.viableRegions).toBe(2);
+  });
+
+  it('will not call a region viable on three days, however clean they are', () => {
+    // 3 qualifying days out of 3 is 100% coverage and proves nothing about
+    // whether 北 could carry a tab. A ratio is not evidence on its own.
+    expect(north.coverage).toBe(1);
+    expect(north.viable).toBe(false);
+    expect(stats.viableRegions).toBe(0);
+  });
+
+  it('calls it viable once there are enough qualifying days behind the ratio', () => {
+    const long = [];
+    for (let day = 1; day <= VIABLE_MIN_DAYS; day += 1) {
+      const date = `115.09.${`${day}`.padStart(2, '0')}`;
+      long.push(row(date, '台北一', 30, 1000), row(date, '台中市', 20, 1000));
+    }
+    const over = cropStats(CABBAGE, dailySplit(long, CABBAGE));
+    expect(over.days).toBe(VIABLE_MIN_DAYS);
+    expect(over.regions.find((r) => r.region === '北')!.viable).toBe(true);
+    expect(over.regions.find((r) => r.region === '東')!.viable).toBe(false);
+    expect(over.viableRegions).toBe(2);
   });
 
   it('separates a regional move from the nationwide one over the same date pair', () => {
@@ -252,6 +270,24 @@ describe('marketSightings', () => {
       row('115.09.02', '台北一', 20, 1000),
     ];
     expect(marketSightings(measured(CABBAGE, rows)).map((m) => m.name)).toEqual(['台北一']);
+  });
+
+  it('counts a row once per transaction, not once per look-alike', () => {
+    // Two rows that merely match field for field are two transactions, and
+    // `weightedAverage` counts both. Collapsing them here would make 占全國 a
+    // share of a smaller population than sections 2–5 measure.
+    const twice = [row('115.09.01', '台北一', 20, 1000), row('115.09.01', '台北一', 20, 1000)];
+    expect(marketSightings(measured(CABBAGE, twice))[0].volume).toBe(2000);
+  });
+
+  it('counts a shared row once when two board items read the same fetched array', () => {
+    // 花椰菜 backs both 白花椰菜 and 青花菜, and each item filters the same array.
+    const rows = [row('115.09.01', '台北一', 20, 1000)];
+    const both = [
+      { def: CABBAGE, rows, days: dailySplit(rows, CABBAGE) },
+      { def: CABBAGE, rows, days: dailySplit(rows, CABBAGE) },
+    ];
+    expect(marketSightings(both)[0].volume).toBe(1000);
   });
 
   it('gives an unnamed market a name rather than letting its volume vanish', () => {

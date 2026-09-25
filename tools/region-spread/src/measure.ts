@@ -35,6 +35,15 @@ import type { Region } from './regions.ts';
 /** A region whose coverage is below this is reported as not viable as a tab. */
 export const VIABLE_COVERAGE = 0.8;
 
+/**
+ * And a ratio alone is not evidence. 2 qualifying days out of 2 is 100%
+ * coverage and says nothing about whether that region could carry a tab; a
+ * crop that only traded twice in the window cannot answer the question at all.
+ * A run shorter than this reports nothing viable, which is the honest answer
+ * rather than a confident one drawn from a handful of days.
+ */
+export const VIABLE_MIN_DAYS = 10;
+
 /** One region's blended price on one date, in the unit the app displays. */
 export type RegionDay = {
   region: Region;
@@ -235,7 +244,7 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
     medianChangeGapPct: quantile(changeGaps, 0.5),
     p90ChangeGapPct: quantile(changeGaps, 0.9),
     mixChurn: changeGaps.length ? churned / changeGaps.length : 0,
-    viable: coverage >= VIABLE_COVERAGE,
+    viable: coverage >= VIABLE_COVERAGE && series.length >= VIABLE_MIN_DAYS,
   };
 }
 
@@ -255,16 +264,16 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
  * no statistic ever sees, would have it quantify distortion in a different
  * population than the one it gates.
  *
- * `selectRows` also settles MOA's SUBSTRING matching on its own: a request for
- * 蘿蔔 answers with 胡蘿蔔's rows too (as 甘薯/甘薯葉 and 番茄/小番茄 do), and an
- * exact root match drops them. Rows are still de-duplicated, because two board
- * items can share a root, and a transaction counted twice would inflate that
- * market's volume and the gate with it.
+ * `selectRows` settles MOA's SUBSTRING matching on its own: a request for 蘿蔔
+ * answers with 胡蘿蔔's rows too (as 甘薯/甘薯葉 and 番茄/小番茄 do), and an exact
+ * root match drops them. Rows are still de-duplicated, because two board items
+ * can share a root and read the same fetched array, and a transaction counted
+ * twice would inflate that market's volume and the gate with it.
  */
 export function marketSightings(measured: MeasuredItem[]): MarketSighting[] {
   const backend = loadBackend();
   const seen = new Map<string, { codes: Set<string>; dates: Set<string>; volume: number }>();
-  const counted = new Set<string>();
+  const counted = new Set<MoaRow>();
   for (const item of measured) {
     const published = new Set(item.days.map((d) => d.date));
     for (const row of backend.selectRows(item.rows, item.def)) {
@@ -278,14 +287,14 @@ export function marketSightings(measured: MeasuredItem[]): MarketSighting[] {
       // unmapped volume sit outside the roster entirely, and section 1 would
       // print its green check over a day most of whose volume is unplaceable.
       const name = normalizeMarket(row.MarketName) || UNNAMED_MARKET;
-      // The overlapping responses carry the SAME row, field for field, so the
-      // price and quantity go into the identity too: a row that differs in any
-      // of them is a different transaction and is kept, whatever MOA's
-      // per-market-per-day shape turns out to be.
-      const identity = [row.TransDate, row.MarketCode, name, row.CropName,
-                        row.Avg_Price, row.Trans_Quantity].join('\u0000');
-      if (counted.has(identity)) continue;
-      counted.add(identity);
+      // Identified by the ROW, not by its contents. Two board items can share
+      // a root (花椰菜 → 白花椰菜, 青花菜) and each reads the same fetched array,
+      // so the same row object can arrive twice and must be counted once. A
+      // content hash would go further than that and collapse two rows that
+      // merely look alike — which `weightedAverage` would still count, leaving
+      // 占全國 a share of a smaller population than sections 2–5 measure.
+      if (counted.has(row)) continue;
+      counted.add(row);
       let entry = seen.get(name);
       if (!entry) {
         entry = { codes: new Set(), dates: new Set(), volume: 0 };

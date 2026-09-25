@@ -46,6 +46,18 @@ describe('renderReport', () => {
     expect(md).not.toContain('✅');
   });
 
+  it('tells the reader not to paper over rows the feed gave no market name', () => {
+    const nameless = [
+      ...NORTH_AND_CENTRAL,
+      { TransDate: '115.09.01', CropName: '甘藍', MarketName: '', Avg_Price: 40, Trans_Quantity: 3000 },
+    ];
+    const md = render(nameless);
+    // Adding the sentinel to the table would turn this check green while
+    // those rows stayed in 其他 — the gate cleared with nothing placed.
+    expect(md).toContain('不要');
+    expect(md).toContain('（未具名）');
+  });
+
   it('will not call an empty roster verified', () => {
     // --days 2 over a holiday: nothing traded, so nothing was checked. A green
     // check here would assert a verification that never ran.

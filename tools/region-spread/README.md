@@ -53,14 +53,16 @@ A run over a different window is a different set of requests and fetches again.
 `甘藍`, not the display name `高麗菜`. A name that matches no board item stops
 the run rather than being quietly skipped.
 
-The run header also reports **被截斷的品項×日**: MOA caps a response near 1,000
+The run header also reports **被截斷的 root×日**: MOA caps a response near 1,000
 rows and drops the oldest, so an over-long window is halved and refetched — but
 halving stops at one day. A day that still truncates keeps only part of its
 market set, which reads exactly like a regional price difference, so those days
-are **dropped from the measurement** and each one is named (crop and date) —
-five crops truncating on one date is a different problem from one crop
-truncating on five. Dropping them shrinks that crop's 交易日 and every 覆蓋率
-denominator, which is why the header says how many went.
+are **dropped from the measurement** and each one is named (MOA root and date)
+— five roots truncating on one date is a different problem from one root
+truncating on five. The unit is the root because that is what gets fetched, and
+a root can back more than one board item (花椰菜 → 白花椰菜, 青花菜); dropping a
+root-day shrinks 交易日 and every 覆蓋率 denominator for each of them, which is
+why the header says how many went.
 
 A `--root` run writes to its own filename, so a quick look cannot overwrite the
 full-board report a conclusion was drawn from.
@@ -80,7 +82,7 @@ issue, not into the tree.
 | --- | --- |
 | 1. 市場對照表 | Every market seen, its codes, and the region `src/regions.ts` gave it. **Stays red while any market is unmapped** — unmapped volume still counts nationwide, so the regional numbers would describe a board nobody would ship. Volume is counted over exactly the rows sections 2–5 use — each item's `selectRows` output, restricted to the days its split published — so the share that gates the report is a share of what the report is built from. |
 | 2. 區域價差 | Per crop and per day, the gap between the dearest and cheapest qualifying region as a share of today's nationwide price. Median and p90. |
-| 3. 樣本量 | Per region, the share of trading days it clears `MIN_TRADE_VOLUME`, and how many crops could support 0–4 regions. |
+| 3. 樣本量 | Per region, the share of trading days it clears `MIN_TRADE_VOLUME`, and how many crops could support 0–4 regions. A region counts as viable only with both a high enough share **and** enough qualifying days — 2 days out of 2 is 100% and proves nothing, so a short run reports nothing viable. |
 | 4. 分區漲跌 | `changeGap` (how far the regional move lands from the nationwide one over the same date pair) and `mixChurn` (how often the contributing markets changed between consecutive qualifying days). |
 | 5. 每個品項 | Coverage and signed deviation from nationwide, per crop per region. |
 
