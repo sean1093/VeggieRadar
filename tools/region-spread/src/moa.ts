@@ -23,12 +23,21 @@ import { loadBackend } from './backend.ts';
 import type { MoaRow } from './backend.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const CACHE_DIR = resolve(HERE, '../.cache');
+/**
+ * Where responses are cached — the gitignored `.cache/` beside the tool, or
+ * wherever `REGION_SPREAD_CACHE_DIR` points. The override exists so a test can
+ * work in a temporary directory: what may be written here is the whole subject
+ * of `cachedText` below, and it must be provable without touching a
+ * developer's real cache.
+ */
+export const CACHE_DIR = process.env.REGION_SPREAD_CACHE_DIR
+  ? resolve(process.env.REGION_SPREAD_CACHE_DIR)
+  : resolve(HERE, '../.cache');
 
 /** Mirrors the backend's own throttle. */
 const CONCURRENCY = 4;
 const BATCH_PAUSE_MS = 150;
-const RETRY_PAUSE_MS = 1_500;
+export const RETRY_PAUSE_MS = 1_500;
 const TIMEOUT_MS = 120_000;
 
 export type DateRange = { from: string; to: string };
@@ -96,12 +105,27 @@ export async function fetchRoot(root: string, from: string, to: string): Promise
 }
 
 /**
+ * A settled MOA answer, told apart from a throttled one by the `RS` envelope
+ * key the feed wraps every real response in — including a real "this crop did
+ * not trade", which is an empty `Data` rather than an empty body.
+ */
+function usableBody(body: string | null): body is string {
+  return body !== null && body.includes('"RS"');
+}
+
+/**
  * Fetches `url` as text through the on-disk cache.
  *
- * A body is only settled once it carries MOA's `RS` envelope key — that is what
- * separates a real answer (including a real "did not trade") from a throttled
- * empty one. Caching a throttled body would freeze a hole into every later run,
- * and a hole in one region on one day is a fabricated regional price move.
+ * Only a settled body may be cached OR returned. `.cache/` is keyed by URL with
+ * no expiry, so a throttled empty response stored once is read back by every
+ * later run until someone deletes the directory by hand — `tools/calibrate`
+ * shipped exactly that bug (#69) and its fix is mirrored here. For this tool
+ * the stake is higher than a wasted run: an empty day for one root is a day
+ * whose regional split silently loses whichever markets that request covered,
+ * which is a fabricated regional price move rather than a visible failure.
+ *
+ * The two failures are distinguished because they are acted on differently:
+ * one is the network, the other is the feed throttling us.
  */
 async function cachedText(url: string): Promise<string> {
   const digest = createHash('sha256').update(url).digest('hex').slice(0, 32);
@@ -112,15 +136,16 @@ async function cachedText(url: string): Promise<string> {
   }
 
   let body = await once(url);
-  if (body === null || !body.includes('"RS"')) {
+  if (!usableBody(body)) {
     stats.retries += 1;
     await sleep(RETRY_PAUSE_MS);
-    const second = await once(url);
-    if (second !== null && second.includes('"RS"')) body = second;
+    // The retry's outcome replaces the first attempt's outright, so the error
+    // below describes the attempt it is reporting on.
+    body = await once(url);
   }
-  if (body === null) {
+  if (!usableBody(body)) {
     stats.failures += 1;
-    throw new Error(`fetch failed: ${url}`);
+    throw new Error(body === null ? `fetch failed: ${url}` : `unusable response: ${url}`);
   }
 
   mkdirSync(dirname(file), { recursive: true });
