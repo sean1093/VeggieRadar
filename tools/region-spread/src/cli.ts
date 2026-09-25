@@ -91,12 +91,16 @@ async function main(): Promise<void> {
     cacheHits: stats.cacheHits,
     retries: stats.retries,
     failures: stats.failures,
-    truncatedDays: stats.truncatedDays,
+    truncated: [...stats.truncated],
     itemsRequested: items.length,
   };
 
   mkdirSync(REPORT_DIR, { recursive: true });
-  const stem = resolve(REPORT_DIR, `${from}_${to}`);
+  // A `--root` run covers part of the board, so it must not land on the full
+  // run's filename: the README suggests it for a quick look, and a quick look
+  // silently replacing the report a conclusion was drawn from is the kind of
+  // loss nobody notices until the numbers are already in an issue.
+  const stem = resolve(REPORT_DIR, `${from}_${to}${only.length ? `_${only.join('+')}` : ''}`);
   writeFileSync(`${stem}.md`, `${renderReport(meta, markets, crops)}\n`);
   writeFileSync(`${stem}.json`, `${JSON.stringify({ meta, markets, crops }, null, 2)}\n`);
 

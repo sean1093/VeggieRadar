@@ -19,9 +19,9 @@
  * directory: nothing here touches the network or a developer's real cache.
  */
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 const CACHE = mkdtempSync(join(tmpdir(), 'region-spread-cache-'));
 process.env.REGION_SPREAD_CACHE_DIR = CACHE;
@@ -34,7 +34,8 @@ afterAll(() => rmSync(CACHE, { recursive: true, force: true }));
 afterEach(() => {
   vi.unstubAllGlobals();
   rmSync(CACHE_DIR, { recursive: true, force: true });
-  Object.assign(stats, { requests: 0, cacheHits: 0, retries: 0, failures: 0, truncatedDays: 0 });
+  Object.assign(stats, { requests: 0, cacheHits: 0, retries: 0, failures: 0 });
+  stats.truncated.clear();
 });
 
 /** Everything the cache holds, so "nothing was written" is a real assertion. */
@@ -122,6 +123,21 @@ describe('the cache', () => {
     expect(cached()).toEqual([]);
   });
 
+  it('refetches a half-written cache file instead of serving it as an empty window', async () => {
+    // A run killed mid-write leaves a partial body. Trusting a file's mere
+    // existence would hand back zero rows with no failure and no retry — the
+    // #69 hole again, arriving by a different door.
+    serve(answer([row('115.09.01')]));
+    await fetchRoot('甘藍', '2026-09-01', '2026-09-01');
+    const file = resolve(CACHE_DIR, cached()[0]);
+    writeFileSync(file, '{"RS":"OK","Data":[{"TransD');
+
+    const calls = serve(answer([row('115.09.01')]));
+    expect(await fetchRoot('甘藍', '2026-09-01', '2026-09-01')).toHaveLength(1);
+    expect(calls()).toBe(1); // it went back to the network rather than trusting the file
+    expect(stats.cacheHits).toBe(0);
+  });
+
   it('rejects an error envelope, which mentions RS but is not an answer', async () => {
     // The gate is the board's own `parsePage`: `RS: "OK"` or a real `Data`
     // array. A substring check for `"RS"` would take this for "nothing
@@ -166,7 +182,8 @@ describe('truncation', () => {
     // real regional price difference, so the run has to say it happened.
     serve(answer([row('115.09.01')], true));
     expect(await fetchRoot('甘藍', '2026-09-01', '2026-09-01')).toHaveLength(1);
-    expect(stats.truncatedDays).toBe(1);
+    // Named, not counted: which crop and which day is what makes it findable.
+    expect([...stats.truncated]).toEqual(['甘藍 2026-09-01']);
   });
 
   it('does not count a window it could still halve', async () => {
@@ -176,7 +193,7 @@ describe('truncation', () => {
       return { ok: true, text: async () => answer([row('115.09.02')], call === 1) };
     });
     await fetchRoot('甘藍', '2026-09-01', '2026-09-02');
-    expect(stats.truncatedDays).toBe(0);
+    expect([...stats.truncated]).toEqual([]);
   });
 });
 

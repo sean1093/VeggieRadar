@@ -13,7 +13,7 @@ const CABBAGE: CropDef = { name: '高麗菜', official: '甘藍', category: '葉
 
 const META: RunMeta = {
   from: '2026-09-01', to: '2026-09-03', minTradeVolume: 200,
-  requests: 4, cacheHits: 0, retries: 0, failures: 0, truncatedDays: 0, itemsRequested: 1,
+  requests: 4, cacheHits: 0, retries: 0, failures: 0, truncated: [], itemsRequested: 1,
 };
 
 function row(date: string, market: string, price: number, qty: number): MoaRow {
@@ -44,6 +44,23 @@ describe('renderReport', () => {
     expect(md).toContain('1 個市場未對應到區域');
     expect(md).toContain('新竹市');
     expect(md).not.toContain('✅');
+  });
+
+  it('names the truncated days rather than counting them', () => {
+    const md = renderReport({ ...META, truncated: ['甘藍 2026-09-02', '蕹菜 2026-09-02'] },
+      marketSightings(new Map([['甘藍', NORTH_AND_CENTRAL]])),
+      [cropStats(CABBAGE, dailySplit(NORTH_AND_CENTRAL, CABBAGE))]);
+    // Five roots truncating on one date is a different problem from one root
+    // truncating on five, and the header has to let a reader tell them apart.
+    expect(md).toContain('甘藍 2026-09-02、蕹菜 2026-09-02');
+  });
+
+  it('keeps a high-volume item in the headline table even with no spread to show', () => {
+    // An item the board leans on that never has two qualifying regions is the
+    // most important row in that table, not one to filter out.
+    const northOnly = [row('115.09.01', '台北一', 30, 1000), row('115.09.02', '台北一', 30, 1000)];
+    const md = render(northOnly);
+    expect(md).toContain('| 高麗菜 | 2 | 0 | — | — |');
   });
 
   it('prints a dash, not 0%, for a region nothing qualified in', () => {

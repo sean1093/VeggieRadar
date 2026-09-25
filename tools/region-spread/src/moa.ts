@@ -16,7 +16,7 @@
  * only keeps a settled answer.
  */
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadBackend } from './backend.ts';
@@ -47,15 +47,19 @@ export type FetchStats = {
   retries: number;
   failures: number;
   /**
-   * Single-day windows MOA still truncated. Halving has a floor, so such a day
-   * keeps only the newest rows — a partial market set, which is the fabricated
-   * regional move this tool exists to rule out. It cannot be fixed by fetching
-   * differently, so it is counted and reported instead of passing silently.
+   * `<root> <ISO date>` for every single day MOA still truncated. Halving has a
+   * floor, so such a day keeps only the newest rows — a partial market set,
+   * which is the fabricated regional move this tool exists to rule out. It
+   * cannot be fetched around, so it is named rather than counted: five roots
+   * truncating on one date is a different problem from one root truncating on
+   * five, and neither can be looked into without knowing which.
    */
-  truncatedDays: number;
+  truncated: Set<string>;
 };
 
-export const stats: FetchStats = { requests: 0, cacheHits: 0, retries: 0, failures: 0, truncatedDays: 0 };
+export const stats: FetchStats = {
+  requests: 0, cacheHits: 0, retries: 0, failures: 0, truncated: new Set(),
+};
 
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
@@ -109,7 +113,7 @@ export async function fetchRoot(root: string, from: string, to: string): Promise
         pending.push({ from: addDays(window.from, half), to: window.to });
         continue;
       }
-      if (page.next) stats.truncatedDays += 1;
+      if (page.next) stats.truncated.add(`${root} ${window.from}`);
       rows.push(...page.rows);
     }
   }
@@ -153,10 +157,17 @@ async function cachedPage(url: string): Promise<MoaPage> {
   const digest = createHash('sha256').update(url).digest('hex').slice(0, 32);
   const file = resolve(CACHE_DIR, `${digest}.json`);
   if (existsSync(file)) {
-    stats.cacheHits += 1;
-    // Only an answered body was ever written, so this re-parse cannot fail the
-    // run — it is how the cached rows are read back, not a second gate.
-    return judge(readFileSync(file, 'utf8'));
+    // The same gate as a fresh body, because a file on disk is not proof it
+    // was written whole: a run killed mid-write leaves a truncated body, and
+    // trusting it would hand back an empty window — zero failures, no retry,
+    // and the hole frozen in exactly as #69 froze one in. A file that does not
+    // parse as an answer is not a cache hit; it is dropped and refetched.
+    const cachedPageOnDisk = judge(readFileSync(file, 'utf8'));
+    if (cachedPageOnDisk.answered) {
+      stats.cacheHits += 1;
+      return cachedPageOnDisk;
+    }
+    rmSync(file, { force: true });
   }
 
   let body = await once(url);

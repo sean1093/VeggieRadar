@@ -20,7 +20,8 @@ export type RunMeta = {
   cacheHits: number;
   retries: number;
   failures: number;
-  truncatedDays: number;
+  /** `<root> <ISO date>` per single day MOA truncated; see `FetchStats`. */
+  truncated: string[];
   itemsRequested: number;
 };
 
@@ -56,9 +57,9 @@ function heading(meta: RunMeta, measured: CropStats[], markets: MarketSighting[]
     // Halving has a floor, so a single day MOA still truncated keeps only its
     // newest rows: a partial market set, which reads exactly like a real
     // regional price difference. It cannot be re-fetched away, so it is stated.
-    meta.truncatedDays
-      ? `| ⚠️ 被截斷的單日 | ${meta.truncatedDays} —— 這些日子只拿到最新的部分市場，分區數字會偏 |`
-      : `| 被截斷的單日 | 0 |`,
+    meta.truncated.length
+      ? `| ⚠️ 被截斷的品項×日 | ${meta.truncated.length}：${truncatedList(meta.truncated)} —— 這些只拿到最新的部分市場，分區數字會偏 |`
+      : `| 被截斷的品項×日 | 0 |`,
     '',
     '所有價格為 `元/台斤`，與看板顯示的單位一致；成交量為公斤。',
     '每日的全台與分區均價都由後端自己的 `selectRows` → `weightedAverage` 算出，',
@@ -95,7 +96,11 @@ function marketSection(markets: MarketSighting[]): string {
 /** Question 1: is there a regional difference worth showing? */
 function spreadSection(byVolume: CropStats[]): string {
   const withSpread = byVolume.filter((c) => c.spreadDays > 0);
-  const top = withSpread.slice(0, 20);
+  // Top 20 BY VOLUME, not top 20 of those that happened to have a spread. An
+  // item the board leans on that never has two qualifying regions is the most
+  // important row in this table, and filtering it out would hide exactly what
+  // section 3 exists to measure.
+  const top = byVolume.slice(0, 20);
   const bands: { label: string; test: (c: CropStats) => boolean }[] = [
     { label: '< 5%', test: (c) => c.medianSpreadPct < 5 },
     { label: '5–10%', test: (c) => c.medianSpreadPct >= 5 && c.medianSpreadPct < 10 },
@@ -116,11 +121,15 @@ function spreadSection(byVolume: CropStats[]): string {
       return `| ${band.label} | ${n} | ${pct(share)} |`;
     }),
     '',
-    `成交量前 20 大品項：`,
+    `成交量前 20 大品項（"—" = 從來沒有兩個區域同時有資格，無從比較）：`,
     '',
     `| 品項 | 交易日 | 有 ≥2 區的日數 | 價差中位數 | 價差 p90 |`,
     `| --- | --- | --- | --- | --- |`,
-    ...top.map((c) => `| ${c.name} | ${c.days} | ${c.spreadDays} | ${pct(c.medianSpreadPct)} | ${pct(c.p90SpreadPct)} |`),
+    ...top.map((c) =>
+      c.spreadDays
+        ? `| ${c.name} | ${c.days} | ${c.spreadDays} | ${pct(c.medianSpreadPct)} | ${pct(c.p90SpreadPct)} |`
+        : `| ${c.name} | ${c.days} | 0 | — | — |`,
+    ),
   ].join('\n');
 }
 
@@ -171,11 +180,12 @@ function changeSection(measured: CropStats[]): string {
   return [
     `## 4. 分區漲跌幅可不可信`,
     '',
-    `\`changeGap\` = |該區日比較漲跌% − 同一組日期的全台漲跌%|，取各品項中位數後再取品項間的中位數。`,
+    `\`changeGap\` = |該區日比較漲跌% − 同一組日期的全台漲跌%|。先算每個品項自己的中位數與 p90，`,
+    `再取品項之間的中位數 —— 所以 p90 欄是「典型品項的壞日子」，不是所有日子的 p90。`,
     `\`mixChurn\` = 相鄰兩個「有資格的交易日」之間，該區貢獻市場組成改變的比例 —— 批發市場各自固定休市，`,
     `分區之後一家休市就可能換掉一半樣本，此時漲跌反映的是市場組成而不是價格。`,
     '',
-    `| 區域 | 有日比較的品項 | changeGap 中位數 | changeGap p90 | mixChurn | 相鄰交易日間隔 |`,
+    `| 區域 | 有日比較的品項 | changeGap 中位數 | changeGap p90（品項中位數） | mixChurn | 相鄰交易日間隔 |`,
     `| --- | --- | --- | --- | --- | --- |`,
     // A region nothing qualified in has no measured gap; printing 0.0% would
     // read as "perfectly consistent with the nationwide move", the opposite of
@@ -204,6 +214,12 @@ function detailSection(byVolume: CropStats[]): string {
       return `| ${c.name} | ${c.category} | ${c.days} | ${tonnes(c.volume)} | ${c.spreadDays ? pct(c.medianSpreadPct) : '—'} | ${c.viableRegions} | ${cells.join(' | ')} |`;
     }),
   ].join('\n');
+}
+
+/** At most a handful of names, so the header stays a header. */
+function truncatedList(truncated: string[]): string {
+  const shown = [...truncated].sort().slice(0, 5).join('、');
+  return truncated.length > 5 ? `${shown} …` : shown;
 }
 
 function statsFor(crop: CropStats, region: Region): RegionStats {

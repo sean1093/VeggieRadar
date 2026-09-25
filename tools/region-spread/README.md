@@ -48,11 +48,15 @@ pause between batches — a few minutes. Every response is cached under `.cache/
 re-running costs nothing**. That matters, because the first run's job is to
 tell you what the table is missing.
 
-The run header also reports **被截斷的單日**: MOA caps a response near 1,000
+The run header also reports **被截斷的品項×日**: MOA caps a response near 1,000
 rows and drops the oldest, so an over-long window is halved and refetched — but
 halving stops at one day. A day that still truncates keeps only part of its
-market set, which reads exactly like a regional price difference, so it is
-counted and stated rather than passed silently.
+market set, which reads exactly like a regional price difference, so each one
+is named (crop and date) rather than passed silently — five crops truncating on
+one date is a different problem from one crop truncating on five.
+
+A `--root` run writes to its own filename, so a quick look cannot overwrite the
+full-board report a conclusion was drawn from.
 
 Output lands in `report/<from>_<to>.md` (paste-ready for the issue) and
 `report/<from>_<to>.json` (the same numbers, for further slicing). Both are
