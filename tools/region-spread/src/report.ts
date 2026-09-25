@@ -23,6 +23,8 @@ export type RunMeta = {
   /** `<root> <ISO date>` per single day MOA truncated; see `FetchStats`. */
   truncated: string[];
   itemsRequested: number;
+  /** A `--root` run: section 1's roster covers only the roots it fetched. */
+  partial: boolean;
 };
 
 const pct = (n: number) => `${n.toFixed(1)}%`;
@@ -33,7 +35,7 @@ export function renderReport(meta: RunMeta, markets: MarketSighting[], crops: Cr
   const byVolume = [...measured].sort((a, b) => b.volume - a.volume);
   return [
     heading(meta, measured, markets),
-    marketSection(markets),
+    marketSection(markets, meta.partial),
     spreadSection(byVolume),
     coverageSection(measured),
     changeSection(measured),
@@ -73,7 +75,7 @@ function heading(meta: RunMeta, measured: CropStats[], markets: MarketSighting[]
  * against, while contributing to no region — so a large 其他 makes the regional
  * numbers describe a board nobody would ship.
  */
-function marketSection(markets: MarketSighting[]): string {
+function marketSection(markets: MarketSighting[], partial: boolean): string {
   const total = markets.reduce((sum, m) => sum + m.volume, 0) || 1;
   const unmapped = markets.filter((m) => m.region === '其他');
   const unmappedShare = (unmapped.reduce((sum, m) => sum + m.volume, 0) / total) * 100;
@@ -85,7 +87,11 @@ function marketSection(markets: MarketSighting[]): string {
     '',
     unmapped.length
       ? `> ⚠️ **${unmapped.length} 個市場未對應到區域**（占成交量 ${pct(unmappedShare)}）：${unmapped.map((m) => m.name).join('、')}。\n> 請把它們補進 \`src/regions.ts\` 的 \`REGION_BY_MARKET\` 後重跑（快取已在本機，重跑不再發請求）。`
-      : `> ✅ 所有市場都有對應區域。`,
+      : partial
+        // A --root run only ever saw the markets those roots traded in, so a
+        // green check here says nothing about the roster as a whole.
+        ? `> ✅ 這次抓到的市場都有對應區域 —— 但這是 \`--root\` 的局部執行，不能當成整份名單已驗證。`
+        : `> ✅ 所有市場都有對應區域。`,
     '',
     `| 市場 | MarketCode | 區域 | 交易日 | 成交量（噸） | 占全國 |`,
     `| --- | --- | --- | --- | --- | --- |`,

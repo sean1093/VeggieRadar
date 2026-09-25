@@ -43,10 +43,15 @@ npm run measure -- --root 甘藍 --root 蕹菜   # a few roots, for a quick look
 ```
 
 A 30-day run over ~100 roots is roughly 300 MOA requests at 4 concurrent with a
-pause between batches — a few minutes. Every response is cached under `.cache/`
-(gitignored, derived, re-downloadable), so **fixing the region table and
-re-running costs nothing**. That matters, because the first run's job is to
-tell you what the table is missing.
+pause after every batch — a few minutes. Every response is cached under
+`.cache/` (gitignored, derived, re-downloadable) keyed by the exact request, so
+**fixing the region table and re-running the same window costs nothing**. That
+matters, because the first run's job is to tell you what the table is missing.
+A run over a different window is a different set of requests and fetches again.
+
+`--root` takes MOA's **official** root, the `official` field of `BOARD_ITEMS` —
+`甘藍`, not the display name `高麗菜`. A name that matches no board item stops
+the run rather than being quietly skipped.
 
 The run header also reports **被截斷的品項×日**: MOA caps a response near 1,000
 rows and drops the oldest, so an over-long window is halved and refetched — but
@@ -67,7 +72,7 @@ issue, not into the tree.
 
 | Section | Answers |
 | --- | --- |
-| 1. 市場對照表 | Every market seen, its codes, and the region `src/regions.ts` gave it. **Fails loudly while any market is unmapped** — unmapped volume still counts nationwide, so the regional numbers would describe a board nobody would ship. Volume is de-duplicated first: MOA substring-matches `CropName`, so 蘿蔔 and 胡蘿蔔 are answered with overlapping rows. |
+| 1. 市場對照表 | Every market seen, its codes, and the region `src/regions.ts` gave it. **Stays red while any market is unmapped** — unmapped volume still counts nationwide, so the regional numbers would describe a board nobody would ship. Volume is de-duplicated first: MOA substring-matches `CropName`, so 蘿蔔 and 胡蘿蔔 are answered with overlapping rows. |
 | 2. 區域價差 | Per crop and per day, the gap between the dearest and cheapest qualifying region as a share of today's nationwide price. Median and p90. |
 | 3. 樣本量 | Per region, the share of trading days it clears `MIN_TRADE_VOLUME`, and how many crops could support 0–4 regions. |
 | 4. 分區漲跌 | `changeGap` (how far the regional move lands from the nationwide one over the same date pair) and `mixChurn` (how often the contributing markets changed between consecutive qualifying days). |

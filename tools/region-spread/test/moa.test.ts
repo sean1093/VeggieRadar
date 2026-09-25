@@ -47,13 +47,18 @@ const cached = (): string[] => {
   }
 };
 
-/** One stubbed response per call, in order; the last repeats. `null` fails the request. */
-function serve(...bodies: (string | null)[]): () => number {
+/**
+ * One stubbed response per call, in order; the last repeats. `null` is a 503
+ * from MOA, and `undefined` a request that never produced a response at all —
+ * the distinction the error messages are supposed to carry.
+ */
+function serve(...bodies: (string | null | undefined)[]): () => number {
   let call = 0;
   vi.stubGlobal('fetch', async () => {
     const body = bodies[Math.min(call++, bodies.length - 1)];
-    if (body === null) return { ok: false, text: async () => '' };
-    return { ok: true, text: async () => body };
+    if (body === undefined) throw new TypeError('fetch failed');
+    if (body === null) return { ok: false, status: 503, text: async () => '' };
+    return { ok: true, status: 200, text: async () => body };
   });
   return () => call;
 }
@@ -116,9 +121,19 @@ describe('the cache', () => {
   });
 
   it('reports an unreachable retry as a fetch failure, whatever the first body was', async () => {
-    serve('', null);
+    serve('', undefined);
     await expect(withoutThePause(() => fetchRoot('甘藍', '2026-09-01', '2026-09-01'))).rejects.toThrow(
       /fetch failed/,
+    );
+    expect(cached()).toEqual([]);
+  });
+
+  it('names MOA’s status, so a throttled feed is not reported as a dead network', async () => {
+    // The operator backs off from one and checks connectivity for the other,
+    // which is the whole reason the two errors are told apart.
+    serve(null, null);
+    await expect(withoutThePause(() => fetchRoot('甘藍', '2026-09-01', '2026-09-01'))).rejects.toThrow(
+      /MOA responded 503/,
     );
     expect(cached()).toEqual([]);
   });

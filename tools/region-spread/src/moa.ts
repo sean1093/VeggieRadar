@@ -87,6 +87,20 @@ export function windows(from: string, to: string, days: number): DateRange[] {
   return out;
 }
 
+/**
+ * The ISO dates MOA truncated for `root` — the days whose market set is known
+ * to be partial, so the measurement can leave them out rather than let a
+ * missing market read as a regional price difference.
+ */
+export function truncatedDates(root: string): Set<string> {
+  const out = new Set<string>();
+  for (const entry of stats.truncated) {
+    const [seen, date] = entry.split(' ');
+    if (seen === root) out.add(date);
+  }
+  return out;
+}
+
 /** ROC date string for the API, via the backend's own converter. */
 function roc(iso: string): string {
   const [year, month, day] = iso.split('-').map(Number);
@@ -133,10 +147,10 @@ export async function fetchRoot(root: string, from: string, to: string): Promise
  * A failed request is handed over as a non-200 rather than judged separately,
  * so there is exactly one definition of an answer in the run.
  */
-function judge(body: string | null): MoaPage {
+function judge(attempt: { body: string | null; status: number }): MoaPage {
   return loadBackend().parsePage({
-    getResponseCode: () => (body === null ? 0 : 200),
-    getContentText: () => body ?? '',
+    getResponseCode: () => (attempt.body === null ? attempt.status || 0 : 200),
+    getContentText: () => attempt.body ?? '',
   });
 }
 
@@ -162,7 +176,7 @@ async function cachedPage(url: string): Promise<MoaPage> {
     // trusting it would hand back an empty window — zero failures, no retry,
     // and the hole frozen in exactly as #69 froze one in. A file that does not
     // parse as an answer is not a cache hit; it is dropped and refetched.
-    const cachedPageOnDisk = judge(readFileSync(file, 'utf8'));
+    const cachedPageOnDisk = judge({ body: readFileSync(file, 'utf8'), status: 200 });
     if (cachedPageOnDisk.answered) {
       stats.cacheHits += 1;
       return cachedPageOnDisk;
@@ -170,27 +184,40 @@ async function cachedPage(url: string): Promise<MoaPage> {
     rmSync(file, { force: true });
   }
 
-  let body = await once(url);
-  let page = judge(body);
+  let attempt = await once(url);
+  let page = judge(attempt);
   if (!page.answered) {
     stats.retries += 1;
     await sleep(RETRY_PAUSE_MS);
     // The retry's outcome replaces the first attempt's outright, so the error
     // below describes the attempt it is reporting on.
-    body = await once(url);
-    page = judge(body);
+    attempt = await once(url);
+    page = judge(attempt);
   }
   if (!page.answered) {
     stats.failures += 1;
-    throw new Error(body === null ? `fetch failed: ${url}` : `unusable response: ${url}`);
+    throw new Error(`${describe(attempt)}: ${url}`);
   }
 
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, body as string);
+  writeFileSync(file, attempt.body as string);
   return page;
 }
 
-async function once(url: string): Promise<string | null> {
+/**
+ * One attempt. `status` is 0 only when the request never produced a response
+ * at all (DNS, timeout, reset) — everything else carries MOA's real code, so a
+ * 429 or a 5xx is reported as the feed refusing us rather than as a dead
+ * network. The two are acted on differently: one is checked, the other waited
+ * out.
+ */
+function describe(attempt: { body: string | null; status: number }): string {
+  if (attempt.status === 0) return 'fetch failed';
+  if (attempt.body === null) return `MOA responded ${attempt.status}`;
+  return 'unusable response';
+}
+
+async function once(url: string): Promise<{ body: string | null; status: number }> {
   stats.requests += 1;
   try {
     const response = await fetch(url, {
@@ -200,10 +227,13 @@ async function once(url: string): Promise<string | null> {
         'User-Agent': 'VeggieRadar-region-spread/1.0 (+https://github.com/sean1093/VeggieRadar)',
       },
     });
-    if (!response.ok) return null;
-    return await response.text();
+    // `|| 0` is the same statement as the catch below: no usable status means
+    // no answer from MOA to report, so it is reported as a transport failure
+    // rather than as `MOA responded undefined`.
+    if (!response.ok) return { body: null, status: response.status || 0 };
+    return { body: await response.text(), status: response.status || 200 };
   } catch {
-    return null;
+    return { body: null, status: 0 };
   }
 }
 

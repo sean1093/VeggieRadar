@@ -61,6 +61,18 @@ describe('dailySplit', () => {
     expect(day.nationalVolume).toBe(1000);
   });
 
+  it('drops a day MOA truncated, because a missing market reads as a price gap', () => {
+    // The day is in the rows and would otherwise pass every gate; what is
+    // wrong with it is invisible downstream, so it has to go here.
+    const rows = [
+      row('115.09.01', '台北一', 20, 1000), row('115.09.01', '台中市', 30, 1000),
+      row('115.09.02', '台北一', 20, 1000), row('115.09.02', '台中市', 30, 1000),
+    ];
+    expect(dailySplit(rows, CABBAGE)).toHaveLength(2);
+    const kept = dailySplit(rows, CABBAGE, new Set(['2026-09-01']));
+    expect(kept.map((d) => d.date)).toEqual(['2026-09-02']);
+  });
+
   it('keeps the market names a region was built from, for the mix diagnostic', () => {
     const both = [row('115.09.01', ' 104 台北二 ', 20, 500), row('115.09.01', '台北一', 20, 500)];
     expect(at(dailySplit(both, CABBAGE), '2026-09-01', '北')?.markets).toEqual(['台北一', '台北二']);
@@ -187,6 +199,17 @@ describe('marketSightings', () => {
       { ...base, TransDate: '115.09.02', MarketName: '台北一', MarketCode: '109' },
     ]]]));
     expect(seen.map((m) => m.volume).sort()).toEqual([1000, 2000]);
+  });
+
+  it('parses a quantity the way the backend does, so one odd row cannot NaN the table', () => {
+    // `tradedRows` gates on parseFloat, so a row it passed can still be a
+    // string `Number` refuses — and one NaN in a plain sum renders every
+    // 占全國 cell, and the unmapped-volume gate, as NaN%.
+    const seen = marketSightings(new Map([['甘藍', [
+      { TransDate: '115.09.01', CropName: '甘藍', MarketName: '台北一', MarketCode: '109',
+        Avg_Price: 20, Trans_Quantity: '1200 ' as unknown as number },
+    ]]]));
+    expect(seen[0].volume).toBe(1200);
   });
 
   it('surfaces a market the region table has never been confirmed to contain', () => {

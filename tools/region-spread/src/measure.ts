@@ -101,13 +101,20 @@ export type MarketSighting = {
  * rows belong to the item and `MIN_TRADE_VOLUME` decides whether the nationwide
  * card exists at all. A day with no nationwide card cannot have a regional one,
  * and including it would flatter every regional coverage number.
+ *
+ * `truncated` drops the days MOA cut short. Such a day holds only its newest
+ * rows, so some of its markets are missing — and a missing market is precisely
+ * a price difference that is not there. Naming those days in the report is not
+ * enough: they must not reach a median, a spread, a coverage ratio or a churn
+ * count, because nothing downstream could tell them apart from a real one.
  */
-export function dailySplit(rows: MoaRow[], def: CropDef): CropDay[] {
+export function dailySplit(rows: MoaRow[], def: CropDef, truncated = new Set<string>()): CropDay[] {
   const backend = loadBackend();
   const byDate = new Map<string, MoaRow[]>();
   for (const row of backend.selectRows(rows, def)) {
     const iso = backend.rocToISO(String(row.TransDate ?? ''));
     if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) continue;
+    if (truncated.has(iso)) continue;
     const bucket = byDate.get(iso);
     if (bucket) bucket.push(row);
     else byDate.set(iso, [row]);
@@ -264,7 +271,11 @@ export function marketSightings(rowsByRoot: Map<string, MoaRow[]>): MarketSighti
       }
       if (row.MarketCode) entry.codes.add(String(row.MarketCode));
       entry.dates.add(String(row.TransDate ?? ''));
-      entry.volume += Number(row.Trans_Quantity ?? 0);
+      // `parseFloat`, like `weightedAverage` and `tradedRows`: the gate a row
+      // already passed is a parseFloat one, so `Number` here could turn a
+      // quantity the board accepted into NaN — and one NaN in a plain sum
+      // renders every 占全國 cell, and the unmapped-volume gate, as NaN%.
+      entry.volume += parseFloat(String(row.Trans_Quantity ?? 0)) || 0;
     }
   }
   return [...seen.entries()]

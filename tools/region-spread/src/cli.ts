@@ -16,7 +16,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadBackend } from './backend.ts';
 import type { MoaRow } from './backend.ts';
-import { fetchRoot, stats, addDays } from './moa.ts';
+import { fetchRoot, stats, addDays, truncatedDates } from './moa.ts';
 import { dailySplit, cropStats, marketSightings } from './measure.ts';
 import type { CropStats } from './measure.ts';
 import { renderReport } from './report.ts';
@@ -60,10 +60,18 @@ async function main(): Promise<void> {
   const to = addDays(today, -END_OFFSET_DAYS);
   const from = addDays(to, -(days - 1));
 
+  // Each `--root` is checked on its own. A run where one name matched and
+  // another did not would otherwise fetch part of what was asked for and
+  // report it under a filename and a header that both claim the whole — and
+  // `甘藍` is the root while `高麗菜` is the display name, so naming the wrong
+  // one is the easy mistake, not the exotic one.
+  const unmatched = only.filter((root) => !backend.BOARD_ITEMS.some((d) => d.official === root));
+  if (unmatched.length) {
+    throw new Error(`no board item has the MOA root ${unmatched.join(', ')} (BOARD_ITEMS uses official names: 甘藍, not 高麗菜)`);
+  }
   const items = only.length
     ? backend.BOARD_ITEMS.filter((d) => only.includes(d.official))
     : backend.BOARD_ITEMS;
-  if (!items.length) throw new Error(`no board item matches ${only.join(', ')}`);
 
   // One fetch per ROOT, shared by every item defined on it (花椰菜 白/青, 甜椒
   // 青椒/甜椒), because `selectRows` filters the same rows differently per item.
@@ -79,7 +87,7 @@ async function main(): Promise<void> {
   process.stdout.write('\n');
 
   const crops: CropStats[] = items.map((def) =>
-    cropStats(def, dailySplit(rowsByRoot.get(def.official) ?? [], def)),
+    cropStats(def, dailySplit(rowsByRoot.get(def.official) ?? [], def, truncatedDates(def.official))),
   );
   const markets = marketSightings(rowsByRoot);
 
@@ -93,6 +101,7 @@ async function main(): Promise<void> {
     failures: stats.failures,
     truncated: [...stats.truncated],
     itemsRequested: items.length,
+    partial: only.length > 0,
   };
 
   mkdirSync(REPORT_DIR, { recursive: true });

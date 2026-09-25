@@ -13,7 +13,7 @@ const CABBAGE: CropDef = { name: '高麗菜', official: '甘藍', category: '葉
 
 const META: RunMeta = {
   from: '2026-09-01', to: '2026-09-03', minTradeVolume: 200,
-  requests: 4, cacheHits: 0, retries: 0, failures: 0, truncated: [], itemsRequested: 1,
+  requests: 4, cacheHits: 0, retries: 0, failures: 0, truncated: [], itemsRequested: 1, partial: false,
 };
 
 function row(date: string, market: string, price: number, qty: number): MoaRow {
@@ -44,6 +44,15 @@ describe('renderReport', () => {
     expect(md).toContain('1 個市場未對應到區域');
     expect(md).toContain('新竹市');
     expect(md).not.toContain('✅');
+  });
+
+  it('will not let a --root run’s green mapping check stand for the whole roster', () => {
+    const md = renderReport({ ...META, partial: true },
+      marketSightings(new Map([['甘藍', NORTH_AND_CENTRAL]])),
+      [cropStats(CABBAGE, dailySplit(NORTH_AND_CENTRAL, CABBAGE))]);
+    // Those roots only ever traded in the markets they traded in; the roster
+    // this report is the verification of is the whole board's.
+    expect(md).toContain('局部執行');
   });
 
   it('names the truncated days rather than counting them', () => {
