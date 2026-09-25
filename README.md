@@ -1259,6 +1259,36 @@ season fell between two samples must not be gated out of search.
 Both commands write into `backend/`, so review the diff and commit it with the
 change that motivated it.
 
+### Regional feasibility measurement (`tools/region-spread`)
+
+A one-off, read-only measurement for the regional board
+([#23](https://github.com/sean1093/VeggieRadar/issues/23)). It writes a report
+and changes nothing the app serves.
+
+```bash
+cd tools/region-spread
+npm ci
+npm test              # the statistics, on hand-checked series — no network
+npm run measure       # the last 30 days, every board item
+```
+
+The feature rests on three unmeasured claims, and the tool answers each with a
+number: how far apart the regions really are, whether each region clears
+`MIN_TRADE_VOLUME` once a crop's volume is split four ways, and whether a
+regional change-percent would be a price move or just the market mix changing
+(markets rest on fixed weekdays — nationwide that is diluted by twelve other
+markets, inside one region it can be half the sample). It also produces the
+market roster #23's design marks "to be verified against the actual
+`MarketCode`", and its mapping check stays red while any market is unmapped.
+
+Every number the board would publish comes from `backend/*.gs` — `BOARD_ITEMS`,
+`selectRows`, `weightedAverage`, `MIN_TRADE_VOLUME`, `CATTY_PER_KG` — loaded the
+way `backendCode.test.ts` loads them, with the GAS services stubbed to throw.
+The tool groups and compares; it re-implements none of the arithmetic.
+`.cache/` and `report/` are gitignored, so re-running after fixing the region
+table costs no requests, and the run you draw a conclusion from belongs in the
+issue rather than in the tree. See `tools/region-spread/README.md`.
+
 ### What is committed, and why it is safe
 
 Two files look like secrets and are not:
@@ -1633,6 +1663,10 @@ what is still open there, so the two cannot drift.
   north / central / south / east wholesale averages. Waiting on data, not on
   code — if GA4's city dimension (§6) shows one region carrying most visits,
   the cheaper change is to default to it rather than to build a switcher.
+  Whether the split would be *accurate* is a separate question, and
+  `tools/region-spread` (§7) measures it: the spread between regions, the
+  sample each one would have, and how much of a regional change-percent is
+  market mix rather than price.
 - Per-region retail bands: the calibration feeds are Taichung + Taipei only, so
   a southern band would be assumed precision (§4). Needs a third feed.
 - A rules-based 「今日推薦」 strip on top of the board — deliberately deferred
