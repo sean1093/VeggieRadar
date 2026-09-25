@@ -13,6 +13,11 @@ function row(date: string, market: string, price: number, qty: number, crop = '�
   return { TransDate: date, CropName: crop, MarketName: market, MarketCode: '000', Avg_Price: price, Trans_Quantity: qty };
 }
 
+/** One board item as the CLI hands it to `marketSightings`. */
+function measured(def: CropDef, rows: MoaRow[], truncated = new Set<string>()) {
+  return [{ def, rows, days: dailySplit(rows, def, truncated) }];
+}
+
 /** Region for a region name on one day of a split, or undefined. */
 function at(days: ReturnType<typeof dailySplit>, date: string, region: string) {
   return days.find((d) => d.date === date)?.regions.find((r) => r.region === region);
@@ -151,11 +156,11 @@ describe('cropStats', () => {
 
 describe('marketSightings', () => {
   it('collects every market the feed really traded in, with its codes', () => {
-    const seen = marketSightings([CABBAGE], new Map([['甘藍', [
+    const seen = marketSightings(measured(CABBAGE, [
       { ...row('115.09.01', '台北二', 20, 1000), MarketCode: '104' },
       { ...row('115.09.02', ' 104 台北二 ', 20, 500), MarketCode: '104' },
       { TransDate: '115.09.01', CropName: '休市', MarketName: '花蓮市', Avg_Price: 0, Trans_Quantity: 0 },
-    ]]]));
+    ]));
     expect(seen).toHaveLength(1);
     expect(seen[0]).toMatchObject({ name: '台北二', codes: ['104'], region: '北', days: 2, volume: 1500 });
   });
@@ -169,10 +174,11 @@ describe('marketSightings', () => {
                      MarketCode: '109', Avg_Price: 20, Trans_Quantity: 1000 };
     const RADISH: CropDef = { name: '白蘿蔔', official: '蘿蔔', category: '根莖類' };
     const CARROT: CropDef = { name: '紅蘿蔔', official: '胡蘿蔔', category: '根莖類' };
-    const seen = marketSightings([RADISH, CARROT], new Map([
-      ['蘿蔔', [shared, { ...shared, CropName: '蘿蔔', Trans_Quantity: 500 }]],
-      ['胡蘿蔔', [shared]],
-    ]));
+    const radishRows = [shared, { ...shared, CropName: '蘿蔔', Trans_Quantity: 500 }];
+    const seen = marketSightings([
+      { def: RADISH, rows: radishRows, days: dailySplit(radishRows, RADISH) },
+      { def: CARROT, rows: [shared], days: dailySplit([shared], CARROT) },
+    ]);
     expect(seen).toHaveLength(1);
     // 1000 for 胡蘿蔔 once, plus 500 for 蘿蔔 — not 2000 + 500.
     expect(seen[0].volume).toBe(1500);
@@ -182,11 +188,11 @@ describe('marketSightings', () => {
     // MOA substring-matches, so a 甘藍 request also answers with 甘藍芽's rows.
     // Counting them would make 占全國 — and the unmapped share the whole report
     // is gated on — a share of a population sections 2–5 never look at.
-    const seen = marketSightings([CABBAGE], new Map([['甘藍', [
+    const seen = marketSightings(measured(CABBAGE, [
       row('115.09.01', '台北一', 20, 1000),
       { TransDate: '115.09.01', CropName: '甘藍芽', MarketName: '新竹市', MarketCode: '999',
         Avg_Price: 90, Trans_Quantity: 9000 },
-    ]]]));
+    ]));
     expect(seen.map((m) => m.name)).toEqual(['台北一']);
   });
 
@@ -196,22 +202,22 @@ describe('marketSightings', () => {
     // understate a market exactly as double-counting overstates it.
     const base = { TransDate: '115.09.01', CropName: '甘藍', MarketName: '台北一',
                    MarketCode: '109', Avg_Price: 20, Trans_Quantity: 1000 };
-    const seen = marketSightings([CABBAGE], new Map([['甘藍', [
+    const seen = marketSightings(measured(CABBAGE, [
       base,
       { ...base, Trans_Quantity: 700 },
       { ...base, Avg_Price: 25 },
       base, // the overlap: identical, counted once
-    ]]]));
+    ]));
     expect(seen[0].volume).toBe(1000 + 700 + 1000);
   });
 
   it('keeps the same crop in two markets, or on two days, as two transactions', () => {
     const base = { CropName: '甘藍', Avg_Price: 20, Trans_Quantity: 1000 };
-    const seen = marketSightings([CABBAGE], new Map([['甘藍', [
+    const seen = marketSightings(measured(CABBAGE, [
       { ...base, TransDate: '115.09.01', MarketName: '台北一', MarketCode: '109' },
       { ...base, TransDate: '115.09.01', MarketName: '台中市', MarketCode: '400' },
       { ...base, TransDate: '115.09.02', MarketName: '台北一', MarketCode: '109' },
-    ]]]));
+    ]));
     expect(seen.map((m) => m.volume).sort()).toEqual([1000, 2000]);
   });
 
@@ -219,15 +225,37 @@ describe('marketSightings', () => {
     // `tradedRows` gates on parseFloat, so a row it passed can still be a
     // string `Number` refuses — and one NaN in a plain sum renders every
     // 占全國 cell, and the unmapped-volume gate, as NaN%.
-    const seen = marketSightings([CABBAGE], new Map([['甘藍', [
+    const seen = marketSightings(measured(CABBAGE, [
       { TransDate: '115.09.01', CropName: '甘藍', MarketName: '台北一', MarketCode: '109',
         Avg_Price: 20, Trans_Quantity: '1200 ' as unknown as number },
-    ]]]));
+    ]));
     expect(seen[0].volume).toBe(1200);
   });
 
+  it('ignores a market that only ever traded on a day the report dropped', () => {
+    // A market seen only on an MOA-truncated day reaches no median, spread,
+    // coverage ratio or churn count — so letting its volume into 占全國 would
+    // turn the mapping check red over rows the report never looks at.
+    const rows = [
+      row('115.09.01', '新竹市', 90, 9000),
+      row('115.09.02', '台北一', 20, 1000),
+    ];
+    const seen = marketSightings(measured(CABBAGE, rows, new Set(['2026-09-01'])));
+    expect(seen.map((m) => m.name)).toEqual(['台北一']);
+  });
+
+  it('ignores a day the nationwide gate dropped, for the same reason', () => {
+    // 150 kg island-wide is below MIN_TRADE_VOLUME: the board publishes no
+    // card, `dailySplit` drops the day, and so must the roster.
+    const rows = [
+      row('115.09.01', '新竹市', 90, 150),
+      row('115.09.02', '台北一', 20, 1000),
+    ];
+    expect(marketSightings(measured(CABBAGE, rows)).map((m) => m.name)).toEqual(['台北一']);
+  });
+
   it('surfaces a market the region table has never been confirmed to contain', () => {
-    const seen = marketSightings([CABBAGE], new Map([['甘藍', [row('115.09.01', '新竹市', 20, 1000)]]]));
+    const seen = marketSightings(measured(CABBAGE, [row('115.09.01', '新竹市', 20, 1000)]));
     expect(seen[0].region).toBe('其他');
   });
 });

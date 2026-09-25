@@ -65,6 +65,10 @@ denominator, which is why the header says how many went.
 A `--root` run writes to its own filename, so a quick look cannot overwrite the
 full-board report a conclusion was drawn from.
 
+The window is anchored to **Asia/Taipei**, not to the host clock: the trading
+calendar is Taiwan's (the backend pins the same zone in `appsscript.json`), so
+the same command gives the same window on any machine.
+
 Output lands in `report/<from>_<to>.md` (paste-ready for the issue) and
 `report/<from>_<to>.json` (the same numbers, for further slicing). Both are
 gitignored: commit the one run you are drawing a conclusion from, into the
@@ -74,7 +78,7 @@ issue, not into the tree.
 
 | Section | Answers |
 | --- | --- |
-| 1. 市場對照表 | Every market seen, its codes, and the region `src/regions.ts` gave it. **Stays red while any market is unmapped** — unmapped volume still counts nationwide, so the regional numbers would describe a board nobody would ship. Volume is counted over the same rows sections 2–5 use (each item's `selectRows` output), so the share that gates the report is a share of what the report is built from. |
+| 1. 市場對照表 | Every market seen, its codes, and the region `src/regions.ts` gave it. **Stays red while any market is unmapped** — unmapped volume still counts nationwide, so the regional numbers would describe a board nobody would ship. Volume is counted over exactly the rows sections 2–5 use — each item's `selectRows` output, restricted to the days its split published — so the share that gates the report is a share of what the report is built from. |
 | 2. 區域價差 | Per crop and per day, the gap between the dearest and cheapest qualifying region as a share of today's nationwide price. Median and p90. |
 | 3. 樣本量 | Per region, the share of trading days it clears `MIN_TRADE_VOLUME`, and how many crops could support 0–4 regions. |
 | 4. 分區漲跌 | `changeGap` (how far the regional move lands from the nationwide one over the same date pair) and `mixChurn` (how often the contributing markets changed between consecutive qualifying days). |

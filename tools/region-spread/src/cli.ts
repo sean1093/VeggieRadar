@@ -16,7 +16,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadBackend } from './backend.ts';
 import type { MoaRow } from './backend.ts';
-import { fetchRoot, stats, addDays, localToday, truncatedDates } from './moa.ts';
+import { fetchRoot, stats, addDays, feedToday, truncatedDates } from './moa.ts';
 import { dailySplit, cropStats, marketSightings } from './measure.ts';
 import type { CropStats } from './measure.ts';
 import { renderReport } from './report.ts';
@@ -56,7 +56,7 @@ async function main(): Promise<void> {
   const { days, roots: only } = parseArgs(process.argv.slice(2));
   const backend = loadBackend();
 
-  const to = addDays(localToday(), -END_OFFSET_DAYS);
+  const to = addDays(feedToday(), -END_OFFSET_DAYS);
   const from = addDays(to, -(days - 1));
 
   // Each `--root` is checked on its own. A run where one name matched and
@@ -85,10 +85,16 @@ async function main(): Promise<void> {
   }
   process.stdout.write('\n');
 
-  const crops: CropStats[] = items.map((def) =>
-    cropStats(def, dailySplit(rowsByRoot.get(def.official) ?? [], def, truncatedDates(def.official))),
-  );
-  const markets = marketSightings(items, rowsByRoot);
+  // Split once, then everything downstream reads the SAME measurement — the
+  // market roster included, so the unmapped-volume share that gates the report
+  // is a share of the rows the report is actually built from.
+  const measured = items.map((def) => ({
+    def,
+    rows: rowsByRoot.get(def.official) ?? [],
+    days: dailySplit(rowsByRoot.get(def.official) ?? [], def, truncatedDates(def.official)),
+  }));
+  const crops: CropStats[] = measured.map((m) => cropStats(m.def, m.days));
+  const markets = marketSightings(measured);
 
   const meta = {
     from,

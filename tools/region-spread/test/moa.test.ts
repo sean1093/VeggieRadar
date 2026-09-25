@@ -27,7 +27,7 @@ const CACHE = mkdtempSync(join(tmpdir(), 'region-spread-cache-'));
 process.env.REGION_SPREAD_CACHE_DIR = CACHE;
 
 // Imported after the variable is set: `CACHE_DIR` is resolved once, at import.
-const { fetchRoot, stats, windows, addDays, spanDays, localToday, CACHE_DIR, RETRY_PAUSE_MS } =
+const { fetchRoot, stats, windows, addDays, spanDays, feedToday, CACHE_DIR, RETRY_PAUSE_MS } =
   await import('../src/moa.ts');
 
 afterAll(() => rmSync(CACHE, { recursive: true, force: true }));
@@ -221,22 +221,16 @@ describe('date helpers', () => {
     ]);
   });
 
-  it('reads today from the local calendar, which is not UTC’s', () => {
-    // 04:00 on the 25th in Taipei is still the 24th in UTC. The board, the
-    // crop crawler and MOA all run on the local calendar; a UTC "today" here
-    // would shift the whole window a day and miss the entire cache.
+  it('reads today in Taipei, whatever the host clock is set to', () => {
+    // 04:00 on the 25th in Taipei is still the 24th in UTC. The trading
+    // calendar is Taiwan's — the backend pins Asia/Taipei in appsscript.json —
+    // so the window must not depend on who ran the command.
     const earlyMorningInTaipei = new Date('2026-09-24T20:00:00Z');
     expect(earlyMorningInTaipei.toISOString().slice(0, 10)).toBe('2026-09-24');
-    const local = localToday(earlyMorningInTaipei);
-    expect(local).toBe(
-      `${earlyMorningInTaipei.getFullYear()}-` +
-        `${`${earlyMorningInTaipei.getMonth() + 1}`.padStart(2, '0')}-` +
-        `${`${earlyMorningInTaipei.getDate()}`.padStart(2, '0')}`,
-    );
-    // vitest.config pins TZ=Asia/Taipei for the frontend; this package has no
-    // such pin, so the assertion that matters is the one that holds anywhere:
-    // east of UTC this instant is already the 25th, and never earlier.
-    expect(local >= '2026-09-24').toBe(true);
+    expect(feedToday(earlyMorningInTaipei)).toBe('2026-09-25');
+    // And the boundary from the other side: 07:59 Taipei is still the 25th.
+    expect(feedToday(new Date('2026-09-24T23:59:00Z'))).toBe('2026-09-25');
+    expect(feedToday(new Date('2026-09-25T16:00:00Z'))).toBe('2026-09-26');
   });
 
   it('treats dates as calendar days, across a month boundary and a DST-shifting zone', () => {

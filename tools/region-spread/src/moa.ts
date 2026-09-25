@@ -70,19 +70,30 @@ export function addDays(iso: string, days: number): string {
   return at.toISOString().slice(0, 10);
 }
 
+/** The calendar MOA's trading days are counted in. */
+export const FEED_TIME_ZONE = 'Asia/Taipei';
+
 /**
- * Today as an ISO date in the machine's own timezone.
+ * Today as an ISO date in Taipei, whatever the host is set to.
  *
- * The LOCAL calendar, because that is what the rest of the pipeline runs on:
- * `backend/Moa.gs`'s `dateToROC` reads local date parts, and `tools/catalog`
- * walks the local calendar too. `toISOString().slice(0, 10)` would be UTC —
- * run from Taipei before 08:00 it names yesterday, so the window silently
- * shifts a day, misses the whole cache, and writes a second report file.
+ * The trading calendar is Taiwan's: the backend pins `Asia/Taipei` in
+ * `appsscript.json` and the frontend suite pins `TZ` in `vitest.config.ts`.
+ * Reading the host clock instead would make the window depend on who ran the
+ * command — `toISOString()` on a UTC-configured machine names yesterday for
+ * eight hours of every Taipei day, and a run either side of that boundary asks
+ * MOA for a different window, misses the whole cache, and writes a second
+ * report with different numbers under the same "last 30 days".
+ *
+ * `en-CA` is used only because it formats as `YYYY-MM-DD`; the timezone is the
+ * point, and it is stated rather than inherited.
  */
-export function localToday(now: Date = new Date()): string {
-  const month = `${now.getMonth() + 1}`.padStart(2, '0');
-  const day = `${now.getDate()}`.padStart(2, '0');
-  return `${now.getFullYear()}-${month}-${day}`;
+export function feedToday(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: FEED_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
 }
 
 /** Inclusive length of a closed date range, in calendar days. */

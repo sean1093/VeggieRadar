@@ -85,6 +85,9 @@ export type CropStats = {
   viableRegions: number;
 };
 
+/** One board item, its fetched rows, and the days the measurement kept. */
+export type MeasuredItem = { def: CropDef; rows: MoaRow[]; days: CropDay[] };
+
 /** One market as the feed actually spelled it, with what the table made of it. */
 export type MarketSighting = {
   name: string;
@@ -241,12 +244,13 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
  * has ever held MOA's roster. Sightings are counted over `tradedRows` so that
  * `休市` placeholders cannot invent a market that did not trade.
  *
- * The population is the one the rest of the report measures: each item's own
- * `selectRows` output, not every row MOA returned. The unmapped-volume share
- * here is what decides whether the whole report can be trusted, so it has to
- * be a share OF the rows sections 2–5 are built from — counting crops no board
- * item accepts would have it quantify distortion in a different population
- * than the one it gates.
+ * The population is exactly the one the rest of the report measures: each
+ * item's own `selectRows` output, restricted to the days that item's split
+ * actually published. The unmapped-volume share here is what decides whether
+ * the whole report can be trusted, so it has to be a share OF the rows
+ * sections 2–5 are built from — counting crops no board item accepts, or days
+ * no statistic ever sees, would have it quantify distortion in a different
+ * population than the one it gates.
  *
  * `selectRows` also settles MOA's SUBSTRING matching on its own: a request for
  * 蘿蔔 answers with 胡蘿蔔's rows too (as 甘薯/甘薯葉 and 番茄/小番茄 do), and an
@@ -254,12 +258,18 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
  * items can share a root, and a transaction counted twice would inflate that
  * market's volume and the gate with it.
  */
-export function marketSightings(defs: CropDef[], rowsByRoot: Map<string, MoaRow[]>): MarketSighting[] {
+export function marketSightings(measured: MeasuredItem[]): MarketSighting[] {
   const backend = loadBackend();
   const seen = new Map<string, { codes: Set<string>; dates: Set<string>; volume: number }>();
   const counted = new Set<string>();
-  for (const def of defs) {
-    for (const row of backend.selectRows(rowsByRoot.get(def.official) ?? [], def)) {
+  for (const item of measured) {
+    const published = new Set(item.days.map((d) => d.date));
+    for (const row of backend.selectRows(item.rows, item.def)) {
+      // The same days the rest of the report kept: a day the nationwide gate
+      // dropped, or one MOA truncated, contributes to no median, spread,
+      // coverage ratio or churn count, so it must not contribute to the share
+      // that decides whether those numbers can be trusted either.
+      if (!published.has(backend.rocToISO(String(row.TransDate ?? '')))) continue;
       const name = normalizeMarket(row.MarketName);
       if (!name) continue;
       // The overlapping responses carry the SAME row, field for field, so the
