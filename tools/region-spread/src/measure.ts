@@ -256,13 +256,20 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
  * has ever held MOA's roster. Sightings are counted over `tradedRows` so that
  * `休市` placeholders cannot invent a market that did not trade.
  *
- * The population is exactly the one the rest of the report measures: each
- * item's own `selectRows` output, restricted to the days that item's split
- * actually published. The unmapped-volume share here is what decides whether
- * the whole report can be trusted, so it has to be a share OF the rows
- * sections 2–5 are built from — counting crops no board item accepts, or days
- * no statistic ever sees, would have it quantify distortion in a different
- * population than the one it gates.
+ * The population is the DISTINCT TRANSACTIONS behind the rest of the report:
+ * each item's own `selectRows` output, restricted to the days that item's
+ * split actually published, with each row counted once. The unmapped-volume
+ * share here is what decides whether the whole report can be trusted, so it
+ * has to be a share OF the rows sections 2–5 are built from — counting crops
+ * no board item accepts, or days no statistic ever sees, would have it
+ * quantify distortion in a different population than the one it gates.
+ *
+ * "Distinct" is the one deliberate difference from those sections. A row two
+ * board items both select — `selectRows` matches `variety` by substring, so a
+ * cultivar named for both would be — is one trade in one market, and the
+ * roster says how much traded where. Sections 2–5 are per item and count it
+ * for each card it belongs to, which is right for a card and wrong for a
+ * market's volume.
  *
  * `selectRows` settles MOA's SUBSTRING matching on its own: a request for 蘿蔔
  * answers with 胡蘿蔔's rows too (as 甘薯/甘薯葉 and 番茄/小番茄 do), and an exact

@@ -109,6 +109,12 @@ function marketSection(markets: MarketSighting[], partial: boolean): string {
           unmapped.some((m) => m.name === UNNAMED_MARKET)
             ? `> \`${UNNAMED_MARKET}\` 是 MOA 沒有給市場名稱的資料列，**不要**把它加進對照表 —— 加了只會讓這個檢查變綠，那些列仍然落在 其他。`
             : '',
+          // The caveat belongs here too, not only on the green branch: a
+          // partial run's percentage is a share of the selected roots alone,
+          // and this is the branch that prints a percentage.
+          partial
+            ? `> 這是 \`--root\` 的局部執行，上面的占比是「所選 root 的成交量」的占比，不是整個看板的。`
+            : '',
         ].filter(Boolean).join('\n')
       : partial
         // A --root run only ever saw the markets those roots traded in, so a
@@ -118,6 +124,7 @@ function marketSection(markets: MarketSighting[], partial: boolean): string {
     '',
     '',
     '成交量只計入看板品項自己的交易（與第 2–5 節同一份資料），不是 MOA 當日全部的量。',
+    '同一筆成交只算一次；第 2–5 節是逐品項統計，兩個品項共用的一筆會各自計入。',
     '',
     `| 市場 | MarketCode | 區域 | 交易日 | 成交量（噸） | 占全國 |`,
     `| --- | --- | --- | --- | --- | --- |`,

@@ -46,6 +46,18 @@ describe('renderReport', () => {
     expect(md).not.toContain('✅');
   });
 
+  it('says a partial run’s percentage is a subset, on the branch that prints one', () => {
+    const stranger = [...NORTH_AND_CENTRAL, row('115.09.01', '新竹市', 40, 3000)];
+    const days = dailySplit(stranger, CABBAGE);
+    const md = renderReport({ ...META, partial: true },
+      marketSightings([{ def: CABBAGE, rows: stranger, days }]),
+      [cropStats(CABBAGE, days)]);
+    // The caveat used to live only on the green branch — i.e. never on the
+    // run that actually shows a 占成交量 number.
+    expect(md).toContain('個市場未對應到區域');
+    expect(md).toContain('局部執行');
+  });
+
   it('tells the reader not to paper over rows the feed gave no market name', () => {
     const nameless = [
       ...NORTH_AND_CENTRAL,
