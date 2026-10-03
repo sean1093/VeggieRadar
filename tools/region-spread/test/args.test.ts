@@ -22,6 +22,9 @@ describe('--days', () => {
     // `Number('')` is 0, which would otherwise be reported as out of range.
     expect(() => parseArgs(['--days', ''])).toThrow(/needs a number of days/);
     expect(() => parseArgs(['--days', '   '])).toThrow(/needs a number of days/);
+    // The quiet one: the next flag read as the value. `Number('--root')` is
+    // NaN, so this used to surface as a complaint about the range.
+    expect(() => parseArgs(['--days', '--root', '甘藍'])).toThrow(/needs a number of days/);
   });
 
   it('rejects a fractional day, which silently becomes a wider window', () => {
@@ -45,6 +48,15 @@ describe('--root', () => {
 
   it('refuses a flag with no value, rather than measuring the whole board', () => {
     expect(() => parseArgs(['--root'])).toThrow(/needs a MOA root/);
+    // `--root ' '` used to be accepted, and cli.ts then reported an unmatched
+    // root whose name was invisible whitespace.
+    expect(() => parseArgs(['--root', ' '])).toThrow(/needs a MOA root/);
+    // And `--root --days 60` took `--days` as a crop, then blamed `60`.
+    expect(() => parseArgs(['--root', '--days', '60'])).toThrow(/needs a MOA root/);
+  });
+
+  it('trims a root, so a stray space cannot make it unmatchable', () => {
+    expect(parseArgs(['--root', ' 甘藍 '])).toEqual({ days: 30, roots: ['甘藍'] });
   });
 
   it('refuses an argument it does not understand', () => {

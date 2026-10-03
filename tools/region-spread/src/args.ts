@@ -26,20 +26,32 @@ export const MAX_DAYS = 400;
  */
 export const END_OFFSET_DAYS = 1;
 
+/**
+ * The value belonging to `flag`, or a refusal naming the flag.
+ *
+ * One helper for every flag, because the three ways a value goes missing look
+ * nothing alike on the command line and identical afterwards: omitted at the
+ * end, empty or blank, or swallowed from the next flag. Left to each branch,
+ * the last one is the quiet case — `--days --root 甘藍` read `--root` as the
+ * number of days and then complained about a range, and `--root --days 60`
+ * took `--days` as a crop and blamed `60`. A value is refused when it looks
+ * like a flag rather than when it fails to parse, so the message is about the
+ * argument the caller actually got wrong.
+ */
+function valueFor(argv: string[], index: number, flag: string, expected: string): string {
+  const value = argv[index + 1];
+  if (value === undefined || value.trim() === '' || value.startsWith('--')) {
+    throw new Error(`${flag} needs ${expected}`);
+  }
+  return value.trim();
+}
+
 export function parseArgs(argv: string[]): { days: number; roots: string[] } {
   let days = DEFAULT_DAYS;
   const roots: string[] = [];
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--days') {
-      const value = argv[i + 1];
-      // Told apart from an out-of-range value: a range complaint about a value
-      // nobody supplied sends the reader looking for one they did not write.
-      // An empty argument counts as not supplied — `Number('')` is 0, which
-      // would otherwise reach the range check and be reported as one.
-      if (value === undefined || value.trim() === '') {
-        throw new Error('--days needs a number of days');
-      }
-      days = Number(value);
+      days = Number(valueFor(argv, i, '--days', 'a number of days'));
       // Whole days. `2.5` used to pass `isFinite` and then mean something
       // else: `addDays` adds the fractional offset to the day of month and
       // the Date truncates after, so `-1.5` lands two days back and a request
@@ -50,9 +62,7 @@ export function parseArgs(argv: string[]): { days: number; roots: string[] } {
       }
       i += 1;
     } else if (argv[i] === '--root') {
-      const root = argv[i + 1];
-      if (!root) throw new Error('--root needs a MOA root name');
-      roots.push(root);
+      roots.push(valueFor(argv, i, '--root', 'a MOA root name'));
       i += 1;
     } else {
       throw new Error(`unknown argument: ${argv[i]}`);
