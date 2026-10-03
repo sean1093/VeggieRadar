@@ -1,7 +1,8 @@
 /**
- * Argument parsing, which decides what the run measures and what it is filed
- * under. Both checks here are about a value that used to be ACCEPTED and then
- * quietly meant something else than it said.
+ * Argument parsing, which decides what the run measures. Every `--days` case
+ * here got past the old `isFinite` test: a fraction silently widened the
+ * window, and an enormous value hung the run inside `windows()` rather than
+ * failing.
  */
 import { describe, it, expect } from 'vitest';
 import { parseArgs, MAX_DAYS } from '../src/args.ts';
@@ -18,6 +19,9 @@ describe('--days', () => {
     // A range complaint about a value nobody supplied sends the reader looking
     // for one they did not write.
     expect(() => parseArgs(['--days'])).toThrow(/needs a number of days/);
+    // `Number('')` is 0, which would otherwise be reported as out of range.
+    expect(() => parseArgs(['--days', ''])).toThrow(/needs a number of days/);
+    expect(() => parseArgs(['--days', '   '])).toThrow(/needs a number of days/);
   });
 
   it('rejects a fractional day, which silently becomes a wider window', () => {

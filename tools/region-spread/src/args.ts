@@ -2,8 +2,9 @@
  * The command line, in its own module so it can be tested: `cli.ts` runs
  * `main()` on import, and a test that imported it would launch a measurement.
  *
- * Both bounds here guard a value that used to be ACCEPTED and then quietly
- * meant something other than what it said.
+ * Each `--days` check is here because the value got past the old `isFinite`
+ * test and then went wrong somewhere else: see the notes on `MAX_DAYS` and on
+ * the checks themselves.
  */
 
 export const DEFAULT_DAYS = 30;
@@ -33,7 +34,11 @@ export function parseArgs(argv: string[]): { days: number; roots: string[] } {
       const value = argv[i + 1];
       // Told apart from an out-of-range value: a range complaint about a value
       // nobody supplied sends the reader looking for one they did not write.
-      if (value === undefined) throw new Error('--days needs a number of days');
+      // An empty argument counts as not supplied — `Number('')` is 0, which
+      // would otherwise reach the range check and be reported as one.
+      if (value === undefined || value.trim() === '') {
+        throw new Error('--days needs a number of days');
+      }
       days = Number(value);
       // Whole days. `2.5` used to pass `isFinite` and then mean something
       // else: `addDays` adds the fractional offset to the day of month and
