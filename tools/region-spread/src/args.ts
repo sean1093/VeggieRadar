@@ -7,7 +7,16 @@
  */
 
 export const DEFAULT_DAYS = 30;
-/** The crop crawler's window (`tools/catalog`); past a year the feed is thin anyway. */
+/**
+ * The same 400 days `tools/catalog` crawls — the repo's own answer to how far
+ * back the feed is worth asking about.
+ *
+ * A ceiling is needed because nothing downstream objects to the absence of
+ * one: `addDays` does not throw on a huge offset, it just keeps counting, so
+ * `--days 1000000` resolves to a window starting in the year −712 and sends
+ * roughly 80,000 requests looking for it. The bound turns that into an answer
+ * about the argument instead.
+ */
 export const MAX_DAYS = 400;
 /**
  * Wholesale prices publish after market close, so the most recent day is not
@@ -22,11 +31,11 @@ export function parseArgs(argv: string[]): { days: number; roots: string[] } {
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--days') {
       days = Number(argv[i + 1]);
-      // Whole days, bounded. `2.5` used to pass `isFinite`, and `addDays`
-      // truncates the fractional offset — so it measured and cached a 3-day
-      // window under a filename claiming 2.5. The ceiling is the crop
-      // crawler's own window; past it `addDays` throws `Invalid time value`,
-      // which says nothing about what the caller got wrong.
+      // Whole days. `2.5` used to pass `isFinite` and then mean something
+      // else: `addDays` adds the fractional offset to the day of month and
+      // the Date truncates after, so `-1.5` lands two days back and a request
+      // for 2.5 days measured and cached 3 — the report's 期間 row then states
+      // a window the caller never asked for.
       if (!Number.isInteger(days) || days < 2 || days > MAX_DAYS) {
         throw new Error(`--days needs a whole number between 2 and ${MAX_DAYS}`);
       }

@@ -12,19 +12,20 @@ describe('--days', () => {
     expect(parseArgs([])).toEqual({ days: 30, roots: [] });
   });
 
-  it('rejects a fractional day, which addDays would silently truncate', () => {
-    // `--days 2.5` passed `isFinite`, and `addDays(to, -1.5)` truncates: the
-    // run measured and cached a 3-day window under a filename claiming 2.5.
+  it('rejects a fractional day, which silently becomes a wider window', () => {
+    // `--days 2.5` passed `isFinite`, and `addDays(to, -1.5)` lands two days
+    // back, so the run measured and cached 3 days under a 2.5-day request.
     expect(() => parseArgs(['--days', '2.5'])).toThrow(/whole number/);
   });
 
   it('rejects a window that is not a window', () => {
     expect(() => parseArgs(['--days', '1'])).toThrow(/between 2/);
     expect(() => parseArgs(['--days', 'soon'])).toThrow(/whole number/);
-    // Past the ceiling `addDays` throws `Invalid time value`, which tells the
-    // caller nothing about what they got wrong.
+    // Nothing downstream objects to a huge window: `addDays` keeps counting
+    // rather than throwing, so without this bound `--days 1000000` resolves
+    // to a window starting in the year −712 and crawls for it.
     expect(() => parseArgs(['--days', String(MAX_DAYS + 1)])).toThrow(new RegExp(`${MAX_DAYS}`));
-    expect(() => parseArgs(['--days', '1e21'])).toThrow(new RegExp(`${MAX_DAYS}`));
+    expect(() => parseArgs(['--days', '1000000'])).toThrow(new RegExp(`${MAX_DAYS}`));
   });
 });
 
