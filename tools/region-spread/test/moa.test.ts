@@ -240,7 +240,11 @@ describe('date helpers', () => {
     // its output until the process died, before one request went out.
     expect(() => addDays('2026-10-02', -1_000_000)).toThrow(/representable range/);
     expect(() => addDays('2026-10-02', 4_000_000)).toThrow(/representable range/);
-    // The window the tool actually asks for is nowhere near it.
+    // The other end: an overflowed or malformed Date makes `toISOString()`
+    // throw a bare `RangeError: Invalid time value`, naming neither argument.
+    expect(() => addDays('2026-10-02', 1e8)).toThrow(/representable range: 2026-10-02 \+100000000/);
+    expect(() => addDays('nope', 1)).toThrow(/representable range: nope \+1/);
+    // The window the tool actually asks for is nowhere near either end.
     expect(addDays('2026-10-02', -400)).toBe('2025-08-28');
   });
 

@@ -66,18 +66,26 @@ const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 /**
  * ISO date arithmetic in UTC: these are calendar dates, never instants.
  *
- * The result is checked because `toISOString().slice(0, 10)` lies for years
- * outside 0000–9999: it truncates the expanded form, so a far enough offset
- * yields `'-000712-11'`, which parses back to itself. `addDays` then stops
- * advancing, and `windows()` — which walks `start = addDays(start, n)` until
- * it passes `to` — never terminates and grows its output until the process
- * dies, before a single request goes out. Failing here names the problem where
- * it happens instead of leaving a caller to hang.
+ * Both ends are checked, because the two ways this can go wrong produce
+ * nothing a caller could act on:
+ *
+ *   - An unusable Date — a malformed `iso`, or an offset large enough to
+ *     overflow — makes `toISOString()` throw a bare `RangeError: Invalid time
+ *     value`, which names neither argument.
+ *   - A year outside 0000–9999 survives, but `toISOString().slice(0, 10)`
+ *     truncates the expanded form to something like `'-000712-11'`, which
+ *     parses back to itself. `addDays` then stops advancing, and `windows()` —
+ *     which walks `start = addDays(start, n)` until it passes `to` — never
+ *     terminates and grows its output until the process dies, before a single
+ *     request goes out.
+ *
+ * So both raise the same named error instead. A hang and an anonymous
+ * RangeError are the two outcomes this helper must never hand back.
  */
 export function addDays(iso: string, days: number): string {
   const at = new Date(`${iso}T00:00:00Z`);
   at.setUTCDate(at.getUTCDate() + days);
-  const moved = at.toISOString().slice(0, 10);
+  const moved = Number.isNaN(at.getTime()) ? '' : at.toISOString().slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(moved)) {
     throw new Error(`date arithmetic left the representable range: ${iso} ${days >= 0 ? '+' : ''}${days} days`);
   }
