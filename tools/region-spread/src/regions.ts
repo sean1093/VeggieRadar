@@ -77,11 +77,16 @@ export function regionOf(marketName: string | undefined): Region {
   const key = normalizeMarket(marketName);
   // `Object.hasOwn`, not a plain index: a market literally named `toString` or
   // `__proto__` would otherwise resolve to the value `Object.prototype` holds
-  // under that key, which is not undefined, so `??` would never reach 其他. The
-  // result is then neither 其他 nor one of `REGIONS` — it escapes section 1's
-  // unmapped gate and `cropStats` counts it as a fifth region, widening the
-  // spread. A lookup in this function silently returning a non-region is the
-  // one failure the rest of the file is written to prevent.
+  // under that key, which is not undefined, so `??` would never reach 其他 and
+  // a non-region would escape into the measurement. Both outcomes were
+  // observed, depending on the order `dailySplit`'s sort compares in: either it
+  // throws (`a.region.localeCompare is not a function`), or the value passes
+  // `cropStats`'s `!== '其他'` filter and lands in the spread — 163.6% where
+  // two markets in one region should have produced none.
+  //
+  // MOA will not name a market `toString`. But a lookup here quietly returning
+  // something that is not a region is the one failure the rest of this file is
+  // written to prevent, so it does not rest on the data's good manners.
   return Object.hasOwn(REGION_BY_MARKET, key) ? REGION_BY_MARKET[key] : '其他';
 }
 

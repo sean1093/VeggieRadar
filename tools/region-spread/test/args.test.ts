@@ -7,9 +7,17 @@ import { describe, it, expect } from 'vitest';
 import { parseArgs, MAX_DAYS } from '../src/args.ts';
 
 describe('--days', () => {
-  it('takes a whole number of days', () => {
+  it('takes a whole number of days, up to and including the ceiling', () => {
     expect(parseArgs(['--days', '60'])).toEqual({ days: 60, roots: [] });
+    expect(parseArgs(['--days', String(MAX_DAYS)])).toEqual({ days: MAX_DAYS, roots: [] });
+    expect(parseArgs(['--days', '2'])).toEqual({ days: 2, roots: [] });
     expect(parseArgs([])).toEqual({ days: 30, roots: [] });
+  });
+
+  it('says the value is missing when it is, rather than complaining about its range', () => {
+    // A range complaint about a value nobody supplied sends the reader looking
+    // for one they did not write.
+    expect(() => parseArgs(['--days'])).toThrow(/needs a number of days/);
   });
 
   it('rejects a fractional day, which silently becomes a wider window', () => {
@@ -21,9 +29,6 @@ describe('--days', () => {
   it('rejects a window that is not a window', () => {
     expect(() => parseArgs(['--days', '1'])).toThrow(/between 2/);
     expect(() => parseArgs(['--days', 'soon'])).toThrow(/whole number/);
-    // Nothing downstream objects to a huge window: `addDays` keeps counting
-    // rather than throwing, so without this bound `--days 1000000` resolves
-    // to a window starting in the year −712 and crawls for it.
     expect(() => parseArgs(['--days', String(MAX_DAYS + 1)])).toThrow(new RegExp(`${MAX_DAYS}`));
     expect(() => parseArgs(['--days', '1000000'])).toThrow(new RegExp(`${MAX_DAYS}`));
   });
