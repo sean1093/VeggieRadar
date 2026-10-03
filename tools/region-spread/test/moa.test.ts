@@ -233,6 +233,33 @@ describe('date helpers', () => {
     expect(feedToday(new Date('2026-09-25T16:00:00Z'))).toBe('2026-09-26');
   });
 
+  it('refuses arithmetic that leaves the representable range, instead of standing still', () => {
+    // `toISOString().slice(0, 10)` truncates the expanded year form, so a far
+    // enough offset yields '-000712-11' — which parses back to itself. addDays
+    // would then stop advancing and `windows()` would never terminate, growing
+    // its output until the process died, before one request went out.
+    expect(() => addDays('2026-10-02', -1_000_000)).toThrow(/representable range/);
+    expect(() => addDays('2026-10-02', 4_000_000)).toThrow(/representable range/);
+    // The other end: an overflowed or malformed Date makes `toISOString()`
+    // throw a bare `RangeError: Invalid time value`, naming neither argument.
+    expect(() => addDays('2026-10-02', 1e8)).toThrow(/representable range: 2026-10-02 \+100000000/);
+    expect(() => addDays('nope', 1)).toThrow(/representable range: nope \+1/);
+    // The window the tool actually asks for is nowhere near either end.
+    expect(addDays('2026-10-02', -400)).toBe('2025-08-28');
+  });
+
+  it('refuses a fractional offset, which moves by an amount nobody asked for', () => {
+    // Added to the day of month and truncated after, so how far it moves
+    // depends on the date: two days, one, or none. Not unusable — silently
+    // wrong, which is worse. `parseArgs` blocks the only reachable path today,
+    // but this helper is exported and its docblock makes a promise.
+    expect(() => addDays('2026-10-02', -1.5)).toThrow(/whole number of days/);
+    expect(() => addDays('2026-10-31', 0.5)).toThrow(/whole number of days/);
+    expect(() => addDays('2026-10-02', NaN)).toThrow(/whole number of days/);
+    expect(addDays('2026-10-02', -1)).toBe('2026-10-01');
+    expect(addDays('2026-10-02', 0)).toBe('2026-10-02');
+  });
+
   it('treats dates as calendar days, across a month boundary and a DST-shifting zone', () => {
     expect(addDays('2026-08-31', 1)).toBe('2026-09-01');
     expect(addDays('2026-09-01', -1)).toBe('2026-08-31');

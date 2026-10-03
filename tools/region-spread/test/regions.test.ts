@@ -40,6 +40,17 @@ describe('regionOf', () => {
     expect(regionOf('104')).toBe('其他');
   });
 
+  it('sends an Object.prototype member to 其他 like any other unknown name', () => {
+    // A plain index would resolve `toString` to the function Object.prototype
+    // holds, which is not undefined, so `??` would never reach 其他. The value
+    // then escapes into the measurement: `dailySplit`'s sort throws on it, or
+    // — depending on the order its comparator sees — it passes `cropStats`'s
+    // `!== '其他'` filter and lands in the spread this tool exists to measure.
+    for (const name of ['toString', 'constructor', '__proto__', 'valueOf', 'hasOwnProperty']) {
+      expect(regionOf(name), name).toBe('其他');
+    }
+  });
+
   it('maps every table entry to one of the four regions of issue #23', () => {
     for (const [market, region] of Object.entries(REGION_BY_MARKET)) {
       expect(REGIONS, `${market} → ${region}`).toContain(region);

@@ -63,11 +63,43 @@ export const stats: FetchStats = {
 
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
-/** ISO date arithmetic in UTC: these are calendar dates, never instants. */
+/**
+ * ISO date arithmetic in UTC: these are calendar dates, never instants.
+ *
+ * Both ends are checked, because the two ways this can go wrong produce
+ * nothing a caller could act on:
+ *
+ *   - An unusable Date — a malformed `iso`, or an offset large enough to
+ *     overflow — makes `toISOString()` throw a bare `RangeError: Invalid time
+ *     value`, which names neither argument.
+ *   - A year outside 0000–9999 survives, but `toISOString().slice(0, 10)`
+ *     truncates the expanded form to something like `'-000712-11'`, which
+ *     parses back to itself. `addDays` then stops advancing, and `windows()` —
+ *     which walks `start = addDays(start, n)` until it passes `to` — never
+ *     terminates and grows its output until the process dies, before a single
+ *     request goes out.
+ *
+ *   - A fractional offset moves by an amount that depends on the day of
+ *     month, because it is added to the day and truncated after: from
+ *     2026-10-02, `-1.5` moves two days; from 2026-10-10, `+1.5` moves one;
+ *     from 2026-10-31, `+0.5` moves none. That answer is not unusable, it is
+ *     silently wrong, which is worse.
+ *
+ * So all three raise the same named error instead. A hang, an anonymous
+ * RangeError and a quietly wrong date are the outcomes this helper must never
+ * hand back.
+ */
 export function addDays(iso: string, days: number): string {
+  if (!Number.isInteger(days)) {
+    throw new Error(`addDays needs a whole number of days, got ${days}`);
+  }
   const at = new Date(`${iso}T00:00:00Z`);
   at.setUTCDate(at.getUTCDate() + days);
-  return at.toISOString().slice(0, 10);
+  const moved = Number.isNaN(at.getTime()) ? '' : at.toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(moved)) {
+    throw new Error(`date arithmetic left the representable range: ${iso} ${days >= 0 ? '+' : ''}${days} days`);
+  }
+  return moved;
 }
 
 /** The calendar MOA's trading days are counted in. */

@@ -20,37 +20,10 @@ import { fetchRoot, stats, addDays, feedToday, truncatedDates } from './moa.ts';
 import { dailySplit, cropStats, marketSightings } from './measure.ts';
 import type { CropStats } from './measure.ts';
 import { renderReport } from './report.ts';
+import { parseArgs, END_OFFSET_DAYS } from './args.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPORT_DIR = resolve(HERE, '../report');
-
-const DEFAULT_DAYS = 30;
-/**
- * Wholesale prices publish after market close, so the most recent day is not
- * yet complete. The window ends yesterday for the same reason the board walks
- * back to the latest day with real trades.
- */
-const END_OFFSET_DAYS = 1;
-
-function parseArgs(argv: string[]): { days: number; roots: string[] } {
-  let days = DEFAULT_DAYS;
-  const roots: string[] = [];
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--days') {
-      days = Number(argv[i + 1]);
-      if (!Number.isFinite(days) || days < 2) throw new Error('--days needs a number ≥ 2');
-      i += 1;
-    } else if (argv[i] === '--root') {
-      const root = argv[i + 1];
-      if (!root) throw new Error('--root needs a MOA root name');
-      roots.push(root);
-      i += 1;
-    } else {
-      throw new Error(`unknown argument: ${argv[i]}`);
-    }
-  }
-  return { days, roots };
-}
 
 async function main(): Promise<void> {
   const { days, roots: only } = parseArgs(process.argv.slice(2));
