@@ -79,10 +79,20 @@ const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
  *     terminates and grows its output until the process dies, before a single
  *     request goes out.
  *
- * So both raise the same named error instead. A hang and an anonymous
- * RangeError are the two outcomes this helper must never hand back.
+ *   - A fractional offset moves by an amount that depends on the day of
+ *     month, because it is added to the day and truncated after: from
+ *     2026-10-02, `-1.5` moves two days; from 2026-10-10, `+1.5` moves one;
+ *     from 2026-10-31, `+0.5` moves none. That answer is not unusable, it is
+ *     silently wrong, which is worse.
+ *
+ * So all three raise the same named error instead. A hang, an anonymous
+ * RangeError and a quietly wrong date are the outcomes this helper must never
+ * hand back.
  */
 export function addDays(iso: string, days: number): string {
+  if (!Number.isInteger(days)) {
+    throw new Error(`addDays needs a whole number of days, got ${days}`);
+  }
   const at = new Date(`${iso}T00:00:00Z`);
   at.setUTCDate(at.getUTCDate() + days);
   const moved = Number.isNaN(at.getTime()) ? '' : at.toISOString().slice(0, 10);

@@ -248,6 +248,18 @@ describe('date helpers', () => {
     expect(addDays('2026-10-02', -400)).toBe('2025-08-28');
   });
 
+  it('refuses a fractional offset, which moves by an amount nobody asked for', () => {
+    // Added to the day of month and truncated after, so how far it moves
+    // depends on the date: two days, one, or none. Not unusable — silently
+    // wrong, which is worse. `parseArgs` blocks the only reachable path today,
+    // but this helper is exported and its docblock makes a promise.
+    expect(() => addDays('2026-10-02', -1.5)).toThrow(/whole number of days/);
+    expect(() => addDays('2026-10-31', 0.5)).toThrow(/whole number of days/);
+    expect(() => addDays('2026-10-02', NaN)).toThrow(/whole number of days/);
+    expect(addDays('2026-10-02', -1)).toBe('2026-10-01');
+    expect(addDays('2026-10-02', 0)).toBe('2026-10-02');
+  });
+
   it('treats dates as calendar days, across a month boundary and a DST-shifting zone', () => {
     expect(addDays('2026-08-31', 1)).toBe('2026-09-01');
     expect(addDays('2026-09-01', -1)).toBe('2026-08-31');

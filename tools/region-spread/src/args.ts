@@ -62,7 +62,10 @@ export function parseArgs(argv: string[]): { days: number; roots: string[] } {
       }
       i += 1;
     } else if (argv[i] === '--root') {
-      roots.push(valueFor(argv, i, '--root', 'a MOA root name'));
+      const root = valueFor(argv, i, '--root', 'a MOA root name');
+      // Named twice is named once: a repeat would otherwise ride along into
+      // the report's filename (`..._甘藍+甘藍.md`) while changing no number.
+      if (!roots.includes(root)) roots.push(root);
       i += 1;
     } else {
       throw new Error(`unknown argument: ${argv[i]}`);

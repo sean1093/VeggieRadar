@@ -59,6 +59,11 @@ describe('--root', () => {
     expect(parseArgs(['--root', ' 甘藍 '])).toEqual({ days: 30, roots: ['甘藍'] });
   });
 
+  it('keeps a repeated root once, so it cannot double in the report filename', () => {
+    expect(parseArgs(['--root', '甘藍', '--root', '甘藍'])).toEqual({ days: 30, roots: ['甘藍'] });
+    expect(parseArgs(['--root', '甘藍', '--root', '蕹菜'])).toEqual({ days: 30, roots: ['甘藍', '蕹菜'] });
+  });
+
   it('refuses an argument it does not understand', () => {
     expect(() => parseArgs(['--roots', '甘藍'])).toThrow(/unknown argument/);
   });
