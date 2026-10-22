@@ -184,7 +184,7 @@ function historySummary() {
  * never run inside the Web App response window. `force=1` jumps the lock
  * and starts another run a second later, alongside one still in flight —
  * not after it — whose trigger that one's cleanup now leaves alone
- * (`dropOwnTrigger`, #90).
+ * (`dropTriggers` with the run's own id, #90).
  */
 function handleBackfill(params) {
   // The long-term archive's backfill (#22 §4) is a different job with its own
@@ -202,16 +202,14 @@ function handleBackfill(params) {
   }
   cache.put(BACKFILL_LOCK_KEY, '1', BACKFILL_LOCK_TTL);
   try {
-    dropTriggers(BACKFILL_ONCE_FN); // spent or superseded: never toward the 20-trigger cap
+    dropTriggers(BACKFILL_ONCE_FN);
     ScriptApp.newTrigger(BACKFILL_ONCE_FN).timeBased().after(1000).create();
+    return { type: 'backfill', queued: true, message: '已排入背景回填，約數分鐘後生效', history: historySummary() };
   } catch (err) {
     Logger.log('handleBackfill error: ' + err);
     cache.remove(BACKFILL_LOCK_KEY);
     return { type: 'backfill', queued: false, message: String(err && err.message || err), history: historySummary() };
   }
-  // Outside the try: the trigger exists and will run, so nothing after this
-  // point may answer "not queued" and free the lock beside it.
-  return { type: 'backfill', queued: true, message: '已排入背景回填，約數分鐘後生效', history: historySummary() };
 }
 
 /**
@@ -231,7 +229,7 @@ function backfillHistoryOnce(e) {
     // trigger: a `force` request during the crawl installs another, which is
     // not this run's to delete (#90).
     try {
-      dropOwnTrigger(e, BACKFILL_ONCE_FN);
+      dropTriggers(BACKFILL_ONCE_FN, e && e.triggerUid);
     } catch (err) {
       Logger.log('backfillHistoryOnce: trigger not dropped: ' + err);
     }

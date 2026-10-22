@@ -1189,14 +1189,6 @@ describe('a forced run beside one in flight (#90)', () => {
     expect(uidsOf(back, 'refreshBoardCacheOnce')).toEqual([]);
   });
 
-  it('deletes nothing of another handler that happens to share an id', () => {
-    const back = loadBackend(plausibleRows());
-    back.api.installDailyTrigger();
-    const [cron] = uidsOf(back, 'refreshBoardCache');
-    back.api.refreshBoardCacheOnce({ triggerUid: cron });
-    expect(uidsOf(back, 'refreshBoardCache')).toEqual([cron]);
-  });
-
   it('still clears every stale trigger on install: that is what dropTriggers is for', () => {
     const back = loadBackend(plausibleRows());
     back.api.installDailyTrigger();

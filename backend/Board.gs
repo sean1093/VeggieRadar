@@ -446,7 +446,7 @@ function refreshBoardCacheOnce(e) {
     // run's own trigger: `?action=warm&force=1` during the rebuild installs
     // another, which is not this run's to delete (#90).
     try {
-      dropOwnTrigger(e, REFRESH_ONCE_FN);
+      dropTriggers(REFRESH_ONCE_FN, e && e.triggerUid);
     } catch (err) {
       Logger.log('refreshBoardCacheOnce: trigger not dropped: ' + err);
     }
@@ -478,36 +478,24 @@ function scheduleRefresh() {
   }
 }
 
-/**
- * Deletes the one trigger a one-off run fired from, by the id its event
- * carries — not every trigger bound to the handler, which would take one a
- * `force` request installed while this run was in flight, and that run would
- * never happen (#90). Run by hand, with no event, there is no id to go by,
- * and every one bound to the handler goes.
- */
-function dropOwnTrigger(e, handler) {
-  var uid = e && e.triggerUid;
-  if (!uid) return dropTriggers(handler);
-  var triggers = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction() !== handler || !isTrigger(triggers[i], uid)) continue;
-    ScriptApp.deleteTrigger(triggers[i]);
-    return 1;
-  }
-  return 0;
-}
-
 /** Whether `trigger` is the one an event's `triggerUid` names — compared as text, whatever type it arrives as. */
 function isTrigger(trigger, uid) {
   return String(trigger.getUniqueId()) === String(uid);
 }
 
-/** Deletes every project trigger bound to one handler function. */
-function dropTriggers(handler) {
+/**
+ * Deletes every project trigger bound to one handler function — or, given
+ * `uid`, only the one with that id: a one-off run's cleanup passes the id its
+ * event carries, so a trigger a `force` request installed while it was in
+ * flight is not taken with it, and that run still happens (#90). Run by hand,
+ * a one-off has no event and no id, and every one bound to the handler goes.
+ */
+function dropTriggers(handler, uid) {
   var triggers = ScriptApp.getProjectTriggers();
   var dropped = 0;
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() !== handler) continue;
+    if (uid && !isTrigger(triggers[i], uid)) continue;
     ScriptApp.deleteTrigger(triggers[i]);
     dropped++;
   }
