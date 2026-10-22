@@ -434,16 +434,19 @@ function parseStoredBoard(json) {
  * One-off trigger target used by `scheduleRefresh`. A dedicated handler name is
  * what makes spent one-off triggers safely distinguishable from the recurring
  * one, since both report a CLOCK event type.
+ * @param {Object=} e the trigger event, whose `triggerUid` is this run's own.
  */
-function refreshBoardCacheOnce() {
+function refreshBoardCacheOnce(e) {
   try {
     refreshBoardCache();
   } finally {
     // Each guarded on its own, and the trigger first: a `ScriptApp` failure
     // here used to strand `REFRESH_LOCK_KEY` for its whole TTL, which is the
-    // lock that stops `?action=warm` queueing another rebuild.
+    // lock that stops `?action=warm` queueing another rebuild. Only this
+    // run's own trigger: `?action=warm&force=1` during the rebuild installs
+    // another, which is not this run's to delete (#90).
     try {
-      dropTriggers(REFRESH_ONCE_FN);
+      dropTriggers(REFRESH_ONCE_FN, e && e.triggerUid);
     } catch (err) {
       Logger.log('refreshBoardCacheOnce: trigger not dropped: ' + err);
     }
@@ -475,12 +478,30 @@ function scheduleRefresh() {
   }
 }
 
-/** Deletes every project trigger bound to one handler function. */
-function dropTriggers(handler) {
+/**
+ * Whether `trigger` is the one an event's `triggerUid` names. Both are the
+ * id's text in Apps Script; compared as text all the same, so a `String`
+ * wrapper matches. (An id that arrived as a Number would already have lost
+ * digits; a trigger it fails to match stays until the next install sweeps
+ * it, as a killed run's does.)
+ */
+function isTrigger(trigger, uid) {
+  return String(trigger.getUniqueId()) === String(uid);
+}
+
+/**
+ * Deletes every project trigger bound to one handler function — or, given
+ * `uid`, only the one with that id: a one-off run's cleanup passes the id its
+ * event carries, so a trigger a `force` request installed while it was in
+ * flight is not taken with it, and that run still happens (#90). Run by hand,
+ * a one-off has no event and no id, and every one bound to the handler goes.
+ */
+function dropTriggers(handler, uid) {
   var triggers = ScriptApp.getProjectTriggers();
   var dropped = 0;
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() !== handler) continue;
+    if (uid && !isTrigger(triggers[i], uid)) continue;
     ScriptApp.deleteTrigger(triggers[i]);
     dropped++;
   }

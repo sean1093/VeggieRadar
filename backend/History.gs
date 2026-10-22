@@ -181,7 +181,10 @@ function historySummary() {
 /**
  * `?action=backfill` — queues the historical crawl in a one-off trigger and
  * answers at once, exactly like `warm`: the crawl takes minutes and must
- * never run inside the Web App response window. `force=1` jumps the lock.
+ * never run inside the Web App response window. `force=1` jumps the lock
+ * and starts another run a second later, alongside one still in flight —
+ * not after it — whose trigger that one's cleanup now leaves alone
+ * (`dropTriggers` with the run's own id, #90).
  */
 function handleBackfill(params) {
   // The long-term archive's backfill (#22 §4) is a different job with its own
@@ -209,25 +212,32 @@ function handleBackfill(params) {
   }
 }
 
-/** One-off trigger target; the lock keeps repeat taps cheap for its full TTL. */
-function backfillHistoryOnce() {
+/**
+ * One-off trigger target; the lock keeps repeat taps cheap for its full TTL.
+ * @param {Object=} e the trigger event, whose `triggerUid` is this run's own.
+ */
+function backfillHistoryOnce(e) {
   var result = null;
   try {
     result = backfillHistory();
   } finally {
     // The trigger first, and each guarded on its own. Dropping the queue lock
     // before this trigger is gone leaves a window where a `handleBackfill`
-    // re-locks and installs a new one, which this line then deletes: the
-    // backfill never runs and the hour-long lock blocks every retry. Guarding
-    // both is what keeps either failure from costing the other.
+    // re-locks and installs a new one, which a run by hand (no event: every
+    // trigger of the handler goes) would then delete. Guarding both is what
+    // keeps either failure from costing the other. Only this run's own
+    // trigger: a `force` request during the crawl installs another, which is
+    // not this run's to delete (#90).
     try {
-      dropTriggers(BACKFILL_ONCE_FN);
+      dropTriggers(BACKFILL_ONCE_FN, e && e.triggerUid);
     } catch (err) {
       Logger.log('backfillHistoryOnce: trigger not dropped: ' + err);
     }
     // A run that merged nothing leaves no queue behind it: the crawl is gone
     // either way, and making the operator wait out the hour to ask again
-    // would be a penalty for someone else's lock.
+    // would be a penalty for someone else's lock. Beside a forced run still
+    // going, that frees the lock early: at worst a retry starts one more run
+    // — never one fewer, which is what #90 was.
     try {
       if (!result || !result.merged) CacheService.getScriptCache().remove(BACKFILL_LOCK_KEY);
     } catch (err) {

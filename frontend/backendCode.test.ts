@@ -72,6 +72,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   let sheetThrows = false;
   let sheetZone = 'Asia/Taipei';
   let triggerDeleteThrows = false;
+  let triggerListThrows = false;
   const mails: { to: string; subject: string; body: string }[] = [];
   let mailThrows = false;
   let brokenPropKey: string | null = null;
@@ -252,11 +253,13 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
       createTextOutput: (t: string) => ({ setMimeType: () => ({ body: t }) }),
     },
     ScriptApp: {
-      getProjectTriggers: () =>
-        triggers.map((t) => ({
+      getProjectTriggers: () => {
+        if (triggerListThrows) throw new Error('Service invoked too many times: Script service');
+        return triggers.map((t) => ({
           getHandlerFunction: () => t.handler,
           getUniqueId: () => uidOf(t),
-        })),
+        }));
+      },
       deleteTrigger: (t: { getHandlerFunction: () => string; getUniqueId: () => string }) => {
         if (triggerDeleteThrows) throw new Error('Service unavailable: Script service');
         const i = triggers.findIndex((x) => uidOf(x) === t.getUniqueId());
@@ -327,6 +330,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     breakRead: (key: string) => { brokenReadKey = key; },
     setSheetZone: (zone: string) => { sheetZone = zone; },
     breakTriggerDelete: () => { triggerDeleteThrows = true; },
+    breakTriggerList: () => { triggerListThrows = true; },
     breakDispatch: () => { dispatchThrows = true; },
     rejectDispatch: (code: number) => { dispatchStatus = code; },
     breakMail: () => { mailThrows = true; },
@@ -1117,6 +1121,83 @@ describe('backfillHistory — losing the lock', () => {
     api.handleBackfill({});
     expect(api.backfillHistoryOnce().merged).toBe(true);
     expect(cache.get('veggie_backfill_queued')).toBe('1'); // one queued backfill per hour
+  });
+});
+
+describe('a forced run beside one in flight (#90)', () => {
+  const handlerOf = (triggers: { handler: string }[], h: string) => triggers.filter((t) => t.handler === h);
+  const uidsOf = (back: ReturnType<typeof loadBackend>, h: string) => handlerOf(back.triggers, h).map((t) => back.uidOf(t));
+
+  it('keeps the backfill a force request installs during the crawl, and runs it', () => {
+    for (const firstMerges of [true, false]) {
+      const back = loadBackend(plausibleRows());
+      back.api.handleBackfill({});
+      const [a] = uidsOf(back, 'backfillHistoryOnce');
+      // Mid-crawl, someone who thinks it stuck forces another.
+      expect(back.api.handleBackfill({ force: '1' }).queued).toBe(true);
+      const [b] = uidsOf(back, 'backfillHistoryOnce');
+      expect(b).not.toBe(a);
+      if (!firstMerges) back.contendLock();
+
+      back.api.backfillHistoryOnce({ triggerUid: a }); // the first run's cleanup
+
+      expect(uidsOf(back, 'backfillHistoryOnce')).toEqual([b]); // not its to delete
+      // A merge keeps the hour's lock; one that merged nothing frees it, as
+      // it always has — early, beside the forced run, which costs at most
+      // one more run on a retry, never the forced one.
+      expect(back.cache.has('veggie_backfill_queued')).toBe(firstMerges);
+      back.locks.contended = false;
+      expect(back.api.backfillHistoryOnce({ triggerUid: b }).merged).toBe(true); // and the second runs
+      expect(uidsOf(back, 'backfillHistoryOnce')).toEqual([]);
+    }
+  });
+
+  it('keeps the rebuild ?action=warm&force=1 installs during a rebuild, and runs it', () => {
+    const back = loadBackend(plausibleRows());
+    expect(back.api.handleWarm({}).queued).toBe(true);
+    const [a] = uidsOf(back, 'refreshBoardCacheOnce');
+    expect(back.api.handleWarm({ force: '1' }).queued).toBe(true);
+    const [b] = uidsOf(back, 'refreshBoardCacheOnce');
+    expect(b).not.toBe(a);
+
+    back.api.refreshBoardCacheOnce({ triggerUid: a });
+
+    expect(uidsOf(back, 'refreshBoardCacheOnce')).toEqual([b]);
+    back.api.refreshBoardCacheOnce({ triggerUid: b });
+    expect(uidsOf(back, 'refreshBoardCacheOnce')).toEqual([]);
+    expect(back.cache.has('veggie_refresh_queued')).toBe(false);
+  });
+
+  it('frees the lock still when its own trigger will not drop, or the list cannot be read', () => {
+    for (const fault of ['delete', 'list'] as const) {
+      const back = loadBackend(plausibleRows());
+      back.api.handleWarm({});
+      const [own] = uidsOf(back, 'refreshBoardCacheOnce');
+      if (fault === 'delete') back.breakTriggerDelete();
+      else back.breakTriggerList();
+      expect(() => back.api.refreshBoardCacheOnce({ triggerUid: own })).not.toThrow();
+      expect(back.cache.has('veggie_refresh_queued')).toBe(false);
+      expect(back.logs.some((l) => l.includes('trigger not dropped'))).toBe(true);
+    }
+  });
+
+  it('matches its trigger whatever type the event carries its id as', () => {
+    const back = loadBackend(plausibleRows());
+    back.api.handleWarm({});
+    const [id] = uidsOf(back, 'refreshBoardCacheOnce');
+    back.api.refreshBoardCacheOnce({ triggerUid: { toString: () => id } });
+    expect(uidsOf(back, 'refreshBoardCacheOnce')).toEqual([]);
+  });
+
+  it('still clears every stale trigger on install: that is what dropTriggers is for', () => {
+    const back = loadBackend(plausibleRows());
+    back.api.installDailyTrigger();
+    back.api.installDailyTrigger(); // a re-install leaves one, not two
+    expect(handlerOf(back.triggers, 'refreshBoardCache')).toHaveLength(1);
+    back.api.handleWarm({});
+    back.cache.delete('veggie_refresh_queued'); // its run was killed at the time limit: no cleanup
+    back.api.handleWarm({});
+    expect(uidsOf(back, 'refreshBoardCacheOnce')).toHaveLength(1);
   });
 });
 

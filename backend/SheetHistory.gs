@@ -674,7 +674,7 @@ function queueSpareLink(e) {
     var pending = 0;
     for (var i = 0; i < triggers.length; i++) {
       if (triggers[i].getHandlerFunction() !== SHEET_BACKFILL_FN) continue;
-      if (uid && triggers[i].getUniqueId() === uid) {
+      if (uid && isTrigger(triggers[i], uid)) {
         ScriptApp.deleteTrigger(triggers[i]);
         continue;
       }
