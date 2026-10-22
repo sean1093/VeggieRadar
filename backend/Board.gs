@@ -478,7 +478,12 @@ function scheduleRefresh() {
   }
 }
 
-/** Whether `trigger` is the one an event's `triggerUid` names — compared as text, whatever type it arrives as. */
+/**
+ * Whether `trigger` is the one an event's `triggerUid` names. Both are the
+ * id's text in Apps Script; compared as text all the same, so a `String`
+ * wrapper matches. An id that arrived as a Number would already have lost
+ * digits — `dropTriggers` logs a cleanup that matched nothing.
+ */
 function isTrigger(trigger, uid) {
   return String(trigger.getUniqueId()) === String(uid);
 }
@@ -499,6 +504,9 @@ function dropTriggers(handler, uid) {
     ScriptApp.deleteTrigger(triggers[i]);
     dropped++;
   }
+  // A run's own trigger is always there: matching none means the id did not,
+  // and the spent trigger stays until the next install sweeps it.
+  if (uid && !dropped) Logger.log('dropTriggers: no ' + handler + ' trigger has id ' + uid);
   return dropped;
 }
 

@@ -1189,6 +1189,14 @@ describe('a forced run beside one in flight (#90)', () => {
     expect(uidsOf(back, 'refreshBoardCacheOnce')).toEqual([]);
   });
 
+  it('says so when its id matches no trigger, rather than leaving one silently', () => {
+    const back = loadBackend(plausibleRows());
+    back.api.handleWarm({});
+    back.api.refreshBoardCacheOnce({ triggerUid: 'no-such-id' });
+    expect(uidsOf(back, 'refreshBoardCacheOnce')).toHaveLength(1);
+    expect(back.logs.some((l) => l.includes('no refreshBoardCacheOnce trigger has id no-such-id'))).toBe(true);
+  });
+
   it('still clears every stale trigger on install: that is what dropTriggers is for', () => {
     const back = loadBackend(plausibleRows());
     back.api.installDailyTrigger();
