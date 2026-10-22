@@ -132,7 +132,11 @@ Browser: localStorage (paints first) ──▶ data/board.json ──▶ GAS /ex
     operator token (below); anyone else gets the plain, lock-bounded path.
   - `doGet?action=backfill&token=…` — one-time seeding of the price history
     via range queries (`force=1` jumps a one-hour lock); also a one-off
-    trigger, same reason. Operator only.
+    trigger, same reason. Operator only. A `force` sent while a crawl is still
+    running queues a second run behind it: each run's cleanup deletes only
+    the trigger it fired from and frees the lock only while it still names
+    that trigger, so the one in flight cannot cancel the one just queued
+    (#90). `warm&force` works the same way.
   - `doGet?action=diag` — board freshness, installed triggers, the last refresh
     outcome, history coverage and alert state, so a stalled pipeline is
     diagnosable without the GAS console. Public; the last failure's raw reason

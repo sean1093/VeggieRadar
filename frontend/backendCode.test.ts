@@ -270,6 +270,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
           create: () => {
             triggerIds.set(spec, `t${++triggerSeq}`);
             triggers.push(spec);
+            return { getHandlerFunction: () => spec.handler, getUniqueId: () => uidOf(spec) };
           },
         };
         return { timeBased: () => clock };
@@ -1057,7 +1058,7 @@ describe('backfillHistory — losing the lock', () => {
     // anyone asking again.
     const { api, cache, contendLock, locks, logs } = loadBackend(plausibleRows());
     api.handleBackfill({});
-    expect(cache.get('veggie_backfill_queued')).toBe('1');
+    expect(cache.get('veggie_backfill_queued')).toBe('t1'); // names the trigger it queued
     contendLock();
 
     const result = api.backfillHistoryOnce();
@@ -1116,7 +1117,68 @@ describe('backfillHistory — losing the lock', () => {
     const { api, cache } = loadBackend(plausibleRows());
     api.handleBackfill({});
     expect(api.backfillHistoryOnce().merged).toBe(true);
-    expect(cache.get('veggie_backfill_queued')).toBe('1'); // one queued backfill per hour
+    expect(cache.get('veggie_backfill_queued')).toBe('t1'); // one queued backfill per hour
+  });
+});
+
+describe('a forced queue behind a run in flight (#90)', () => {
+  const handlerOf = (triggers: { handler: string }[], h: string) => triggers.filter((t) => t.handler === h);
+
+  it('keeps the backfill a force request queued during the crawl, and runs it', () => {
+    for (const mergeWorks of [true, false]) {
+      const back = loadBackend(plausibleRows());
+      back.api.handleBackfill({});
+      const first = { triggerUid: back.uidOf(handlerOf(back.triggers, 'backfillHistoryOnce')[0]) };
+      // Mid-crawl, someone who thinks it stuck forces another.
+      expect(back.api.handleBackfill({ force: '1' }).queued).toBe(true);
+      const queued = handlerOf(back.triggers, 'backfillHistoryOnce');
+      expect(queued).toHaveLength(1);
+      const second = { triggerUid: back.uidOf(queued[0]) };
+      expect(second.triggerUid).not.toBe(first.triggerUid);
+      if (!mergeWorks) back.contendLock();
+
+      back.api.backfillHistoryOnce(first); // the first run's cleanup
+
+      expect(handlerOf(back.triggers, 'backfillHistoryOnce')).toEqual(queued); // not its to delete
+      expect(back.cache.get('veggie_backfill_queued')).toBe(second.triggerUid); // nor its lock to free
+      back.locks.contended = false;
+      expect(back.api.backfillHistoryOnce(second).merged).toBe(true); // and the second runs
+      expect(handlerOf(back.triggers, 'backfillHistoryOnce')).toEqual([]);
+    }
+  });
+
+  it('frees its own lock still, when nothing newer took it', () => {
+    const back = loadBackend(plausibleRows());
+    back.api.handleBackfill({});
+    const own = { triggerUid: back.uidOf(handlerOf(back.triggers, 'backfillHistoryOnce')[0]) };
+    back.contendLock();
+    expect(back.api.backfillHistoryOnce(own).merged).toBe(false);
+    expect(back.cache.has('veggie_backfill_queued')).toBe(false);
+    expect(handlerOf(back.triggers, 'backfillHistoryOnce')).toEqual([]);
+  });
+
+  it('keeps the rebuild ?action=warm&force=1 queued during a rebuild, and its lock', () => {
+    const back = loadBackend(plausibleRows());
+    expect(back.api.handleWarm({}).queued).toBe(true);
+    const first = { triggerUid: back.uidOf(handlerOf(back.triggers, 'refreshBoardCacheOnce')[0]) };
+    expect(back.api.handleWarm({ force: '1' }).queued).toBe(true);
+    const queued = handlerOf(back.triggers, 'refreshBoardCacheOnce');
+    const second = { triggerUid: back.uidOf(queued[0]) };
+
+    back.api.refreshBoardCacheOnce(first);
+
+    expect(handlerOf(back.triggers, 'refreshBoardCacheOnce')).toEqual(queued);
+    expect(back.cache.get('veggie_refresh_queued')).toBe(second.triggerUid);
+    back.api.refreshBoardCacheOnce(second);
+    expect(handlerOf(back.triggers, 'refreshBoardCacheOnce')).toEqual([]);
+    expect(back.cache.has('veggie_refresh_queued')).toBe(false);
+  });
+
+  it('still clears every stale cron trigger on install: that is what dropTriggers is for', () => {
+    const back = loadBackend(plausibleRows());
+    back.api.installDailyTrigger();
+    back.api.installDailyTrigger(); // a re-install leaves one, not two
+    expect(handlerOf(back.triggers, 'refreshBoardCache')).toHaveLength(1);
   });
 });
 
@@ -4839,7 +4901,7 @@ describe('alerting under contention and failure', () => {
     // stops `?action=warm` queueing another rebuild.
     const { api, cache, breakTriggerDelete, logs } = loadBackend(plausibleRows());
     api.scheduleRefresh();
-    expect(cache.get('veggie_refresh_queued')).toBe('1');
+    expect(cache.get('veggie_refresh_queued')).toBe('t1');
     breakTriggerDelete();
 
     expect(() => api.refreshBoardCacheOnce()).not.toThrow();

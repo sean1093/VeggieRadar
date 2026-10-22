@@ -434,21 +434,24 @@ function parseStoredBoard(json) {
  * One-off trigger target used by `scheduleRefresh`. A dedicated handler name is
  * what makes spent one-off triggers safely distinguishable from the recurring
  * one, since both report a CLOCK event type.
+ * @param {Object=} e the trigger event, whose `triggerUid` is this run's own.
  */
-function refreshBoardCacheOnce() {
+function refreshBoardCacheOnce(e) {
   try {
     refreshBoardCache();
   } finally {
     // Each guarded on its own, and the trigger first: a `ScriptApp` failure
     // here used to strand `REFRESH_LOCK_KEY` for its whole TTL, which is the
-    // lock that stops `?action=warm` queueing another rebuild.
+    // lock that stops `?action=warm` queueing another rebuild. Only this
+    // run's own trigger and lock: `?action=warm&force=1` during the rebuild
+    // queues another, which this cleanup must leave alone (#90).
     try {
-      dropTriggers(REFRESH_ONCE_FN);
+      dropOwnTrigger(e, REFRESH_ONCE_FN);
     } catch (err) {
       Logger.log('refreshBoardCacheOnce: trigger not dropped: ' + err);
     }
     try {
-      CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
+      if (ownsLock(e, REFRESH_LOCK_KEY)) CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
     } catch (err) {
       Logger.log('refreshBoardCacheOnce: refresh lock not cleared: ' + err);
     }
@@ -466,13 +469,42 @@ function scheduleRefresh() {
   cache.put(REFRESH_LOCK_KEY, '1', REFRESH_LOCK_TTL);
   try {
     dropTriggers(REFRESH_ONCE_FN); // never accumulate toward the 20-trigger cap
-    ScriptApp.newTrigger(REFRESH_ONCE_FN).timeBased().after(1000).create();
+    var trigger = ScriptApp.newTrigger(REFRESH_ONCE_FN).timeBased().after(1000).create();
+    cache.put(REFRESH_LOCK_KEY, trigger.getUniqueId(), REFRESH_LOCK_TTL); // names the run it queues
     return true;
   } catch (err) {
     Logger.log('scheduleRefresh error: ' + err);
     cache.remove(REFRESH_LOCK_KEY);
     return false;
   }
+}
+
+/**
+ * Deletes the one trigger a one-off run fired from, by the id its event
+ * carries — not every trigger bound to the handler, which would take a newer
+ * one queued while this run was in flight with it (#90). Run by hand, with
+ * no event, there is no id to go by, and every one bound to the handler goes.
+ */
+function dropOwnTrigger(e, handler) {
+  var uid = e && e.triggerUid;
+  if (!uid) return dropTriggers(handler);
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getUniqueId() !== uid) continue;
+    ScriptApp.deleteTrigger(triggers[i]);
+    return 1;
+  }
+  return 0;
+}
+
+/**
+ * Whether a one-off run's queue lock is still its own: it names the trigger
+ * the run fired from. A newer request may have taken it over, naming its own
+ * trigger; a run by hand, with no event, keeps the old rule and frees it.
+ */
+function ownsLock(e, key) {
+  var uid = e && e.triggerUid;
+  return !uid || CacheService.getScriptCache().get(key) === uid;
 }
 
 /** Deletes every project trigger bound to one handler function. */
