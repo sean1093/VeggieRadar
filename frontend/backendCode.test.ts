@@ -1174,6 +1174,34 @@ describe('a forced queue behind a run in flight (#90)', () => {
     expect(back.cache.has('veggie_refresh_queued')).toBe(false);
   });
 
+  it('answers queued when the trigger exists, even if the lock cannot be pointed at it', () => {
+    for (const queue of ['backfill', 'warm'] as const) {
+      const back = loadBackend(plausibleRows());
+      const key = queue === 'backfill' ? 'veggie_backfill_queued' : 'veggie_refresh_queued';
+      const handler = queue === 'backfill' ? 'backfillHistoryOnce' : 'refreshBoardCacheOnce';
+      const set = back.cache.set.bind(back.cache);
+      back.cache.set = (k: string, v: string) => {
+        if (k === key && v !== '1') throw new Error('cache unavailable'); // the second write only
+        return set(k, v);
+      };
+      const answer = queue === 'backfill' ? back.api.handleBackfill({}) : back.api.handleWarm({});
+      expect(answer.queued).toBe(true); // the trigger is there, and will run
+      expect(handlerOf(back.triggers, handler)).toHaveLength(1);
+      expect(back.cache.get(key)).toBe('1'); // held for its TTL: a retry waits, not a second crawl
+      const again = queue === 'backfill' ? back.api.handleBackfill({}) : back.api.handleWarm({});
+      expect(again.queued).toBe(false);
+    }
+  });
+
+  it('matches its trigger whatever type the event carries its id as', () => {
+    const back = loadBackend(plausibleRows());
+    back.api.handleWarm({});
+    const id = back.uidOf(handlerOf(back.triggers, 'refreshBoardCacheOnce')[0]);
+    back.api.refreshBoardCacheOnce({ triggerUid: { toString: () => id } });
+    expect(handlerOf(back.triggers, 'refreshBoardCacheOnce')).toEqual([]);
+    expect(back.cache.has('veggie_refresh_queued')).toBe(false);
+  });
+
   it('still clears every stale cron trigger on install: that is what dropTriggers is for', () => {
     const back = loadBackend(plausibleRows());
     back.api.installDailyTrigger();

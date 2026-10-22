@@ -440,11 +440,12 @@ function refreshBoardCacheOnce(e) {
   try {
     refreshBoardCache();
   } finally {
-    // Each guarded on its own, and the trigger first: a `ScriptApp` failure
-    // here used to strand `REFRESH_LOCK_KEY` for its whole TTL, which is the
-    // lock that stops `?action=warm` queueing another rebuild. Only this
-    // run's own trigger and lock: `?action=warm&force=1` during the rebuild
-    // queues another, which this cleanup must leave alone (#90).
+    // Each guarded on its own: a `ScriptApp` failure here used to strand
+    // `REFRESH_LOCK_KEY` for its whole TTL, which is the lock that stops
+    // `?action=warm` queueing another rebuild. Only this run's own trigger
+    // and lock: `?action=warm&force=1` during the rebuild starts another,
+    // which this cleanup must leave alone (#90). The trigger first, for a run
+    // by hand that drops every one (see `backfillHistoryOnce`).
     try {
       dropOwnTrigger(e, REFRESH_ONCE_FN);
     } catch (err) {
@@ -470,7 +471,7 @@ function scheduleRefresh() {
   try {
     dropTriggers(REFRESH_ONCE_FN); // never accumulate toward the 20-trigger cap
     var trigger = ScriptApp.newTrigger(REFRESH_ONCE_FN).timeBased().after(1000).create();
-    cache.put(REFRESH_LOCK_KEY, trigger.getUniqueId(), REFRESH_LOCK_TTL); // names the run it queues
+    nameLock(REFRESH_LOCK_KEY, trigger, REFRESH_LOCK_TTL); // names the run it queues
     return true;
   } catch (err) {
     Logger.log('scheduleRefresh error: ' + err);
@@ -490,11 +491,30 @@ function dropOwnTrigger(e, handler) {
   if (!uid) return dropTriggers(handler);
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
-    if (triggers[i].getUniqueId() !== uid) continue;
+    if (!isTrigger(triggers[i], uid)) continue;
     ScriptApp.deleteTrigger(triggers[i]);
     return 1;
   }
   return 0;
+}
+
+/** Whether `trigger` is the one an event's `triggerUid` names — compared as text, whatever type it arrives as. */
+function isTrigger(trigger, uid) {
+  return String(trigger.getUniqueId()) === String(uid);
+}
+
+/**
+ * Points a queue lock at the trigger it queued. Its own write: the trigger
+ * exists by now and will run, so a failure here must not be answered as
+ * "not queued". The lock then keeps its placeholder, which no run owns, and
+ * holds for its TTL — a retry waits rather than starting a second crawl.
+ */
+function nameLock(key, trigger, ttl) {
+  try {
+    CacheService.getScriptCache().put(key, String(trigger.getUniqueId()), ttl);
+  } catch (err) {
+    Logger.log('nameLock (' + key + '): ' + err);
+  }
 }
 
 /**
@@ -504,7 +524,7 @@ function dropOwnTrigger(e, handler) {
  */
 function ownsLock(e, key) {
   var uid = e && e.triggerUid;
-  return !uid || CacheService.getScriptCache().get(key) === uid;
+  return !uid || CacheService.getScriptCache().get(key) === String(uid);
 }
 
 /** Deletes every project trigger bound to one handler function. */
