@@ -183,8 +183,8 @@ function historySummary() {
  * answers at once, exactly like `warm`: the crawl takes minutes and must
  * never run inside the Web App response window. `force=1` jumps the lock
  * and starts another run a second later, alongside one still in flight —
- * not after it: that one's cleanup deletes only its own trigger
- * (`releaseOwnTrigger`), and leaves the lock to the newer one (#90).
+ * not after it — whose trigger that one's cleanup now leaves alone
+ * (`dropOwnTrigger`, #90).
  */
 function handleBackfill(params) {
   // The long-term archive's backfill (#22 §4) is a different job with its own
@@ -202,10 +202,7 @@ function handleBackfill(params) {
   }
   cache.put(BACKFILL_LOCK_KEY, '1', BACKFILL_LOCK_TTL);
   try {
-    // Spent or superseded: never toward the 20-trigger cap. Forced, a run in
-    // flight keeps its trigger — how each run tells the lock is not yet its
-    // to free (`releaseOwnTrigger`).
-    if (!(params && params.force)) dropTriggers(BACKFILL_ONCE_FN);
+    dropTriggers(BACKFILL_ONCE_FN); // spent or superseded: never toward the 20-trigger cap
     ScriptApp.newTrigger(BACKFILL_ONCE_FN).timeBased().after(1000).create();
   } catch (err) {
     Logger.log('handleBackfill error: ' + err);
@@ -226,19 +223,25 @@ function backfillHistoryOnce(e) {
   try {
     result = backfillHistory();
   } finally {
-    // The trigger first, and never throwing (`releaseOwnTrigger`), so
-    // neither failure costs the other. Only this run's own trigger, and the
-    // lock only while no other run is there: a `force` request during the
-    // crawl starts another, and neither it nor the lock beside it is this
-    // run's to delete (#90).
-    var newer = releaseOwnTrigger(e, BACKFILL_ONCE_FN);
+    // The trigger first, and each guarded on its own. Dropping the queue lock
+    // before this trigger is gone leaves a window where a `handleBackfill`
+    // re-locks and installs a new one, which a run by hand (no event: every
+    // trigger of the handler goes) would then delete. Guarding both is what
+    // keeps either failure from costing the other. Only this run's own
+    // trigger: a `force` request during the crawl installs another, which is
+    // not this run's to delete (#90).
+    try {
+      dropOwnTrigger(e, BACKFILL_ONCE_FN);
+    } catch (err) {
+      Logger.log('backfillHistoryOnce: trigger not dropped: ' + err);
+    }
     // A run that merged nothing leaves no queue behind it: the crawl is gone
     // either way, and making the operator wait out the hour to ask again
-    // would be a penalty for someone else's lock.
+    // would be a penalty for someone else's lock. Beside a forced run still
+    // going, that frees the lock early: at worst a retry starts one more run
+    // — never one fewer, which is what #90 was.
     try {
-      if ((!result || !result.merged) && !newer) {
-        CacheService.getScriptCache().remove(BACKFILL_LOCK_KEY);
-      }
+      if (!result || !result.merged) CacheService.getScriptCache().remove(BACKFILL_LOCK_KEY);
     } catch (err) {
       Logger.log('backfillHistoryOnce: queue lock not cleared: ' + err);
     }

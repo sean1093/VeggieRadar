@@ -137,9 +137,8 @@ function withoutForce(params) {
 
 /** `?action=warm` — queues a rebuild and answers immediately. `force=1` jumps the lock. */
 function handleWarm(params) {
-  var force = !!(params && params.force);
-  if (force) CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
-  var queued = scheduleRefresh(force);
+  if (params && params.force) CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
+  var queued = scheduleRefresh();
   return {
     type: 'warm',
     queued: queued,

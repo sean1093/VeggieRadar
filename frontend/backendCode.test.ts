@@ -1128,102 +1128,55 @@ describe('a forced run beside one in flight (#90)', () => {
   const handlerOf = (triggers: { handler: string }[], h: string) => triggers.filter((t) => t.handler === h);
   const uidsOf = (back: ReturnType<typeof loadBackend>, h: string) => handlerOf(back.triggers, h).map((t) => back.uidOf(t));
 
-  it('keeps the backfill a force request starts during the crawl, and its lock, whichever ends first', () => {
-    for (const firstEndsFirst of [true, false]) {
+  it('keeps the backfill a force request installs during the crawl, and runs it', () => {
+    for (const firstMerges of [true, false]) {
       const back = loadBackend(plausibleRows());
       back.api.handleBackfill({});
       const [a] = uidsOf(back, 'backfillHistoryOnce');
       // Mid-crawl, someone who thinks it stuck forces another.
       expect(back.api.handleBackfill({ force: '1' }).queued).toBe(true);
-      const both = uidsOf(back, 'backfillHistoryOnce');
-      expect(both).toHaveLength(2); // the run in flight keeps its trigger: how each tells the other is there
-      const b = both.find((u) => u !== a) as string;
-      const [early, late] = firstEndsFirst ? [a, b] : [b, a];
-      back.contendLock(); // the early one merges nothing, which would free the lock
+      const [b] = uidsOf(back, 'backfillHistoryOnce');
+      expect(b).not.toBe(a);
+      if (!firstMerges) back.contendLock();
 
-      expect(back.api.backfillHistoryOnce({ triggerUid: early }).merged).toBe(false);
+      back.api.backfillHistoryOnce({ triggerUid: a }); // the first run's cleanup
 
-      expect(uidsOf(back, 'backfillHistoryOnce')).toEqual([late]); // not its to delete
-      expect(back.cache.get('veggie_backfill_queued')).toBe('1'); // nor its lock to free
+      expect(uidsOf(back, 'backfillHistoryOnce')).toEqual([b]); // not its to delete
+      // A merge keeps the hour's lock; one that merged nothing frees it, as
+      // it always has — early, beside the forced run, which costs at most
+      // one more run on a retry, never the forced one.
+      expect(back.cache.has('veggie_backfill_queued')).toBe(firstMerges);
       back.locks.contended = false;
-      expect(back.api.backfillHistoryOnce({ triggerUid: late }).merged).toBe(true); // and the other runs
+      expect(back.api.backfillHistoryOnce({ triggerUid: b }).merged).toBe(true); // and the second runs
       expect(uidsOf(back, 'backfillHistoryOnce')).toEqual([]);
     }
   });
 
-  it('frees its own lock still, when no other run is there', () => {
-    const back = loadBackend(plausibleRows());
-    back.api.handleBackfill({});
-    const [own] = uidsOf(back, 'backfillHistoryOnce');
-    back.contendLock();
-    expect(back.api.backfillHistoryOnce({ triggerUid: own }).merged).toBe(false);
-    expect(back.cache.has('veggie_backfill_queued')).toBe(false);
-    expect(uidsOf(back, 'backfillHistoryOnce')).toEqual([]);
-  });
-
-  it('keeps the rebuild ?action=warm&force=1 starts during a rebuild, and its lock', () => {
+  it('keeps the rebuild ?action=warm&force=1 installs during a rebuild, and runs it', () => {
     const back = loadBackend(plausibleRows());
     expect(back.api.handleWarm({}).queued).toBe(true);
     const [a] = uidsOf(back, 'refreshBoardCacheOnce');
     expect(back.api.handleWarm({ force: '1' }).queued).toBe(true);
-    expect(uidsOf(back, 'refreshBoardCacheOnce')).toHaveLength(2); // the rebuild in flight keeps its trigger
-    const b = uidsOf(back, 'refreshBoardCacheOnce').find((u) => u !== a) as string;
+    const [b] = uidsOf(back, 'refreshBoardCacheOnce');
+    expect(b).not.toBe(a);
 
     back.api.refreshBoardCacheOnce({ triggerUid: a });
 
     expect(uidsOf(back, 'refreshBoardCacheOnce')).toEqual([b]);
-    expect(back.cache.get('veggie_refresh_queued')).toBe('1');
     back.api.refreshBoardCacheOnce({ triggerUid: b });
     expect(uidsOf(back, 'refreshBoardCacheOnce')).toEqual([]);
     expect(back.cache.has('veggie_refresh_queued')).toBe(false);
   });
 
-  it('still clears spent triggers when not forced, so they never pile up', () => {
-    const back = loadBackend(plausibleRows());
-    back.api.handleWarm({});
-    back.cache.delete('veggie_refresh_queued'); // its run was killed at the time limit: no cleanup
-    back.api.handleWarm({});
-    expect(uidsOf(back, 'refreshBoardCacheOnce')).toHaveLength(1);
-  });
-
-  it('frees the lock beside its own trigger when that would not drop', () => {
-    // Its own trigger, left behind, is not another run's: the lock is still
-    // this run's to free, or a failed delete would hold it for its TTL.
-    const back = loadBackend(plausibleRows());
-    back.api.handleWarm({});
-    const [own] = uidsOf(back, 'refreshBoardCacheOnce');
-    back.breakTriggerDelete();
-    back.api.refreshBoardCacheOnce({ triggerUid: own });
-    expect(uidsOf(back, 'refreshBoardCacheOnce')).toEqual([own]);
-    expect(back.cache.has('veggie_refresh_queued')).toBe(false);
-  });
-
-  it('keeps the lock for the other run even when its own trigger will not drop', () => {
-    const back = loadBackend(plausibleRows());
-    back.api.handleWarm({});
-    const [a] = uidsOf(back, 'refreshBoardCacheOnce');
-    back.api.handleWarm({ force: '1' });
-    back.breakTriggerDelete();
-    back.api.refreshBoardCacheOnce({ triggerUid: a });
-    expect(back.cache.get('veggie_refresh_queued')).toBe('1');
-  });
-
-  it('fails open when the trigger list cannot be read: the lock is freed, not held', () => {
-    for (const queue of ['backfill', 'warm'] as const) {
+  it('frees the lock still when its own trigger will not drop, or the list cannot be read', () => {
+    for (const fault of ['delete', 'list'] as const) {
       const back = loadBackend(plausibleRows());
-      const key = queue === 'backfill' ? 'veggie_backfill_queued' : 'veggie_refresh_queued';
-      const handler = queue === 'backfill' ? 'backfillHistoryOnce' : 'refreshBoardCacheOnce';
-      if (queue === 'backfill') back.api.handleBackfill({});
-      else back.api.handleWarm({});
-      const [own] = uidsOf(back, handler);
-      back.breakTriggerList();
-      if (queue === 'backfill') {
-        back.contendLock();
-        expect(() => back.api.backfillHistoryOnce({ triggerUid: own })).not.toThrow();
-      } else {
-        expect(() => back.api.refreshBoardCacheOnce({ triggerUid: own })).not.toThrow();
-      }
-      expect(back.cache.has(key)).toBe(false);
+      back.api.handleWarm({});
+      const [own] = uidsOf(back, 'refreshBoardCacheOnce');
+      if (fault === 'delete') back.breakTriggerDelete();
+      else back.breakTriggerList();
+      expect(() => back.api.refreshBoardCacheOnce({ triggerUid: own })).not.toThrow();
+      expect(back.cache.has('veggie_refresh_queued')).toBe(false);
       expect(back.logs.some((l) => l.includes('trigger not dropped'))).toBe(true);
     }
   });
@@ -1234,14 +1187,25 @@ describe('a forced run beside one in flight (#90)', () => {
     const [id] = uidsOf(back, 'refreshBoardCacheOnce');
     back.api.refreshBoardCacheOnce({ triggerUid: { toString: () => id } });
     expect(uidsOf(back, 'refreshBoardCacheOnce')).toEqual([]);
-    expect(back.cache.has('veggie_refresh_queued')).toBe(false);
   });
 
-  it('still clears every stale cron trigger on install: that is what dropTriggers is for', () => {
+  it('deletes nothing of another handler that happens to share an id', () => {
+    const back = loadBackend(plausibleRows());
+    back.api.installDailyTrigger();
+    const [cron] = uidsOf(back, 'refreshBoardCache');
+    back.api.refreshBoardCacheOnce({ triggerUid: cron });
+    expect(uidsOf(back, 'refreshBoardCache')).toEqual([cron]);
+  });
+
+  it('still clears every stale trigger on install: that is what dropTriggers is for', () => {
     const back = loadBackend(plausibleRows());
     back.api.installDailyTrigger();
     back.api.installDailyTrigger(); // a re-install leaves one, not two
     expect(handlerOf(back.triggers, 'refreshBoardCache')).toHaveLength(1);
+    back.api.handleWarm({});
+    back.cache.delete('veggie_refresh_queued'); // its run was killed at the time limit: no cleanup
+    back.api.handleWarm({});
+    expect(uidsOf(back, 'refreshBoardCacheOnce')).toHaveLength(1);
   });
 });
 

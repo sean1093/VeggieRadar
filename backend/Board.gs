@@ -440,15 +440,18 @@ function refreshBoardCacheOnce(e) {
   try {
     refreshBoardCache();
   } finally {
-    // A `ScriptApp` failure here used to strand `REFRESH_LOCK_KEY` for its
-    // whole TTL, which is the lock that stops `?action=warm` queueing another
-    // rebuild: `releaseOwnTrigger` never throws, and fails open. Only this
-    // run's own trigger, and the lock only while no newer run is there:
-    // `?action=warm&force=1` during the rebuild starts another, which this
-    // cleanup must leave alone (#90).
-    var newer = releaseOwnTrigger(e, REFRESH_ONCE_FN);
+    // Each guarded on its own, and the trigger first: a `ScriptApp` failure
+    // here used to strand `REFRESH_LOCK_KEY` for its whole TTL, which is the
+    // lock that stops `?action=warm` queueing another rebuild. Only this
+    // run's own trigger: `?action=warm&force=1` during the rebuild installs
+    // another, which is not this run's to delete (#90).
     try {
-      if (!newer) CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
+      dropOwnTrigger(e, REFRESH_ONCE_FN);
+    } catch (err) {
+      Logger.log('refreshBoardCacheOnce: trigger not dropped: ' + err);
+    }
+    try {
+      CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
     } catch (err) {
       Logger.log('refreshBoardCacheOnce: refresh lock not cleared: ' + err);
     }
@@ -460,15 +463,12 @@ function refreshBoardCacheOnce(e) {
  * which takes minutes and would blow the Web App response window.
  * @returns {boolean} true when this call queued the rebuild.
  */
-function scheduleRefresh(force) {
+function scheduleRefresh() {
   var cache = CacheService.getScriptCache();
   if (cache.get(REFRESH_LOCK_KEY)) return false; // rebuild already pending
   cache.put(REFRESH_LOCK_KEY, '1', REFRESH_LOCK_TTL);
   try {
-    // Never accumulate toward the 20-trigger cap — but a forced rebuild
-    // leaves the triggers of runs in flight alone: each is how the other
-    // tells that the lock is not yet its to free (`releaseOwnTrigger`).
-    if (!force) dropTriggers(REFRESH_ONCE_FN);
+    dropTriggers(REFRESH_ONCE_FN); // never accumulate toward the 20-trigger cap
     ScriptApp.newTrigger(REFRESH_ONCE_FN).timeBased().after(1000).create();
     return true;
   } catch (err) {
@@ -479,46 +479,22 @@ function scheduleRefresh(force) {
 }
 
 /**
- * A one-off run's cleanup of its trigger, in one pass over the list: deletes
- * the one it fired from, by the id its event carries — not every trigger
- * bound to the handler, which would take a newer one queued while this run
- * was in flight (#90) — and says whether such a newer one is there, pending
- * or running, in which case the queue lock is that run's and not this one's
- * to free. Run by hand, with no event, there is no id to go by: every one
- * bound to the handler goes, and the lock is this run's.
- *
- * Never throws, and fails open: a trigger service that cannot be read leaves
- * the lock free to clear, since freeing it beside a newer run only lets the
- * next request queue another, while holding it would refuse every request
- * for its TTL.
- * @returns {boolean} whether another trigger of the handler remains.
+ * Deletes the one trigger a one-off run fired from, by the id its event
+ * carries — not every trigger bound to the handler, which would take one a
+ * `force` request installed while this run was in flight, and that run would
+ * never happen (#90). Run by hand, with no event, there is no id to go by,
+ * and every one bound to the handler goes.
  */
-function releaseOwnTrigger(e, handler) {
+function dropOwnTrigger(e, handler) {
   var uid = e && e.triggerUid;
-  try {
-    if (!uid) {
-      dropTriggers(handler);
-      return false;
-    }
-    var newer = false;
-    var triggers = ScriptApp.getProjectTriggers();
-    for (var i = 0; i < triggers.length; i++) {
-      if (triggers[i].getHandlerFunction() !== handler) continue;
-      if (!isTrigger(triggers[i], uid)) {
-        newer = true;
-        continue;
-      }
-      try {
-        ScriptApp.deleteTrigger(triggers[i]);
-      } catch (err) {
-        Logger.log(handler + ': trigger not dropped: ' + err); // not a newer run's, all the same
-      }
-    }
-    return newer;
-  } catch (err) {
-    Logger.log(handler + ': trigger not dropped: ' + err);
-    return false;
+  if (!uid) return dropTriggers(handler);
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() !== handler || !isTrigger(triggers[i], uid)) continue;
+    ScriptApp.deleteTrigger(triggers[i]);
+    return 1;
   }
+  return 0;
 }
 
 /** Whether `trigger` is the one an event's `triggerUid` names — compared as text, whatever type it arrives as. */
