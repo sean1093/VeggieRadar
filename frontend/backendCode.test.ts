@@ -1058,7 +1058,7 @@ describe('backfillHistory — losing the lock', () => {
     // anyone asking again.
     const { api, cache, contendLock, locks, logs } = loadBackend(plausibleRows());
     api.handleBackfill({});
-    expect(cache.get('veggie_backfill_queued')).toBe('t1'); // names the trigger it queued
+    expect(cache.get('veggie_backfill_queued')).toBe('1');
     contendLock();
 
     const result = api.backfillHistoryOnce();
@@ -1117,7 +1117,7 @@ describe('backfillHistory — losing the lock', () => {
     const { api, cache } = loadBackend(plausibleRows());
     api.handleBackfill({});
     expect(api.backfillHistoryOnce().merged).toBe(true);
-    expect(cache.get('veggie_backfill_queued')).toBe('t1'); // one queued backfill per hour
+    expect(cache.get('veggie_backfill_queued')).toBe('1'); // one queued backfill per hour
   });
 });
 
@@ -1140,7 +1140,7 @@ describe('a forced queue behind a run in flight (#90)', () => {
       back.api.backfillHistoryOnce(first); // the first run's cleanup
 
       expect(handlerOf(back.triggers, 'backfillHistoryOnce')).toEqual(queued); // not its to delete
-      expect(back.cache.get('veggie_backfill_queued')).toBe(second.triggerUid); // nor its lock to free
+      expect(back.cache.get('veggie_backfill_queued')).toBe('1'); // nor its lock to free
       back.locks.contended = false;
       expect(back.api.backfillHistoryOnce(second).merged).toBe(true); // and the second runs
       expect(handlerOf(back.triggers, 'backfillHistoryOnce')).toEqual([]);
@@ -1168,29 +1168,22 @@ describe('a forced queue behind a run in flight (#90)', () => {
     back.api.refreshBoardCacheOnce(first);
 
     expect(handlerOf(back.triggers, 'refreshBoardCacheOnce')).toEqual(queued);
-    expect(back.cache.get('veggie_refresh_queued')).toBe(second.triggerUid);
+    expect(back.cache.get('veggie_refresh_queued')).toBe('1');
     back.api.refreshBoardCacheOnce(second);
     expect(handlerOf(back.triggers, 'refreshBoardCacheOnce')).toEqual([]);
     expect(back.cache.has('veggie_refresh_queued')).toBe(false);
   });
 
-  it('answers queued when the trigger exists, even if the lock cannot be pointed at it', () => {
-    for (const queue of ['backfill', 'warm'] as const) {
-      const back = loadBackend(plausibleRows());
-      const key = queue === 'backfill' ? 'veggie_backfill_queued' : 'veggie_refresh_queued';
-      const handler = queue === 'backfill' ? 'backfillHistoryOnce' : 'refreshBoardCacheOnce';
-      const set = back.cache.set.bind(back.cache);
-      back.cache.set = (k: string, v: string) => {
-        if (k === key && v !== '1') throw new Error('cache unavailable'); // the second write only
-        return set(k, v);
-      };
-      const answer = queue === 'backfill' ? back.api.handleBackfill({}) : back.api.handleWarm({});
-      expect(answer.queued).toBe(true); // the trigger is there, and will run
-      expect(handlerOf(back.triggers, handler)).toHaveLength(1);
-      expect(back.cache.get(key)).toBe('1'); // held for its TTL: a retry waits, not a second crawl
-      const again = queue === 'backfill' ? back.api.handleBackfill({}) : back.api.handleWarm({});
-      expect(again.queued).toBe(false);
-    }
+  it('frees the lock beside its own trigger when that would not drop', () => {
+    // Its own trigger, left behind, is not a newer run's: the lock is still
+    // this run's to free, or a failed delete would hold it for its TTL.
+    const back = loadBackend(plausibleRows());
+    back.api.handleWarm({});
+    const own = { triggerUid: back.uidOf(handlerOf(back.triggers, 'refreshBoardCacheOnce')[0]) };
+    back.breakTriggerDelete();
+    back.api.refreshBoardCacheOnce(own);
+    expect(handlerOf(back.triggers, 'refreshBoardCacheOnce')).toHaveLength(1);
+    expect(back.cache.has('veggie_refresh_queued')).toBe(false);
   });
 
   it('matches its trigger whatever type the event carries its id as', () => {
@@ -4929,7 +4922,7 @@ describe('alerting under contention and failure', () => {
     // stops `?action=warm` queueing another rebuild.
     const { api, cache, breakTriggerDelete, logs } = loadBackend(plausibleRows());
     api.scheduleRefresh();
-    expect(cache.get('veggie_refresh_queued')).toBe('t1');
+    expect(cache.get('veggie_refresh_queued')).toBe('1');
     breakTriggerDelete();
 
     expect(() => api.refreshBoardCacheOnce()).not.toThrow();

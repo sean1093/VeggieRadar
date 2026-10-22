@@ -134,8 +134,8 @@ Browser: localStorage (paints first) ──▶ data/board.json ──▶ GAS /ex
     via range queries (`force=1` jumps a one-hour lock); also a one-off
     trigger, same reason. Operator only. A `force` sent while a crawl is still
     running starts a second run a second later, alongside it — not after it:
-    each run's cleanup deletes only the trigger it fired from and frees the
-    lock only while it still names that trigger, so the one in flight cannot
+    each run's cleanup deletes only the trigger it fired from, and frees the
+    lock only when no newer trigger is pending, so the one in flight cannot
     cancel the one just started (#90). `warm&force` works the same way.
   - `doGet?action=diag` — board freshness, installed triggers, the last refresh
     outcome, history coverage and alert state, so a stalled pipeline is

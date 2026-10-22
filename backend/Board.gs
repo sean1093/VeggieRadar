@@ -444,15 +444,15 @@ function refreshBoardCacheOnce(e) {
     // `REFRESH_LOCK_KEY` for its whole TTL, which is the lock that stops
     // `?action=warm` queueing another rebuild. Only this run's own trigger
     // and lock: `?action=warm&force=1` during the rebuild starts another,
-    // which this cleanup must leave alone (#90). The trigger first, for a run
-    // by hand that drops every one (see `backfillHistoryOnce`).
+    // which this cleanup must leave alone (#90). The trigger first:
+    // `ownsLock` asks which triggers are left.
     try {
       dropOwnTrigger(e, REFRESH_ONCE_FN);
     } catch (err) {
       Logger.log('refreshBoardCacheOnce: trigger not dropped: ' + err);
     }
     try {
-      if (ownsLock(e, REFRESH_LOCK_KEY)) CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
+      if (ownsLock(e, REFRESH_ONCE_FN)) CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
     } catch (err) {
       Logger.log('refreshBoardCacheOnce: refresh lock not cleared: ' + err);
     }
@@ -470,8 +470,7 @@ function scheduleRefresh() {
   cache.put(REFRESH_LOCK_KEY, '1', REFRESH_LOCK_TTL);
   try {
     dropTriggers(REFRESH_ONCE_FN); // never accumulate toward the 20-trigger cap
-    var trigger = ScriptApp.newTrigger(REFRESH_ONCE_FN).timeBased().after(1000).create();
-    nameLock(REFRESH_LOCK_KEY, trigger, REFRESH_LOCK_TTL); // names the run it queues
+    ScriptApp.newTrigger(REFRESH_ONCE_FN).timeBased().after(1000).create();
     return true;
   } catch (err) {
     Logger.log('scheduleRefresh error: ' + err);
@@ -504,27 +503,21 @@ function isTrigger(trigger, uid) {
 }
 
 /**
- * Points a queue lock at the trigger it queued. Its own write: the trigger
- * exists by now and will run, so a failure here must not be answered as
- * "not queued". The lock then keeps its placeholder, which no run owns, and
- * holds for its TTL — a retry waits rather than starting a second crawl.
+ * Whether a one-off run's queue lock is still its own to free: it is, unless
+ * another trigger of the handler is there — one a newer request installed
+ * while this run was in flight, whose lock that now is. The installers drop
+ * spent triggers and every run drops its own, so one that is left is pending
+ * or running. This run's own is not counted, should it not have dropped; a
+ * run by hand, with no event to tell it by, keeps the old rule and frees it.
  */
-function nameLock(key, trigger, ttl) {
-  try {
-    CacheService.getScriptCache().put(key, String(trigger.getUniqueId()), ttl);
-  } catch (err) {
-    Logger.log('nameLock (' + key + '): ' + err);
-  }
-}
-
-/**
- * Whether a one-off run's queue lock is still its own: it names the trigger
- * the run fired from. A newer request may have taken it over, naming its own
- * trigger; a run by hand, with no event, keeps the old rule and frees it.
- */
-function ownsLock(e, key) {
+function ownsLock(e, handler) {
   var uid = e && e.triggerUid;
-  return !uid || CacheService.getScriptCache().get(key) === String(uid);
+  if (!uid) return true;
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === handler && !isTrigger(triggers[i], uid)) return false;
+  }
+  return true;
 }
 
 /** Deletes every project trigger bound to one handler function. */
