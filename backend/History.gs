@@ -184,7 +184,7 @@ function historySummary() {
  * never run inside the Web App response window. `force=1` jumps the lock
  * and starts another run a second later, alongside one still in flight —
  * not after it: that one's cleanup deletes only its own trigger
- * (`dropOwnTrigger`), and leaves the lock to the newer one (`ownsLock`, #90).
+ * (`releaseOwnTrigger`), and leaves the lock to the newer one (#90).
  */
 function handleBackfill(params) {
   // The long-term archive's backfill (#22 §4) is a different job with its own
@@ -202,7 +202,10 @@ function handleBackfill(params) {
   }
   cache.put(BACKFILL_LOCK_KEY, '1', BACKFILL_LOCK_TTL);
   try {
-    dropTriggers(BACKFILL_ONCE_FN); // spent or superseded: never toward the 20-trigger cap
+    // Spent or superseded: never toward the 20-trigger cap. Forced, a run in
+    // flight keeps its trigger — how each run tells the lock is not yet its
+    // to free (`releaseOwnTrigger`).
+    if (!(params && params.force)) dropTriggers(BACKFILL_ONCE_FN);
     ScriptApp.newTrigger(BACKFILL_ONCE_FN).timeBased().after(1000).create();
   } catch (err) {
     Logger.log('handleBackfill error: ' + err);
@@ -223,22 +226,17 @@ function backfillHistoryOnce(e) {
   try {
     result = backfillHistory();
   } finally {
-    // Each guarded on its own, so either failure cannot cost the other, and
-    // the trigger first: `ownsLock` asks which triggers are left. Only this
-    // run's own trigger, and the lock only while no newer one is pending: a
-    // `force` request during the crawl installs another, and neither it nor
-    // the lock beside it is this run's to delete (#90).
-    try {
-      dropOwnTrigger(e, BACKFILL_ONCE_FN);
-    } catch (err) {
-      Logger.log('backfillHistoryOnce: trigger not dropped: ' + err);
-    }
+    // The trigger first, and never throwing (`releaseOwnTrigger`), so
+    // neither failure costs the other. Only this run's own trigger, and the
+    // lock only while no other run is there: a `force` request during the
+    // crawl starts another, and neither it nor the lock beside it is this
+    // run's to delete (#90).
+    var newer = releaseOwnTrigger(e, BACKFILL_ONCE_FN);
     // A run that merged nothing leaves no queue behind it: the crawl is gone
     // either way, and making the operator wait out the hour to ask again
-    // would be a penalty for someone else's lock. Nor is it this run's to
-    // free once it names a newer one.
+    // would be a penalty for someone else's lock.
     try {
-      if ((!result || !result.merged) && ownsLock(e, BACKFILL_ONCE_FN)) {
+      if ((!result || !result.merged) && !newer) {
         CacheService.getScriptCache().remove(BACKFILL_LOCK_KEY);
       }
     } catch (err) {

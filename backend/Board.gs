@@ -440,19 +440,15 @@ function refreshBoardCacheOnce(e) {
   try {
     refreshBoardCache();
   } finally {
-    // Each guarded on its own: a `ScriptApp` failure here used to strand
-    // `REFRESH_LOCK_KEY` for its whole TTL, which is the lock that stops
-    // `?action=warm` queueing another rebuild. Only this run's own trigger
-    // and lock: `?action=warm&force=1` during the rebuild starts another,
-    // which this cleanup must leave alone (#90). The trigger first:
-    // `ownsLock` asks which triggers are left.
+    // A `ScriptApp` failure here used to strand `REFRESH_LOCK_KEY` for its
+    // whole TTL, which is the lock that stops `?action=warm` queueing another
+    // rebuild: `releaseOwnTrigger` never throws, and fails open. Only this
+    // run's own trigger, and the lock only while no newer run is there:
+    // `?action=warm&force=1` during the rebuild starts another, which this
+    // cleanup must leave alone (#90).
+    var newer = releaseOwnTrigger(e, REFRESH_ONCE_FN);
     try {
-      dropOwnTrigger(e, REFRESH_ONCE_FN);
-    } catch (err) {
-      Logger.log('refreshBoardCacheOnce: trigger not dropped: ' + err);
-    }
-    try {
-      if (ownsLock(e, REFRESH_ONCE_FN)) CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
+      if (!newer) CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
     } catch (err) {
       Logger.log('refreshBoardCacheOnce: refresh lock not cleared: ' + err);
     }
@@ -464,12 +460,15 @@ function refreshBoardCacheOnce(e) {
  * which takes minutes and would blow the Web App response window.
  * @returns {boolean} true when this call queued the rebuild.
  */
-function scheduleRefresh() {
+function scheduleRefresh(force) {
   var cache = CacheService.getScriptCache();
   if (cache.get(REFRESH_LOCK_KEY)) return false; // rebuild already pending
   cache.put(REFRESH_LOCK_KEY, '1', REFRESH_LOCK_TTL);
   try {
-    dropTriggers(REFRESH_ONCE_FN); // never accumulate toward the 20-trigger cap
+    // Never accumulate toward the 20-trigger cap — but a forced rebuild
+    // leaves the triggers of runs in flight alone: each is how the other
+    // tells that the lock is not yet its to free (`releaseOwnTrigger`).
+    if (!force) dropTriggers(REFRESH_ONCE_FN);
     ScriptApp.newTrigger(REFRESH_ONCE_FN).timeBased().after(1000).create();
     return true;
   } catch (err) {
@@ -480,44 +479,51 @@ function scheduleRefresh() {
 }
 
 /**
- * Deletes the one trigger a one-off run fired from, by the id its event
- * carries — not every trigger bound to the handler, which would take a newer
- * one queued while this run was in flight with it (#90). Run by hand, with
- * no event, there is no id to go by, and every one bound to the handler goes.
+ * A one-off run's cleanup of its trigger, in one pass over the list: deletes
+ * the one it fired from, by the id its event carries — not every trigger
+ * bound to the handler, which would take a newer one queued while this run
+ * was in flight (#90) — and says whether such a newer one is there, pending
+ * or running, in which case the queue lock is that run's and not this one's
+ * to free. Run by hand, with no event, there is no id to go by: every one
+ * bound to the handler goes, and the lock is this run's.
+ *
+ * Never throws, and fails open: a trigger service that cannot be read leaves
+ * the lock free to clear, since freeing it beside a newer run only lets the
+ * next request queue another, while holding it would refuse every request
+ * for its TTL.
+ * @returns {boolean} whether another trigger of the handler remains.
  */
-function dropOwnTrigger(e, handler) {
+function releaseOwnTrigger(e, handler) {
   var uid = e && e.triggerUid;
-  if (!uid) return dropTriggers(handler);
-  var triggers = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < triggers.length; i++) {
-    if (!isTrigger(triggers[i], uid)) continue;
-    ScriptApp.deleteTrigger(triggers[i]);
-    return 1;
+  try {
+    if (!uid) {
+      dropTriggers(handler);
+      return false;
+    }
+    var newer = false;
+    var triggers = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction() !== handler) continue;
+      if (!isTrigger(triggers[i], uid)) {
+        newer = true;
+        continue;
+      }
+      try {
+        ScriptApp.deleteTrigger(triggers[i]);
+      } catch (err) {
+        Logger.log(handler + ': trigger not dropped: ' + err); // not a newer run's, all the same
+      }
+    }
+    return newer;
+  } catch (err) {
+    Logger.log(handler + ': trigger not dropped: ' + err);
+    return false;
   }
-  return 0;
 }
 
 /** Whether `trigger` is the one an event's `triggerUid` names — compared as text, whatever type it arrives as. */
 function isTrigger(trigger, uid) {
   return String(trigger.getUniqueId()) === String(uid);
-}
-
-/**
- * Whether a one-off run's queue lock is still its own to free: it is, unless
- * another trigger of the handler is there — one a newer request installed
- * while this run was in flight, whose lock that now is. The installers drop
- * spent triggers and every run drops its own, so one that is left is pending
- * or running. This run's own is not counted, should it not have dropped; a
- * run by hand, with no event to tell it by, keeps the old rule and frees it.
- */
-function ownsLock(e, handler) {
-  var uid = e && e.triggerUid;
-  if (!uid) return true;
-  var triggers = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction() === handler && !isTrigger(triggers[i], uid)) return false;
-  }
-  return true;
 }
 
 /** Deletes every project trigger bound to one handler function. */
