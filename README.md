@@ -734,7 +734,7 @@ emailed to the maintainer instead, each once per 24 h incident window:
 A refresh Apps Script kills at its six-minute limit is neither: it records
 nothing at all, so there is no failure to count. That is what an MOA that
 does not answer used to cause — each request waits about a minute before it
-times out, and the trading-date probe alone asks up to eight times. So the
+times out, and the trading-date probe alone asks up to sixteen times. So the
 crawl has its own budget (`CRAWL_BUDGET_MS`, 3 min, far above a healthy
 crawl's): past it no more MOA requests go out, and the build fails as
 「向 MOA 抓取資料逾時…MOA 可能無法連線」 — a failure like any other, counted

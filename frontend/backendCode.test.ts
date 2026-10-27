@@ -83,10 +83,10 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     if (new TextEncoder().encode(String(v)).length > 9 * 1024) throw new Error('Argument too large: value');
   };
 
-  let beforeFetch: (() => void) | null = null;
+  let beforeFetch: ((urls: string[]) => void) | null = null;
   const respond = (url: string, options?: Record<string, unknown>) => {
     fetches.push(url);
-    if (beforeFetch) beforeFetch();
+    if (beforeFetch) beforeFetch([url]);
     if (url.indexOf('api.github.com') !== -1) {
       // UrlFetchApp throws on DNS and TLS failures whatever `muteHttpExceptions`
       // says, so a broken dispatch has to be reachable both ways.
@@ -175,7 +175,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
       fetchAll: (reqs: { url: string }[]) => {
         // One round trip for the batch, as UrlFetchApp's own is.
         const hook = beforeFetch;
-        if (hook) hook();
+        if (hook) hook(reqs.map((r) => r.url));
         beforeFetch = null;
         try {
           return reqs.map((r) => respond(r.url));
@@ -298,7 +298,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'RETAIL_MARKUP_ROOT', 'RETAIL_MARKUP_CATEGORY', 'storeBoard', 'readDurableBoard',
     'readBoard', 'boardAgeMs', 'scheduleRefresh', 'refreshBoardCacheOnce', 'dropTriggers', 'handleWarm',
     'handleDiag', 'BOARD_MAX_AGE_MS', 'REFRESH_ONCE_FN',
-    'handleTrend', 'resolveTradeDates', 'MAX_LOOKBACK_DAYS', 'CRAWL_BUDGET_MS',
+    'handleTrend', 'resolveTradeDates', 'MAX_LOOKBACK_DAYS', 'CRAWL_BUDGET_MS', 'PROBE_ROOT',
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
     'applyBaselines', 'backfillHistory', 'backfillHistoryOnce', 'mergeCrawled', 'handleBackfill', 'buildBoard',
     'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown', 'handleSearch', 'RETAIL_BAND_ROOT',
@@ -343,7 +343,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     setSheetZone: (zone: string) => { sheetZone = zone; },
     breakTriggerDelete: () => { triggerDeleteThrows = true; },
     /** Runs before every MOA round trip (once per `fetchAll` batch), e.g. to let time pass. */
-    onFetch: (fn: () => void) => { beforeFetch = fn; },
+    onFetch: (fn: (urls: string[]) => void) => { beforeFetch = fn; },
     breakTriggerList: () => { triggerListThrows = true; },
     breakDispatch: () => { dispatchThrows = true; },
     rejectDispatch: (code: number) => { dispatchStatus = code; },
@@ -1440,12 +1440,6 @@ describe('handleSearch', () => {
     expect(fetches).toHaveLength(0);
   });
 });
-/**
- * Alerting is the only part of the pipeline whose failure is invisible: if the
- * mail never arrives, nobody learns the app is stale. These lock down when it
- * fires, when it stays quiet, and — most importantly — that it can never take
- * the board down with it.
- */
 describe('an MOA that does not answer (the crawl budget)', () => {
   afterEach(() => vi.useRealTimers());
 
@@ -1500,6 +1494,45 @@ describe('an MOA that does not answer (the crawl budget)', () => {
     expect(board.error).toMatch(/逾時/);
   });
 
+  it('does not cache trading dates whose probe the budget cut short', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back = loadBackend(plausibleRows());
+    let probes = 0;
+    back.onFetch(() => {
+      probes += 1;
+      if (probes === 1) vi.setSystemTime(Date.now() + 4 * 60_000); // the latest day answers, then time is up
+    });
+    const board = back.api.buildBoard();
+    expect(board.error).toMatch(/逾時/);
+    expect(back.cache.has('veggie_trade_dates')).toBe(false); // search must not get a date pair without its previous day
+  });
+
+  it('keeps a board whose every root answered when only the retry of empty ones runs late', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    // Every root answers; the out-of-season ones answer empty, so a retry
+    // pass follows each day's — and the second day's main pass ends just past
+    // the budget, leaving only that retry for after it.
+    const back0 = loadBackend();
+    const roots: string[] = back0.api.boardRoots();
+    const [a, b] = roots.filter((r) => r !== back0.api.PROBE_ROOT);
+    const back = loadBackend(plausibleRowsWith({ [a]: [], [b]: [] })); // out of season
+    const last = encodeURIComponent(roots[roots.length - 1]);
+    const prevDay = back.api.resolveTradeDates(true).prev as string;
+    back.cache.clear();
+    let jumped = false;
+    back.onFetch((urls) => {
+      if (jumped || urls.length < 2) return; // the date probe asks one at a time
+      if (urls.some((u) => u.includes(last) && u.includes(prevDay))) {
+        jumped = true;
+        vi.setSystemTime(Date.now() + 4 * 60_000);
+      }
+    });
+    const board = back.api.buildBoard();
+    expect(jumped).toBe(true);
+    expect(board.error).toBeUndefined();
+    expect(board.count).toBeGreaterThan(0);
+  });
+
   it('starts each build with a fresh budget, so one cut short does not fail the next', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const back = loadBackend(plausibleRows());
@@ -1524,6 +1557,12 @@ describe('an MOA that does not answer (the crawl budget)', () => {
   });
 });
 
+/**
+ * Alerting is the only part of the pipeline whose failure is invisible: if the
+ * mail never arrives, nobody learns the app is stale. These lock down when it
+ * fires, when it stays quiet, and — most importantly — that it can never take
+ * the board down with it.
+ */
 describe('failure alerting', () => {
   // A "good refresh" now has to clear the plausibility floor: `refreshBoardCache`
   // no longer stores a one-item board. See `plausibleRows` at the end of the file.

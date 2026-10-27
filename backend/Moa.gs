@@ -13,12 +13,20 @@ var crawlDeadline = null;
 var crawlCutShort = false;
 
 /**
- * Whether the crawl's budget (`CRAWL_BUDGET_MS`) is spent, noting that it
- * was, so the build can say why it came back short. Always false outside a
- * crawl: the trend and search answer visitors, each within its own request.
+ * Whether the crawl's budget (`CRAWL_BUDGET_MS`) is spent. Always false
+ * outside a crawl: the trend and search answer visitors, each within its own
+ * request.
+ */
+function crawlTimeSpent() {
+  return crawlDeadline !== null && Date.now() >= crawlDeadline;
+}
+
+/**
+ * …and, asked before a request the build needs, noting that it was cut, so
+ * the build can say why it came back short.
  */
 function crawlOutOfTime() {
-  if (crawlDeadline === null || Date.now() < crawlDeadline) return false;
+  if (!crawlTimeSpent()) return false;
   crawlCutShort = true;
   return true;
 }
@@ -135,13 +143,7 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta) {
   var out = {};
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
-    if (crawlOutOfTime()) {
-      // Unasked, which is unanswered: the archive's backfill retries those.
-      if (meta) {
-        for (var k = start; k < cropNames.length; k++) notePage(meta, cropNames[k], { answered: false, next: false });
-      }
-      break;
-    }
+    if (crawlOutOfTime()) break; // only a crawl has a deadline, and it keeps no `meta`
     var requests = slice.map(function (name) {
       return { url: cropUrl(name, rocStart, rocEnd), muteHttpExceptions: true };
     });
@@ -192,7 +194,10 @@ function notePage(meta, root, page) {
 function fetchRootRows(roots, rocStart, rocEnd, meta) {
   var out = fetchAllRows(roots, rocStart, rocEnd, meta);
   var misses = roots.filter(function (r) { return !out[r] || !out[r].length; });
-  if (!misses.length) return out;
+  // The retry is a second chance, not part of the answer: out-of-season roots
+  // are empty every time. Past the crawl's budget it is skipped without
+  // marking the crawl cut short — every root has answered once.
+  if (!misses.length || crawlTimeSpent()) return out;
 
   Utilities.sleep(1500);
   var retry = fetchAllRows(misses, rocStart, rocEnd, meta);
@@ -309,7 +314,9 @@ function resolveTradeDates(fresh) {
   }
 
   var dates = { latest: latest, prev: prev };
-  cache.put(TRADE_DATES_CACHE_KEY, JSON.stringify(dates), TRADE_DATES_TTL);
+  // Nor a probe the crawl's budget cut short: the previous day it did not
+  // reach would be missing from every search for the cache's hour.
+  if (!crawlCutShort) cache.put(TRADE_DATES_CACHE_KEY, JSON.stringify(dates), TRADE_DATES_TTL);
   return dates;
 }
 
