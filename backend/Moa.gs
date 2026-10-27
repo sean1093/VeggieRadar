@@ -45,7 +45,8 @@ function fetchCrop(cropName, rocStart, rocEnd) {
 function fetchPage(cropName, rocStart, rocEnd) {
   if (!cropName || !rocStart || crawlOutOfTime()) return { rows: [], answered: false, next: false };
   try {
-    return parsePage(UrlFetchApp.fetch(cropUrl(cropName, rocStart, rocEnd), { muteHttpExceptions: true }));
+    var req = moaRequest(cropUrl(cropName, rocStart, rocEnd));
+    return parsePage(UrlFetchApp.fetch(req.url, req));
   } catch (err) {
     Logger.log('fetchCrop error (' + cropName + ' ' + rocStart + '): ' + err);
     return { rows: [], answered: false, next: false };
@@ -90,6 +91,39 @@ function wholeDaysOf(page) {
 }
 
 /** Single-date URL when `rocEnd` is omitted; a closed range otherwise. */
+/**
+ * Where MOA requests go: the relay in Taiwan when one is configured
+ * (`MOA_RELAY_URL` / `MOA_RELAY_KEY`), else null for MOA itself. A store that
+ * cannot be read means MOA directly — the old way, never no way.
+ */
+function moaRoute() {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var url = props.getProperty(MOA_RELAY_URL_PROP);
+    if (!url) return null;
+    return { url: url.replace(/[?#].*$/, '').replace(/\/?$/, '/'), key: props.getProperty(MOA_RELAY_KEY_PROP) || '' };
+  } catch (err) {
+    Logger.log('moaRoute: ' + err);
+    return null;
+  }
+}
+
+/**
+ * One MOA request as `UrlFetchApp` takes it (`fetch(req.url, req)` or an
+ * entry of `fetchAll`): `url` built by `cropUrl`, sent to the relay with its
+ * query unchanged when there is one. `route` saves a batch reading the store
+ * once a request.
+ */
+function moaRequest(url, route) {
+  var relay = route === undefined ? moaRoute() : route;
+  if (!relay) return { url: url, muteHttpExceptions: true };
+  return {
+    url: relay.url + url.substring(url.indexOf('?')),
+    headers: { 'X-Relay-Key': relay.key },
+    muteHttpExceptions: true
+  };
+}
+
 function cropUrl(cropName, rocStart, rocEnd) {
   return AGRICULTURE_API_URL + '?' + [
     'CropName=' + encodeURIComponent(cropName),
@@ -147,8 +181,9 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta, spare) {
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
     if (spare ? crawlTimeSpent() : crawlOutOfTime()) break; // only a crawl has a deadline
+    var route = moaRoute();
     var requests = slice.map(function (name) {
-      return { url: cropUrl(name, rocStart, rocEnd), muteHttpExceptions: true };
+      return moaRequest(cropUrl(name, rocStart, rocEnd), route);
     });
     try {
       var responses = UrlFetchApp.fetchAll(requests);

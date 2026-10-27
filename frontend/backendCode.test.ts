@@ -85,8 +85,10 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
 
   let beforeFetch: ((urls: string[]) => void) | null = null;
   const silenced = new Set<string>();
+  const sent: { url: string; headers: Record<string, string> }[] = [];
   const respond = (url: string, options?: Record<string, unknown>) => {
     fetches.push(url);
+    sent.push({ url, headers: (options?.headers as Record<string, string>) ?? {} });
     if (beforeFetch) beforeFetch([url]);
     if (url.indexOf('api.github.com') !== -1) {
       // UrlFetchApp throws on DNS and TLS failures whatever `muteHttpExceptions`
@@ -174,13 +176,13 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     },
     UrlFetchApp: {
       fetch: (url: string, options?: Record<string, unknown>) => respond(url, options),
-      fetchAll: (reqs: { url: string }[]) => {
+      fetchAll: (reqs: ({ url: string } & Record<string, unknown>)[]) => {
         // One round trip for the batch, as UrlFetchApp's own is.
         const hook = beforeFetch;
         if (hook) hook(reqs.map((r) => r.url));
         beforeFetch = null;
         try {
-          return reqs.map((r) => respond(r.url));
+          return reqs.map((r) => respond(r.url, r));
         } finally {
           beforeFetch = hook;
         }
@@ -301,6 +303,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'readBoard', 'boardAgeMs', 'scheduleRefresh', 'refreshBoardCacheOnce', 'dropTriggers', 'handleWarm',
     'handleDiag', 'BOARD_MAX_AGE_MS', 'REFRESH_ONCE_FN',
     'handleTrend', 'resolveTradeDates', 'MAX_LOOKBACK_DAYS', 'CRAWL_BUDGET_MS', 'PROBE_ROOT',
+    'AGRICULTURE_API_URL', 'cropUrl', 'dateToROC',
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
     'applyBaselines', 'backfillHistory', 'backfillHistoryOnce', 'mergeCrawled', 'handleBackfill', 'buildBoard',
     'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown', 'handleSearch', 'RETAIL_BAND_ROOT',
@@ -337,6 +340,8 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     logs, props, cache, triggers, fetches, locks, mails, dispatches, tabs, openedIds,
     breakSheet: () => { sheetThrows = true; },
     formatZones, cacheRemovals, sheetReads,
+    /** Every request with the headers it carried. */
+    sent,
     failWriteOnce: (tab: string) => { failingWrites.add(tab); },
     cellsRead, cacheTtls, freezes, afterRead,
     /** The id `ScriptApp` would pass a trigger's handler as `e.triggerUid`. */
@@ -1444,6 +1449,62 @@ describe('handleSearch', () => {
     expect(fetches).toHaveLength(0);
   });
 });
+describe('the MOA relay in Taiwan (#103)', () => {
+  const RELAY = 'https://moa-relay-abc-de.a.run.app';
+  const KEY = 'k'.repeat(64);
+  const moaCalls = (back: ReturnType<typeof loadBackend>) =>
+    back.sent.filter((r) => r.url.includes('CropName='));
+
+  it('goes to MOA directly while no relay is configured', () => {
+    const back = loadBackend(plausibleRows());
+    expect(back.api.buildBoard().count).toBeGreaterThan(0);
+    const calls = moaCalls(back);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((r) => r.url.startsWith(back.api.AGRICULTURE_API_URL + '?'))).toBe(true);
+    expect(calls.every((r) => !('X-Relay-Key' in r.headers))).toBe(true);
+  });
+
+  it('sends every crawl and visitor request through the relay, query unchanged, with its key', () => {
+    for (const configured of [RELAY, `${RELAY}/`, `${RELAY}/?stray=1`]) {
+      const back = loadBackend(plausibleRows());
+      back.props.set('MOA_RELAY_URL', configured);
+      back.props.set('MOA_RELAY_KEY', KEY);
+      expect(back.api.buildBoard().count).toBeGreaterThan(0); // the probe, both days, the retries
+      back.cache.clear();
+      back.api.handleSearch({ query: '高麗菜' });
+      back.api.handleTrend({ cropName: '甘藍' });
+      const calls = moaCalls(back);
+      expect(calls.length).toBeGreaterThan(0);
+      for (const r of calls) {
+        expect(r.url.startsWith(`${RELAY}/?CropName=`)).toBe(true);
+        expect(r.headers['X-Relay-Key']).toBe(KEY);
+      }
+      // The query is the one MOA itself would get.
+      expect(calls[0].url.slice(calls[0].url.indexOf('?'))).toBe(
+        back.api.cropUrl('甘藍', back.api.dateToROC(new Date())).slice(back.api.AGRICULTURE_API_URL.length));
+    }
+  });
+
+  it('goes to MOA directly when the store cannot be read, never nowhere', () => {
+    const back = loadBackend(plausibleRows());
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.breakRead('MOA_RELAY_URL');
+    expect(back.api.buildBoard().count).toBeGreaterThan(0);
+    expect(moaCalls(back).every((r) => r.url.startsWith(back.api.AGRICULTURE_API_URL))).toBe(true);
+  });
+
+  it('says in diag whether a relay is used, and never where or with what key', () => {
+    const back = loadBackend();
+    expect(back.api.handleDiag().moa_relay).toBe(false);
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    const diag = back.api.handleDiag(true);
+    expect(diag.moa_relay).toBe(true);
+    expect(JSON.stringify(diag)).not.toContain(KEY);
+    expect(JSON.stringify(diag)).not.toContain('moa-relay-abc');
+  });
+});
+
 describe('an MOA that does not answer (the crawl budget)', () => {
   afterEach(() => vi.useRealTimers());
 

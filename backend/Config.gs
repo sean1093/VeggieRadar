@@ -15,6 +15,12 @@
 
 // --- Configuration ---
 var AGRICULTURE_API_URL = 'https://data.moa.gov.tw/api/v1/AgriProductsTransType/';
+// MOA refuses connections from outside Taiwan, and Apps Script runs on
+// Google's servers abroad (#103). `relay/` forwards the same queries from
+// Taiwan; its URL and key are script properties, never source. Unset, every
+// request goes to MOA directly, as before.
+var MOA_RELAY_URL_PROP = 'MOA_RELAY_URL';
+var MOA_RELAY_KEY_PROP = 'MOA_RELAY_KEY';
 
 // Operator actions. The Web App is anonymous by necessity (browsers call it),
 // but `warm&force=1`, `backfill` and `alerttest` each start a crawl or a mail

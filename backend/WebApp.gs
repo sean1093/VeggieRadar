@@ -191,6 +191,9 @@ function handleDiag(full, props) {
     // fallback cron: an expired PAT would 401 on every refresh and nothing
     // else here would say so. Outcome and time only, never the token.
     mirror_dispatch: parseDispatch(props[GH_DISPATCH_PROP], props[GH_DISPATCH_OK_PROP]),
+    // Whether MOA is reached through the relay in Taiwan (#103) — never its
+    // URL or key: `diag` is public.
+    moa_relay: !!props[MOA_RELAY_URL_PROP],
     // Alert state, so a silent mailbox can be told apart from a silent
     // pipeline. The recipient address is deliberately not exposed — diag is a
     // public endpoint.
