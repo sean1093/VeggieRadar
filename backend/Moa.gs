@@ -50,6 +50,7 @@ function fetchPage(cropName, rocStart, rocEnd) {
     return parsePage(noteRelayAnswer(UrlFetchApp.fetch(req.url, req)));
   } catch (err) {
     Logger.log('fetchCrop error (' + cropName + ' ' + rocStart + '): ' + err);
+    noteRelayThrow(err);
     return { rows: [], answered: false, next: false };
   }
 }
@@ -98,6 +99,7 @@ var moaRouteRead = false;
 var moaRouteCached = null;
 var moaRelayRefused = false;
 var moaRelayFault = null;
+var moaRelayUpstream = null; // the relay's last word on not reaching MOA (a 502)
 
 /**
  * Where MOA requests go: the relay in Taiwan when both `MOA_RELAY_URL` (an
@@ -148,29 +150,47 @@ function moaRequest(query) {
 
 /**
  * Notes a relay that cannot serve, so the build fails saying so rather than
- * as "no trading data", and stops asking. Only the relay's own word counts
- * (`relay/handler.mjs` starts every answer it makes with `moa-relay: `), and
- * Google's 403 for a service deployed without `--allow-unauthenticated`;
- * MOA's answers pass through the relay untouched and say nothing about it.
- * A timeout reaching MOA (502) is MOA not answering, as it would be direct.
+ * as "no trading data", and stops asking. The relay's own word: every answer
+ * it makes starts with `moa-relay: ` (`relay/handler.mjs`) — a refused key is
+ * a 401 with its own body. Besides it, only what cannot be MOA's: a 404 (the
+ * relay answers its own; any other is a wrong URL) and Google's 403 for a
+ * service deployed without `--allow-unauthenticated`. MOA's answers pass
+ * through untouched and say nothing about the relay — a 403 from its
+ * firewall included — and a 502, the relay not reaching MOA, is MOA not
+ * answering, as it would be direct: kept to name it if nothing answers.
  */
 function noteRelayAnswer(resp) {
   try {
     if (!moaRoute() || moaRelayFault) return resp;
     var code = resp.getResponseCode();
-    if (code === 200 || code === 502) return resp;
+    if (code === 200) return resp;
     var body = String(resp.getContentText());
-    if (code === 401 && body.indexOf(MOA_RELAY_REFUSED_BODY) === 0) {
-      moaRelayRefused = true;
-      moaRelayFault = 'MOA 中繼站拒絕連線：MOA_RELAY_KEY 與中繼站的 RELAY_KEY 不符';
-    } else if (body.indexOf(MOA_RELAY_OWN_PREFIX) === 0 || code === 403) {
-      moaRelayRefused = true;
-      moaRelayFault = 'MOA 中繼站無法使用（HTTP ' + code + '）：' + body.substring(0, 80);
+    if (code === 502) {
+      moaRelayUpstream = body.substring(0, 120);
+    } else if (code === 401 && body.indexOf(MOA_RELAY_REFUSED_BODY) === 0) {
+      relayFault('MOA 中繼站拒絕連線：MOA_RELAY_KEY 與中繼站的 RELAY_KEY 不符');
+    } else if (body.indexOf(MOA_RELAY_OWN_PREFIX) === 0 || code === 404 ||
+        (code === 403 && body.indexOf('does not have permission') !== -1)) {
+      relayFault('MOA 中繼站無法使用（HTTP ' + code + '）：' + body.substring(0, 80));
     }
   } catch (err) {
     // A response without a code says nothing about the relay.
   }
   return resp;
+}
+
+/**
+ * A request to the relay that threw: it could not be reached at all — a
+ * wrong host, a deleted service. MOA being slow is the relay's 502, never
+ * this.
+ */
+function noteRelayThrow(err) {
+  if (moaRoute() && !moaRelayFault) relayFault('MOA 中繼站連不上：' + String(err && err.message || err).substring(0, 80));
+}
+
+function relayFault(reason) {
+  moaRelayRefused = true;
+  moaRelayFault = reason;
 }
 
 /** Single-date URL when `rocEnd` is omitted; a closed range otherwise. */
@@ -235,7 +255,14 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta, spare) {
   var out = {};
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
-    if (moaRelayRefused || (spare ? crawlTimeSpent() : crawlOutOfTime())) break; // only a crawl has a deadline
+    if (moaRelayRefused || (spare ? crawlTimeSpent() : crawlOutOfTime())) {
+      // Unasked: unanswered, for a caller that keeps count — the archive's
+      // backfill must not settle a window on the roots that were asked.
+      if (meta) {
+        for (var k = start; k < cropNames.length; k++) notePage(meta, cropNames[k], { answered: false, next: false });
+      }
+      break;
+    }
     var requests = slice.map(function (name) {
       return moaRequest(cropQuery(name, rocStart, rocEnd));
     });
@@ -248,6 +275,7 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta, spare) {
       }
     } catch (err) {
       Logger.log('fetchAllRows batch error (' + rocStart + '): ' + err);
+      noteRelayThrow(err);
       // Asked, and unanswered: a batch that threw is a throttle's silence by
       // other means, and the crawl's budget tells asked from never asked.
       for (var j = 0; j < slice.length; j++) {
@@ -420,9 +448,9 @@ function resolveTradeDates(fresh) {
   }
 
   var dates = { latest: latest, prev: prev };
-  // Nor a probe the crawl's budget cut short: the previous day it did not
-  // reach would be missing from every search for the cache's hour.
-  if (!crawlCutShort) cache.put(TRADE_DATES_CACHE_KEY, JSON.stringify(dates), TRADE_DATES_TTL);
+  // Nor a probe the crawl's budget or a failing relay cut short: the previous
+  // day it did not reach would be missing from every search for the hour.
+  if (!crawlCutShort && !moaRelayFault) cache.put(TRADE_DATES_CACHE_KEY, JSON.stringify(dates), TRADE_DATES_TTL);
   return dates;
 }
 

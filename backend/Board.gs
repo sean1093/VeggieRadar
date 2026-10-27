@@ -75,6 +75,7 @@ function buildBoard() {
   crawlCutShort = false;
   moaRelayRefused = false;
   moaRelayFault = null;
+  moaRelayUpstream = null;
   try {
     return crawlBoard();
   } finally {
@@ -91,7 +92,11 @@ function crawlBoard() {
   var cutShort = '向 MOA 抓取資料逾時（' + Math.round(CRAWL_BUDGET_MS / 1000) + ' 秒內未完成）：MOA 可能無法連線';
   var dates = resolveTradeDates(true);
   if (moaRelayFault) return failedBoard(moaRelayFault);
-  if (!dates.latest) return failedBoard(crawlCutShort ? cutShort : '近期查無交易資料');
+  if (!dates.latest) {
+    return failedBoard(crawlCutShort ? cutShort
+      : moaRelayUpstream ? 'MOA 中繼站連不到 MOA：' + moaRelayUpstream
+      : '近期查無交易資料');
+  }
 
   var roots = boardRoots();
   var today = fetchRootRows(roots, dates.latest);

@@ -1570,7 +1570,8 @@ describe('the MOA relay in Taiwan (#103)', () => {
     const cases: [number, string, RegExp][] = [
       [404, 'moa-relay: not found', /中繼站無法使用（HTTP 404）/],
       [500, 'moa-relay: relay not configured: set RELAY_KEY', /中繼站無法使用（HTTP 500）/],
-      [403, '<html>Error: Forbidden</html>', /中繼站無法使用（HTTP 403）/], // deployed without --allow-unauthenticated
+      [403, '<html><title>403 Forbidden</title>Error: Forbidden. Your client does not have permission to get URL / from this server.</html>', /中繼站無法使用（HTTP 403）/], // deployed without --allow-unauthenticated
+      [404, '<html>The requested URL was not found on this server.</html>', /中繼站無法使用（HTTP 404）/], // a wrong host on run.app
     ];
     for (const [code, body, reason] of cases) {
       let asked = 0;
@@ -1585,12 +1586,86 @@ describe('the MOA relay in Taiwan (#103)', () => {
     }
   });
 
-  it('reads MOA not answering the relay (502) as MOA not answering, not as a broken relay', () => {
-    const answer = () => ({ getResponseCode: () => 502, getContentText: () => 'moa-relay: upstream: timeout' });
+  it('reads MOA not answering the relay (502) as MOA not answering, and names it if nothing does', () => {
+    let asked = 0;
+    const answer = () => { asked += 1; return { getResponseCode: () => 502, getContentText: () => 'moa-relay: upstream: timeout' }; };
     const back = loadBackend(plausibleRows(), { UrlFetchApp: { fetch: answer, fetchAll: (reqs: unknown[]) => reqs.map(answer) } });
     back.props.set('MOA_RELAY_URL', RELAY);
     back.props.set('MOA_RELAY_KEY', KEY);
+    back.api.refreshBoardCache();
+    expect(asked).toBe(back.api.MAX_LOOKBACK_DAYS); // asked on, as of MOA itself — not stopped as a broken relay
+    expect(back.props.get('veggie_last_refresh_fail')).toMatch(/MOA 中繼站連不到 MOA：moa-relay: upstream: timeout/);
+    expect(back.api.handleDiag().last_refresh_fail).toMatch(/ relay_upstream$/);
+  });
+
+  it('does not blame the relay for a 403 MOA\'s own firewall sent through it', () => {
+    let asked = 0;
+    const waf = () => { asked += 1; return { getResponseCode: () => 403, getContentText: () => '<html>Request Rejected</html>' }; };
+    const back = loadBackend(plausibleRows(), { UrlFetchApp: { fetch: waf, fetchAll: (reqs: unknown[]) => reqs.map(waf) } });
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
     expect(back.api.buildBoard().error).toBe('近期查無交易資料');
+    expect(asked).toBe(back.api.MAX_LOOKBACK_DAYS);
+  });
+
+  it('names a relay it cannot reach at all, and does not cache the dates it did not finish', () => {
+    let asked = 0;
+    const unreachable = () => { asked += 1; throw new Error('DNS error: moa-relay-typo.a.run.app'); };
+    const back = loadBackend(plausibleRows(), { UrlFetchApp: { fetch: unreachable, fetchAll: unreachable } });
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    back.api.refreshBoardCache();
+    expect(asked).toBe(1);
+    expect(back.props.get('veggie_last_refresh_fail')).toMatch(/MOA 中繼站連不上：DNS error/);
+    expect(back.api.handleDiag().last_refresh_fail).toMatch(/ relay_unreachable$/);
+    expect(back.cache.has('veggie_trade_dates')).toBe(false);
+  });
+
+  it('names a relay that stops answering after the probe, and caches no half-found dates', () => {
+    const rows = plausibleRows();
+    for (const failAt of ['prev-probe', 'batch'] as const) {
+      let probes = 0;
+      const answer = (url: string) => {
+        const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+        return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ RS: 'OK', Data: rows[root] || [] }) };
+      };
+      const back = loadBackend(rows, {
+        UrlFetchApp: {
+          fetch: (url: string) => {
+            probes += 1;
+            if (failAt === 'prev-probe' && probes > 1) throw new Error('Address unavailable: moa-relay');
+            return answer(url);
+          },
+          fetchAll: (reqs: { url: string }[]) => {
+            if (failAt === 'batch') throw new Error('Address unavailable: moa-relay');
+            return reqs.map((r) => answer(r.url));
+          },
+        },
+      });
+      back.props.set('MOA_RELAY_URL', RELAY);
+      back.props.set('MOA_RELAY_KEY', KEY);
+      expect(back.api.buildBoard().error).toMatch(/MOA 中繼站連不上/);
+      expect(back.cache.has('veggie_trade_dates')).toBe(failAt === 'batch'); // the probe finished only there
+    }
+  });
+
+  it('counts the roots a failing relay left unasked as unanswered, so the archive does not settle without them', () => {
+    let batches = 0;
+    const back = loadBackend(plausibleRows(), {
+      UrlFetchApp: {
+        fetch: () => ({ getResponseCode: () => 200, getContentText: () => '{"RS":"OK","Data":[]}' }),
+        fetchAll: (reqs: unknown[]) => {
+          batches += 1;
+          return reqs.map(() => ({ getResponseCode: () => 500, getContentText: () => 'moa-relay: error' }));
+        },
+      },
+    });
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    const roots: string[] = back.api.boardRoots();
+    const fetched = back.api.fetchCompleteRows(roots, '115.10.01', '115.10.07');
+    expect(batches).toBe(1); // the relay failed in the first batch: nothing more was asked…
+    expect([...fetched.unanswered].sort()).toEqual([...roots].sort()); // …and all of it is said to be missing
   });
 
   it('names the refused key in the public diag too, as a category', () => {
