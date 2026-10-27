@@ -94,8 +94,9 @@ function crawlBoard() {
   var dates = resolveTradeDates(true);
   if (moaRelayFault) return failedBoard(moaRelayFault);
   if (!dates.latest) {
-    return failedBoard(crawlCutShort ? cutShort
-      : relaySymptom() || '近期查無交易資料');
+    // The relay first: a probe it never answered runs out the budget too, and
+    // the budget is not what to look at then.
+    return failedBoard(relaySymptom() || (crawlCutShort ? cutShort : '近期查無交易資料'));
   }
 
   var roots = boardRoots();

@@ -47,7 +47,7 @@ function fetchPage(cropName, rocStart, rocEnd) {
   if (!cropName || !rocStart || moaRelayRefused || crawlOutOfTime()) return { rows: [], answered: false, next: false };
   try {
     var req = moaRequest(cropQuery(cropName, rocStart, rocEnd));
-    return parsePage(noteRelayAnswer(UrlFetchApp.fetch(req.url, req)));
+    return noteRelayPage(parsePage(noteRelayAnswer(UrlFetchApp.fetch(req.url, req))));
   } catch (err) {
     Logger.log('fetchCrop error (' + cropName + ' ' + rocStart + '): ' + err);
     noteRelayThrow(err);
@@ -146,7 +146,15 @@ function moaRelayConfig(rawUrl, rawKey) {
 function moaRequest(query) {
   var relay = moaRoute();
   if (!relay) return { url: AGRICULTURE_API_URL + '?' + query, muteHttpExceptions: true };
-  return { url: relay.url + '?' + query, headers: { 'X-Relay-Key': relay.key }, muteHttpExceptions: true };
+  // Never after a redirect: the key is for the relay, and a redirect could
+  // take it to another host, or to plain http, which the https check exists
+  // to rule out. A 30x is a symptom like any other status (`noteRelayAnswer`).
+  return {
+    url: relay.url + '?' + query,
+    headers: { 'X-Relay-Key': relay.key },
+    followRedirects: false,
+    muteHttpExceptions: true
+  };
 }
 
 /**
@@ -174,7 +182,10 @@ function noteRelayAnswer(resp) {
     if (!moaRoute() || moaRelayFault) return resp;
     var code = resp.getResponseCode();
     if (code === 200) {
-      moaRelayAnswered = true;
+      // Answered only if it is MOA's answer (`noteRelayPage`). A page of
+      // HTML is the wrong host — a login page, a parked domain; an empty body
+      // is MOA's throttle, passed through, and says nothing.
+      if (/^\s*</.test(String(resp.getContentText()))) moaRelaySymptom = 'MOA 中繼站回應的不是 MOA 資料';
       return resp;
     }
     var body = String(resp.getContentText());
@@ -191,6 +202,12 @@ function noteRelayAnswer(resp) {
     // A response without a code says nothing about the relay.
   }
   return resp;
+}
+
+/** Whether the relay has answered with MOA's own answer at all, which no symptom outweighs. */
+function noteRelayPage(page) {
+  if (page.answered && moaRoute()) moaRelayAnswered = true;
+  return page;
 }
 
 /** A request to the relay that threw: a symptom (see `noteRelayAnswer`). */
@@ -290,7 +307,7 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta, spare) {
     try {
       var responses = UrlFetchApp.fetchAll(requests);
       for (var i = 0; i < responses.length; i++) {
-        var page = parsePage(noteRelayAnswer(responses[i]));
+        var page = noteRelayPage(parsePage(noteRelayAnswer(responses[i])));
         out[slice[i]] = page.rows;
         if (meta) notePage(meta, slice[i], page);
       }

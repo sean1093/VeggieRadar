@@ -260,6 +260,7 @@ function redactFailure(value) {
   else if (reason.indexOf('MOA 中繼站沒有回應') === 0) category = 'relay_unreachable';
   else if (reason.indexOf('MOA 中繼站連不到 MOA') === 0) category = 'relay_upstream';
   else if (reason.indexOf('MOA 中繼站回應 HTTP') === 0) category = 'relay_http';
+  else if (reason.indexOf('MOA 中繼站回應的不是 MOA 資料') === 0) category = 'relay_not_moa';
   else if (reason.indexOf('向 MOA 抓取資料逾時') === 0) category = 'moa_timeout';
   return at + ' ' + category;
 }

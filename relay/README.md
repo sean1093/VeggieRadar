@@ -66,7 +66,7 @@ curl -H "X-Relay-Key: $KEY" "$URL/?CropName=%E7%94%98%E8%97%8D&Start_time=115.10
 ```
 
 `"RS":"OK"` with `Data` means MOA accepts the relay's address. If it hangs or
-answers `502 upstream: timeout`, MOA refuses this address too, and the relay
+answers `502` with `moa-relay: upstream: timeout`, MOA refuses this address too, and the relay
 has to run somewhere else in Taiwan (a machine on a Taiwanese ISP behind a
 tunnel) — the same code, `npm start` with `RELAY_KEY` and `PORT`.
 
