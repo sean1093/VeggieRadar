@@ -159,8 +159,11 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta, spare) {
       }
     } catch (err) {
       Logger.log('fetchAllRows batch error (' + rocStart + '): ' + err);
-      if (meta) {
-        for (var j = 0; j < slice.length; j++) notePage(meta, slice[j], { answered: false, next: false });
+      // Asked, and unanswered: a batch that threw is a throttle's silence by
+      // other means, and the crawl's budget tells asked from never asked.
+      for (var j = 0; j < slice.length; j++) {
+        out[slice[j]] = [];
+        if (meta) notePage(meta, slice[j], { answered: false, next: false });
       }
     }
     if (start + FETCH_BATCH < cropNames.length) Utilities.sleep(120);

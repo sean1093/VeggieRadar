@@ -1575,6 +1575,29 @@ describe('an MOA that does not answer (the crawl budget)', () => {
     expect(board.error).toBeUndefined(); // the same board as with time to spare: that root without its day
   });
 
+  it('counts a retry batch that threw as asked, as an empty one is', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back0 = loadBackend();
+    const roots: string[] = back0.api.boardRoots();
+    const throttled = roots.filter((r) => r !== back0.api.PROBE_ROOT)[0];
+    const asked = encodeURIComponent(throttled);
+    const back = loadBackend(plausibleRows());
+    const prevDay = back.api.resolveTradeDates(true).prev as string;
+    back.cache.clear();
+    let seen = 0;
+    back.onFetch((urls) => {
+      if (urls.length < 1 || !urls.some((u) => u.includes(prevDay))) return;
+      back.silence(throttled); // throttled in the second day's pass…
+      if (urls.some((u) => u.includes(asked)) && ++seen === 2) {
+        vi.setSystemTime(Date.now() + 4 * 60_000); // …and its retry batch throws, late
+        throw new Error('Timeout: https://data.moa.gov.tw/');
+      }
+    });
+    const board = back.api.buildBoard();
+    expect(seen).toBe(2);
+    expect(board.error).toBeUndefined(); // as with an empty answer: that root without its day
+  });
+
   it('keeps the board when the retry of out-of-season roots crosses the budget between its batches', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const back0 = loadBackend();
