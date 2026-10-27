@@ -211,10 +211,14 @@ function fetchRootRows(roots, rocStart, rocEnd, meta) {
     var root = misses[i];
     if (retry[root] && retry[root].length) out[root] = retry[root];
   }
-  // Out of time, an empty root that answered is out of season, as it is every
-  // time. One MOA never answered — a throttled batch — would be published
-  // as missing: that is a crawl cut short.
-  if (crawlTimeSpent() && misses.some(function (r) { return meta.unanswered[r]; })) crawlCutShort = true;
+  // A root the retry did not get to ask — the budget stopped it, or it never
+  // started — is cut short only if MOA never answered it: an empty root that
+  // answered is out of season, as it is every time, while one a throttle
+  // silenced would be published as missing. A root the retry asked and MOA
+  // silenced again stays out, as it would with all the time in the world.
+  if (crawlTimeSpent() && misses.some(function (r) { return !(r in retry) && meta.unanswered[r]; })) {
+    crawlCutShort = true;
+  }
   return out;
 }
 

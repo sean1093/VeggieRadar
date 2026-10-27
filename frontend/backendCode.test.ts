@@ -1555,6 +1555,26 @@ describe('an MOA that does not answer (the crawl budget)', () => {
     expect(board.error).toMatch(/逾時/);
   });
 
+  it('publishes as it would anyway when the retry asked every root, however late it came back', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back0 = loadBackend();
+    const roots: string[] = back0.api.boardRoots();
+    const throttled = roots.filter((r) => r !== back0.api.PROBE_ROOT)[0];
+    const back = loadBackend(plausibleRows());
+    const prevDay = back.api.resolveTradeDates(true).prev as string;
+    const asked = encodeURIComponent(throttled);
+    back.cache.clear();
+    let seen = 0;
+    back.onFetch((urls) => {
+      if (urls.length < 1 || !urls.some((u) => u.includes(prevDay))) return;
+      back.silence(throttled); // silenced on the second day, retry included
+      if (urls.some((u) => u.includes(asked)) && ++seen === 2) vi.setSystemTime(Date.now() + 4 * 60_000); // the retry returns late
+    });
+    const board = back.api.buildBoard();
+    expect(seen).toBe(2);
+    expect(board.error).toBeUndefined(); // the same board as with time to spare: that root without its day
+  });
+
   it('keeps the board when the retry of out-of-season roots crosses the budget between its batches', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const back0 = loadBackend();
