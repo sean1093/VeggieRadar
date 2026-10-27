@@ -1446,6 +1446,35 @@ describe('handleSearch', () => {
     expect(res.suggestion).toBeTruthy();
   });
 
+  it('says busy, and caches nothing, when MOA did not answer the query', () => {
+    const rows = { 甘藍: [row('甘藍-初秋', 20, 60000)] };
+    let throttled = true;
+    const answer = (url: string) => {
+      const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ RS: 'OK', Data: (rows as Record<string, unknown[]>)[root] || [] }) };
+    };
+    let queries = 0;
+    const back = loadBackend(rows, {
+      UrlFetchApp: {
+        fetch: (url: string) => {
+          // The date probe answers; the search's own query is throttled first.
+          if (++queries > 2 && throttled) return { getResponseCode: () => 200, getContentText: () => '' };
+          return answer(url);
+        },
+        fetchAll: (reqs: { url: string }[]) => reqs.map((r) => answer(r.url)),
+      },
+    });
+    expect(back.api.handleSearch({ query: 'cabbage' })).toMatchObject({ error: 'MOA 資料暫時無法取得', transient: true });
+    expect([...back.cache.keys()].filter((k) => k.startsWith(back.api.SEARCH_CACHE_PREFIX))).toEqual([]);
+    throttled = false; // the next visitor asks MOA again, and gets the crop
+    expect(back.api.handleSearch({ query: 'cabbage' }).items[0].official_name).toBe('甘藍');
+  });
+
+  it('says busy when no trading date can be found at all', () => {
+    const back = loadBackend({}); // the probe answers nothing traded, a week and more
+    expect(back.api.handleSearch({ query: 'cabbage' })).toMatchObject({ error: '近期查無交易資料', transient: true });
+  });
+
   it('rejects an empty query without touching anything', () => {
     const { api, fetches } = loadBackend();
     expect(api.handleSearch({}).error).toBe('請輸入查詢關鍵字');

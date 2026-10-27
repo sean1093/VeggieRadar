@@ -125,21 +125,25 @@ function handleSearch(params) {
   //    cached under has to name the day it describes, or Saturday's 「查無」
   //    answers Monday's question for another hour.
   var dates = resolveTradeDates();
-  if (!dates.latest) return { type: 'search', query: query, error: '近期查無交易資料', items: [] };
+  // No trading date in a week and more is MOA, or the way to it, failing —
+  // not an answer about the crop: `transient`, shown as busy (`useSearch`).
+  if (!dates.latest) return { type: 'search', query: query, error: '近期查無交易資料', items: [], transient: true };
 
   var items = [];
   var rows = 0;
+  var unanswered = false;
   for (var i = 0; i < roots.length; i++) {
     var live = liveRootCards(roots[i], dates);
     rows += live.rows;
+    if (live.unanswered) unanswered = true;
     for (var j = 0; j < live.items.length; j++) {
       if (!hasName(items, live.items[j].name)) items.push(live.items[j]);
     }
   }
-  // Not 「查無此品項」 for a crop that trades every day, when the relay to MOA
-  // is what failed: `transient` is what the frontend shows as "busy, retry"
-  // rather than as an empty result (`useSearch`).
-  if (!rows && relayFailure()) {
+  // Not 「查無此品項」 for a crop that trades every day, when MOA — or the
+  // relay to it — did not answer: `transient` is what the frontend shows as
+  // "busy, retry" rather than as an empty result (`useSearch`).
+  if (!rows && unanswered) {
     return { type: 'search', query: query, error: 'MOA 資料暫時無法取得', items: [], transient: true };
   }
   if (!rows) return { type: 'search', query: query, error: '查無此品項', suggestion: suggestFor(terms, board) };
@@ -222,7 +226,8 @@ function liveRootCards(root, dates) {
   var hit = cache.get(cacheKey);
   if (hit) return JSON.parse(hit);
 
-  var todayRows = tradedRows(fetchCrop(root, dates.latest));
+  var todayPage = fetchPage(root, dates.latest);
+  var todayRows = tradedRows(todayPage.rows);
   // A root that did not trade today needs no second query to prove it.
   var prevRows = todayRows.length ? tradedRows(fetchCrop(root, dates.prev)) : [];
 
@@ -254,9 +259,13 @@ function liveRootCards(root, dates) {
   // Live cards come off the same `aggregateGroup` as the board's, so they
   // carry the guard's own `prev_volume` — which is neither cached nor served.
   var payload = { date: rocToISO(dates.latest), rows: todayRows.length, items: dropTransient(items) };
-  // Not an answer a relay set up wrong stopped short (`noteRelayAnswer`):
-  // cached, every visitor would get 「查無此品項」 for the hour after it is fixed.
-  if (!moaRelayFault) cache.put(cacheKey, JSON.stringify(payload), SEARCH_CACHE_TTL);
+  // Not a question MOA — or the relay to it — did not answer: cached, every
+  // visitor would get 「查無此品項」 for the hour, for a crop that trades.
+  if (!todayPage.answered) {
+    payload.unanswered = true;
+    return payload;
+  }
+  cache.put(cacheKey, JSON.stringify(payload), SEARCH_CACHE_TTL);
   return payload;
 }
 
