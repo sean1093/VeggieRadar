@@ -73,6 +73,7 @@ function boardAgeMs(board) {
 function buildBoard() {
   crawlDeadline = Date.now() + CRAWL_BUDGET_MS;
   crawlCutShort = false;
+  moaRelayRefused = false;
   try {
     return crawlBoard();
   } finally {
@@ -87,12 +88,15 @@ function failedBoard(error) {
 
 function crawlBoard() {
   var cutShort = '向 MOA 抓取資料逾時（' + Math.round(CRAWL_BUDGET_MS / 1000) + ' 秒內未完成）：MOA 可能無法連線';
+  var refused = 'MOA 中繼站拒絕連線：MOA_RELAY_KEY 與中繼站的 RELAY_KEY 不符';
   var dates = resolveTradeDates(true);
+  if (moaRelayRefused) return failedBoard(refused);
   if (!dates.latest) return failedBoard(crawlCutShort ? cutShort : '近期查無交易資料');
 
   var roots = boardRoots();
   var today = fetchRootRows(roots, dates.latest);
   var prev = dates.prev ? fetchRootRows(roots, dates.prev) : {};
+  if (moaRelayRefused) return failedBoard(refused);
   if (crawlCutShort) return failedBoard(cutShort);
 
   var items = boardCards(today, prev);

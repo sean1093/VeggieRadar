@@ -192,8 +192,12 @@ function handleDiag(full, props) {
     // else here would say so. Outcome and time only, never the token.
     mirror_dispatch: parseDispatch(props[GH_DISPATCH_PROP], props[GH_DISPATCH_OK_PROP]),
     // Whether MOA is reached through the relay in Taiwan (#103) — never its
-    // URL or key: `diag` is public.
-    moa_relay: !!props[MOA_RELAY_URL_PROP],
+    // URL or key: `diag` is public. A URL without a key, or not https, is not
+    // used, and says so rather than read as either.
+    moa_relay: !props[MOA_RELAY_URL_PROP] ? false
+      : !String(props[MOA_RELAY_KEY_PROP] || '').trim() ? 'no key, not used'
+      : !/^https:\/\//.test(String(props[MOA_RELAY_URL_PROP]).trim()) ? 'not https, not used'
+      : true,
     // Alert state, so a silent mailbox can be told apart from a silent
     // pipeline. The recipient address is deliberately not exposed — diag is a
     // public endpoint.

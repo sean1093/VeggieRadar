@@ -45,8 +45,8 @@ function fetchCrop(cropName, rocStart, rocEnd) {
 function fetchPage(cropName, rocStart, rocEnd) {
   if (!cropName || !rocStart || crawlOutOfTime()) return { rows: [], answered: false, next: false };
   try {
-    var req = moaRequest(cropUrl(cropName, rocStart, rocEnd));
-    return parsePage(UrlFetchApp.fetch(req.url, req));
+    var req = moaRequest(cropQuery(cropName, rocStart, rocEnd));
+    return parsePage(noteRelayAnswer(UrlFetchApp.fetch(req.url, req)));
   } catch (err) {
     Logger.log('fetchCrop error (' + cropName + ' ' + rocStart + '): ' + err);
     return { rows: [], answered: false, next: false };
@@ -90,42 +90,71 @@ function wholeDaysOf(page) {
   return page.rows.filter(function (r) { return r.TransDate !== oldest; });
 }
 
-/** Single-date URL when `rocEnd` is omitted; a closed range otherwise. */
+// The route MOA requests take, read once per execution (`moaRoute`); and
+// whether the relay refused the key, so the build can say so.
+var moaRouteRead = false;
+var moaRouteCached = null;
+var moaRelayRefused = false;
+
 /**
- * Where MOA requests go: the relay in Taiwan when one is configured
- * (`MOA_RELAY_URL` / `MOA_RELAY_KEY`), else null for MOA itself. A store that
- * cannot be read means MOA directly — the old way, never no way.
+ * Where MOA requests go: the relay in Taiwan when both `MOA_RELAY_URL` (an
+ * https URL) and `MOA_RELAY_KEY` are set, else null for MOA itself. Half a
+ * configuration — no key, a plain-http URL — and a store that cannot be read
+ * all mean MOA directly, the old way, never a relay that refuses every
+ * request.
  */
 function moaRoute() {
+  if (moaRouteRead) return moaRouteCached;
+  moaRouteRead = true;
+  moaRouteCached = null;
   try {
     var props = PropertiesService.getScriptProperties();
-    var url = props.getProperty(MOA_RELAY_URL_PROP);
+    var url = String(props.getProperty(MOA_RELAY_URL_PROP) || '').trim();
+    var key = String(props.getProperty(MOA_RELAY_KEY_PROP) || '').trim();
     if (!url) return null;
-    return { url: url.replace(/[?#].*$/, '').replace(/\/?$/, '/'), key: props.getProperty(MOA_RELAY_KEY_PROP) || '' };
+    if (!/^https:\/\//.test(url) || !key) {
+      Logger.log('moaRoute: MOA_RELAY_URL set, but ' + (key ? 'not https' : 'no MOA_RELAY_KEY') + ': going to MOA directly');
+      return null;
+    }
+    moaRouteCached = { url: url.replace(/[?#].*$/, '').replace(/\/?$/, '/'), key: key };
   } catch (err) {
     Logger.log('moaRoute: ' + err);
-    return null;
   }
+  return moaRouteCached;
 }
 
 /**
  * One MOA request as `UrlFetchApp` takes it (`fetch(req.url, req)` or an
- * entry of `fetchAll`): `url` built by `cropUrl`, sent to the relay with its
- * query unchanged when there is one. `route` saves a batch reading the store
- * once a request.
+ * entry of `fetchAll`), for a query from `cropQuery`: to MOA, or to the
+ * relay with the same query and its key.
  */
-function moaRequest(url, route) {
-  var relay = route === undefined ? moaRoute() : route;
-  if (!relay) return { url: url, muteHttpExceptions: true };
-  return {
-    url: relay.url + url.substring(url.indexOf('?')),
-    headers: { 'X-Relay-Key': relay.key },
-    muteHttpExceptions: true
-  };
+function moaRequest(query) {
+  var relay = moaRoute();
+  if (!relay) return { url: AGRICULTURE_API_URL + '?' + query, muteHttpExceptions: true };
+  return { url: relay.url + '?' + query, headers: { 'X-Relay-Key': relay.key }, muteHttpExceptions: true };
 }
 
+/**
+ * Notes a relay that refused the key: its 401 is not MOA's silence, and a
+ * crawl of them would otherwise read as "no trading data".
+ */
+function noteRelayAnswer(resp) {
+  try {
+    if (moaRoute() && resp.getResponseCode() === 401) moaRelayRefused = true;
+  } catch (err) {
+    // A response without a code says nothing about the key.
+  }
+  return resp;
+}
+
+/** Single-date URL when `rocEnd` is omitted; a closed range otherwise. */
 function cropUrl(cropName, rocStart, rocEnd) {
-  return AGRICULTURE_API_URL + '?' + [
+  return AGRICULTURE_API_URL + '?' + cropQuery(cropName, rocStart, rocEnd);
+}
+
+/** `cropUrl`'s query, for whichever host takes it (`moaRequest`). */
+function cropQuery(cropName, rocStart, rocEnd) {
+  return [
     'CropName=' + encodeURIComponent(cropName),
     'Start_time=' + encodeURIComponent(rocStart),
     'End_time=' + encodeURIComponent(rocEnd || rocStart)
@@ -181,14 +210,13 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta, spare) {
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
     if (spare ? crawlTimeSpent() : crawlOutOfTime()) break; // only a crawl has a deadline
-    var route = moaRoute();
     var requests = slice.map(function (name) {
-      return moaRequest(cropUrl(name, rocStart, rocEnd), route);
+      return moaRequest(cropQuery(name, rocStart, rocEnd));
     });
     try {
       var responses = UrlFetchApp.fetchAll(requests);
       for (var i = 0; i < responses.length; i++) {
-        var page = parsePage(responses[i]);
+        var page = parsePage(noteRelayAnswer(responses[i]));
         out[slice[i]] = page.rows;
         if (meta) notePage(meta, slice[i], page);
       }

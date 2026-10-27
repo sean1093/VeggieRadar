@@ -6,6 +6,8 @@
 import { describe, it, expect } from 'vitest';
 // @ts-expect-error — a plain ES module outside the app, with no types
 import { handle, MOA_ENDPOINT } from '../relay/handler.mjs';
+// @ts-expect-error — the same
+import { serve } from '../relay/server.mjs';
 
 const KEY = 'k'.repeat(64);
 const QUERY = '/?CropName=%E7%94%98%E8%97%8D&Start_time=115.10.26&End_time=115.10.26';
@@ -56,6 +58,13 @@ describe('MOA relay', () => {
     expect(upstream.asked).toEqual([]);
   });
 
+  it('answers a malformed request target with 400, never a crash', async () => {
+    const upstream = moa();
+    const out: Out = await call('http://[', {}, 'GET', upstream.fetchImpl);
+    expect(out.status).toBe(400);
+    expect(upstream.asked).toEqual([]);
+  });
+
   it('refuses everything until a key is configured', async () => {
     const out: Out = await handle({ method: 'GET', url: QUERY, headers: { 'x-relay-key': '' } }, { key: undefined, fetchImpl: moa().fetchImpl });
     expect(out.status).toBe(500);
@@ -67,5 +76,38 @@ describe('MOA relay', () => {
     const out: Out = await handle({ method: 'GET', url: QUERY, headers: { 'x-relay-key': KEY } }, { key: KEY, fetchImpl: hang, timeoutMs: 20 });
     expect(out.status).toBe(502);
     expect(out.body).toMatch(/timeout/);
+  });
+});
+
+describe('MOA relay server', () => {
+  /** A response that records what was written, and can refuse the headers. */
+  const response = (refuseFirstHead = false) => {
+    const res = {
+      heads: [] as number[], body: '', headersSent: false, destroyed: false,
+      writeHead(status: number) {
+        if (refuseFirstHead && !res.heads.length && !res.headersSent) {
+          res.heads.push(-1);
+          throw new TypeError('Invalid character in header content');
+        }
+        res.heads.push(status);
+        res.headersSent = true;
+      },
+      end(body: string) { res.body = body; },
+      destroy() { res.destroyed = true; },
+    };
+    return res;
+  };
+  const req = { method: 'GET', url: QUERY, headers: {} };
+
+  it('answers 500 when handling throws, rather than end the process', async () => {
+    const res = response();
+    await serve(req, res, async () => { throw new Error('boom'); });
+    expect(res.heads).toEqual([500]);
+  });
+
+  it('answers 502 when the upstream answer cannot be written', async () => {
+    const res = response(true);
+    await serve(req, res, async () => ({ status: 200, contentType: 'bad\nvalue', body: '{}' }));
+    expect(res.heads).toEqual([-1, 502]);
   });
 });

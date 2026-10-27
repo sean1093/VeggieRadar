@@ -23,19 +23,29 @@ backend's volume (a crawl every 4 h, ~250 requests each, plus visitors' trend
 and search) it stays within the free tier's requests, with egress at most a
 few cents a month.
 
+The key lives in Secret Manager, not in the service's environment, where
+anyone who can view the service would read it.
+
 ```bash
 KEY=$(openssl rand -hex 32)   # keep it: it goes into Script Properties too
+gcloud services enable run.googleapis.com secretmanager.googleapis.com cloudbuild.googleapis.com
+printf %s "$KEY" | gcloud secrets create moa-relay-key --data-file=-
+PROJECT_NUMBER=$(gcloud projects describe "$(gcloud config get-value project)" --format 'value(projectNumber)')
+gcloud secrets add-iam-policy-binding moa-relay-key \
+  --member "serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role roles/secretmanager.secretAccessor
 gcloud run deploy moa-relay \
   --source relay \
   --region asia-east1 \
   --allow-unauthenticated \
-  --set-env-vars "RELAY_KEY=$KEY" \
+  --set-secrets "RELAY_KEY=moa-relay-key:latest" \
   --max-instances 2 \
   --memory 256Mi
 ```
 
 `--allow-unauthenticated` lets Apps Script call it without Google sign-in; the
-key is what keeps everyone else out.
+key is what keeps everyone else out. To rotate it, add a new version of the
+secret, redeploy, and update `MOA_RELAY_KEY`.
 
 Check it from anywhere — this is the request the backend makes:
 
@@ -58,7 +68,10 @@ Apps Script → Project Settings → Script Properties:
 | `MOA_RELAY_URL` | the service URL, e.g. `https://moa-relay-xxxxx-de.a.run.app` |
 | `MOA_RELAY_KEY` | the same `$KEY` |
 
-No redeploy is needed: properties take effect on the next request.
-`?action=diag` then shows `moa_relay: true` (never the URL or the key), and
-the next refresh should record a new `last_refresh_ok`. Delete the two
-properties to go back to MOA directly.
+Both, or neither: a URL without a key, or one that is not `https://`, is not
+used — `diag.moa_relay` says `"no key, not used"` / `"not https, not used"`.
+With both set it shows `true` (never the URL or the key), and the next refresh
+should record a new `last_refresh_ok`. A key the relay refuses fails the
+refresh as 「MOA 中繼站拒絕連線：MOA_RELAY_KEY 與中繼站的 RELAY_KEY 不符」.
+No redeploy is needed: properties take effect on the next execution. Delete
+both to go back to MOA directly.

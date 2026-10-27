@@ -33,7 +33,12 @@ function sameKey(given, expected) {
 export async function handle(req, { key, fetchImpl = fetch, timeoutMs = UPSTREAM_TIMEOUT_MS }) {
   if (!key) return text(500, 'relay not configured: set RELAY_KEY');
   if (req.method !== 'GET') return text(405, 'GET only');
-  const url = new URL(req.url, 'http://relay');
+  let url;
+  try {
+    url = new URL(req.url, 'http://relay');
+  } catch {
+    return text(400, 'bad request target'); // e.g. `GET http://[` — never a crash
+  }
   if (url.pathname !== '/') return text(404, 'not found');
   if (!sameKey(req.headers['x-relay-key'], key)) return text(401, 'unauthorized');
 
