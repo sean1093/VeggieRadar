@@ -136,6 +136,12 @@ function handleSearch(params) {
       if (!hasName(items, live.items[j].name)) items.push(live.items[j]);
     }
   }
+  // Not 「查無此品項」 for a crop that trades every day, when the relay to MOA
+  // is what failed: `transient` is what the frontend shows as "busy, retry"
+  // rather than as an empty result (`useSearch`).
+  if (!rows && relayFailure()) {
+    return { type: 'search', query: query, error: 'MOA 資料暫時無法取得', items: [], transient: true };
+  }
   if (!rows) return { type: 'search', query: query, error: '查無此品項', suggestion: suggestFor(terms, board) };
   if (!items.length) {
     return { type: 'search', query: query, error: '查無符合條件的品項（可能交易量過低）' };

@@ -73,7 +73,6 @@ function boardAgeMs(board) {
 function buildBoard() {
   crawlDeadline = Date.now() + CRAWL_BUDGET_MS;
   crawlCutShort = false;
-  moaRelayRefused = false;
   moaRelayFault = null;
   moaRelaySymptom = null;
   moaRelayAnswered = false;
@@ -92,11 +91,10 @@ function failedBoard(error) {
 function crawlBoard() {
   var cutShort = '向 MOA 抓取資料逾時（' + Math.round(CRAWL_BUDGET_MS / 1000) + ' 秒內未完成）：MOA 可能無法連線';
   var dates = resolveTradeDates(true);
-  if (moaRelayFault) return failedBoard(moaRelayFault);
   if (!dates.latest) {
     // The relay first: a probe it never answered runs out the budget too, and
     // the budget is not what to look at then.
-    return failedBoard(relaySymptom() || (crawlCutShort ? cutShort : '近期查無交易資料'));
+    return failedBoard(relayFailure() || (crawlCutShort ? cutShort : '近期查無交易資料'));
   }
 
   var roots = boardRoots();

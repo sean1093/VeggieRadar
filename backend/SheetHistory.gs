@@ -884,7 +884,7 @@ function backfillWindow(job, sheetId, lease) {
   // until it clears.
   // A relay set up wrong, or one nothing came back through, is no throttle
   // and no outage of MOA's: say which.
-  if (moaRelayFault || relaySymptom()) throw new Error(moaRelayFault || relaySymptom());
+  if (relayFailure()) throw new Error(relayFailure());
   if (refused.length > SHEET_BACKFILL_MAX_REFUSED || refused.indexOf(PROBE_ROOT) !== -1) throw new Error(why);
 
   var built = backfillDays(fetched.rows, start, end, fetched.dropped);

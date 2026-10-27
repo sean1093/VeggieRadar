@@ -85,6 +85,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
 
   let beforeFetch: ((urls: string[]) => void) | null = null;
   const silenced = new Set<string>();
+  const sleeps: number[] = [];
   const sent: { url: string; headers: Record<string, string>; followRedirects?: unknown }[] = [];
   const respond = (url: string, options?: Record<string, unknown>) => {
     fetches.push(url);
@@ -250,7 +251,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     },
     Logger: { log: (m: unknown) => void logs.push(String(m)) },
     Utilities: {
-      sleep: () => {},
+      sleep: (ms: number) => void sleeps.push(ms),
       // Only the one pattern `SheetHistory.gs` asks for, and it records the
       // zone so a test can assert which one was used.
       formatDate: (date: Date, zone: string, pattern: string) => {
@@ -342,6 +343,8 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     formatZones, cacheRemovals, sheetReads,
     /** Every request with the headers it carried. */
     sent,
+    /** Every `Utilities.sleep`, in ms. */
+    sleeps,
     failWriteOnce: (tab: string) => { failingWrites.add(tab); },
     cellsRead, cacheTtls, freezes, afterRead,
     /** The id `ScriptApp` would pass a trigger's handler as `e.triggerUid`. */
@@ -1655,6 +1658,27 @@ describe('the MOA relay in Taiwan (#103)', () => {
     expect(back.cache.has('veggie_backfill_queued')).toBe(false); // ask again once the key is fixed
   });
 
+  it('reads the relay\'s generic 500 as a passing failure, not a setup it names', () => {
+    let asked = 0;
+    const back = relayed(() => { asked += 1; return { getResponseCode: () => 500, getContentText: () => 'moa-relay: error' }; });
+    back.api.refreshBoardCache();
+    expect(asked).toBe(back.api.MAX_LOOKBACK_DAYS); // asked on
+    expect(back.api.handleDiag().last_refresh_fail).toMatch(/ relay_http$/);
+  });
+
+  it('tells a searcher the data is out of reach, not that the crop does not exist', () => {
+    const back = relayed(() => ({ getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' }));
+    back.cache.set('veggie_trade_dates', JSON.stringify({ latest: back.api.dateToROC(new Date()), prev: null }));
+    expect(back.api.handleSearch({ query: 'cabbage' })).toMatchObject({ error: 'MOA 資料暫時無法取得', items: [], transient: true });
+  });
+
+  it('frees the rolling backfill\'s lock when nothing came back through the relay', () => {
+    const back = relayed(() => { throw new Error('DNS error: moa-relay-typo'); });
+    back.api.handleBackfill({});
+    expect(back.api.backfillHistoryOnce().merged).toBe(false);
+    expect(back.cache.has('veggie_backfill_queued')).toBe(false);
+  });
+
   it('costs a transient error a batch, never the run', () => {
     const rows = plausibleRows();
     let thrown = 0;
@@ -1696,7 +1720,7 @@ describe('the MOA relay in Taiwan (#103)', () => {
         fetch: () => ({ getResponseCode: () => 200, getContentText: () => '{"RS":"OK","Data":[]}' }),
         fetchAll: (reqs: unknown[]) => {
           batches += 1;
-          return reqs.map(() => ({ getResponseCode: () => 500, getContentText: () => 'moa-relay: error' }));
+          return reqs.map(() => ({ getResponseCode: () => 404, getContentText: () => 'moa-relay: not found' }));
         },
       },
     });
@@ -1705,6 +1729,7 @@ describe('the MOA relay in Taiwan (#103)', () => {
     const roots: string[] = back.api.boardRoots();
     const fetched = back.api.fetchCompleteRows(roots, '115.10.01', '115.10.07');
     expect(batches).toBe(1); // the relay failed in the first batch: nothing more was asked…
+    expect(back.sleeps).not.toContain(1500); // …not even after the retry's pause
     expect([...fetched.unanswered].sort()).toEqual([...roots].sort()); // …and all of it is said to be missing
   });
 

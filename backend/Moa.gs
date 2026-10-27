@@ -44,10 +44,11 @@ function fetchCrop(cropName, rocStart, rocEnd) {
 /** Like `fetchCrop`, with the whole `parsePage` verdict rather than the rows. */
 function fetchPage(cropName, rocStart, rocEnd) {
   // Nor once the relay has refused the key: every request after would be too.
-  if (!cropName || !rocStart || moaRelayRefused || crawlOutOfTime()) return { rows: [], answered: false, next: false };
+  if (!cropName || !rocStart || moaRelayFault !== null || crawlOutOfTime()) return { rows: [], answered: false, next: false };
   try {
     var req = moaRequest(cropQuery(cropName, rocStart, rocEnd));
-    return noteRelayPage(parsePage(noteRelayAnswer(UrlFetchApp.fetch(req.url, req))));
+    var resp = noteRelayAnswer(UrlFetchApp.fetch(req.url, req));
+    return noteRelayPage(parsePage(resp), resp);
   } catch (err) {
     Logger.log('fetchCrop error (' + cropName + ' ' + rocStart + '): ' + err);
     noteRelayThrow(err);
@@ -97,7 +98,6 @@ function wholeDaysOf(page) {
 // and no request goes out after.
 var moaRouteRead = false;
 var moaRouteCached = null;
-var moaRelayRefused = false;
 var moaRelayFault = null;
 var moaRelaySymptom = null;   // the last thing short of a fault (`noteRelayAnswer`)
 var moaRelayAnswered = false; // whether any request through it was answered
@@ -181,17 +181,15 @@ function noteRelayAnswer(resp) {
   try {
     if (!moaRoute() || moaRelayFault) return resp;
     var code = resp.getResponseCode();
-    if (code === 200) {
-      // Answered only if it is MOA's answer (`noteRelayPage`). A page of
-      // HTML is the wrong host — a login page, a parked domain; an empty body
-      // is MOA's throttle, passed through, and says nothing.
-      if (/^\s*</.test(String(resp.getContentText()))) moaRelaySymptom = 'MOA 中繼站回應的不是 MOA 資料';
-      return resp;
-    }
+    if (code === 200) return resp; // MOA's, or not: `noteRelayPage` decides
     var body = String(resp.getContentText());
+    var own = body.indexOf(MOA_RELAY_OWN_PREFIX) === 0;
     if (code === 401 && body.indexOf(MOA_RELAY_REFUSED_BODY) === 0) {
       relayFault('MOA 中繼站拒絕連線：MOA_RELAY_KEY 與中繼站的 RELAY_KEY 不符', body);
-    } else if (code !== 502 && body.indexOf(MOA_RELAY_OWN_PREFIX) === 0) {
+    } else if (own && (code === 400 || code === 404 || code === 405 ||
+        body.indexOf(MOA_RELAY_OWN_PREFIX + 'relay not configured') === 0)) {
+      // What it says of how it is set up, or of how it is asked — never a
+      // passing failure, which its generic 500 may be.
       relayFault('MOA 中繼站無法使用（HTTP ' + code + '）', body);
     } else if (code === 403 && body.indexOf('does not have permission') !== -1) {
       relayFault('MOA 中繼站無法使用（HTTP 403：需以 --allow-unauthenticated 部署）', body);
@@ -204,9 +202,25 @@ function noteRelayAnswer(resp) {
   return resp;
 }
 
-/** Whether the relay has answered with MOA's own answer at all, which no symptom outweighs. */
-function noteRelayPage(page) {
-  if (page.answered && moaRoute()) moaRelayAnswered = true;
+/**
+ * Whether the relay has answered with MOA's own answer at all, which no
+ * symptom outweighs. A 200 that is not — a page of HTML, the wrong host: a
+ * login page, a parked domain — is a symptom of its own; an empty body is
+ * MOA's throttle, passed through, and says nothing.
+ */
+function noteRelayPage(page, resp) {
+  if (!moaRoute()) return page;
+  if (page.answered) {
+    moaRelayAnswered = true;
+  } else if (moaRelayFault === null) {
+    try {
+      if (resp.getResponseCode() === 200 && /^\s*</.test(String(resp.getContentText()))) {
+        moaRelaySymptom = 'MOA 中繼站回應的不是 MOA 資料';
+      }
+    } catch (err) {
+      // Nothing to read is nothing to say.
+    }
+  }
   return page;
 }
 
@@ -218,7 +232,6 @@ function noteRelayThrow(err) {
 }
 
 function relayFault(reason, detail) {
-  moaRelayRefused = true;
   moaRelayFault = reason;
   Logger.log('relay: ' + reason + ' — ' + String(detail).substring(0, 200));
 }
@@ -229,6 +242,14 @@ function relayFault(reason, detail) {
  */
 function relaySymptom() {
   return moaRoute() && !moaRelayAnswered ? moaRelaySymptom : null;
+}
+
+/**
+ * Why nothing came back, when the relay is why — a fault, or a symptom no
+ * answer contradicted — else null. The one question every caller asks.
+ */
+function relayFailure() {
+  return moaRelayFault || relaySymptom();
 }
 
 /** Single-date URL when `rocEnd` is omitted; a closed range otherwise. */
@@ -293,7 +314,7 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta, spare) {
   var out = {};
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
-    if (moaRelayRefused || (spare ? crawlTimeSpent() : crawlOutOfTime())) {
+    if (moaRelayFault !== null || (spare ? crawlTimeSpent() : crawlOutOfTime())) {
       // Unasked: unanswered, for a caller that keeps count — the archive's
       // backfill must not settle a window on the roots that were asked.
       if (meta) {
@@ -307,7 +328,7 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta, spare) {
     try {
       var responses = UrlFetchApp.fetchAll(requests);
       for (var i = 0; i < responses.length; i++) {
-        var page = noteRelayPage(parsePage(noteRelayAnswer(responses[i])));
+        var page = noteRelayPage(parsePage(noteRelayAnswer(responses[i])), responses[i]);
         out[slice[i]] = page.rows;
         if (meta) notePage(meta, slice[i], page);
       }
@@ -359,7 +380,8 @@ function fetchRootRows(roots, rocStart, rocEnd, meta) {
   meta = meta || { answered: {}, truncated: {}, unanswered: {} };
   var out = fetchAllRows(roots, rocStart, rocEnd, meta);
   var misses = roots.filter(function (r) { return !out[r] || !out[r].length; });
-  if (!misses.length) return out;
+  // Nor after a relay fault: every request would be refused the same way.
+  if (!misses.length || moaRelayFault !== null) return out;
 
   // The retry is a second chance, run only while the crawl has time — and
   // stopped by its budget without marking the crawl cut short (`spare`).
