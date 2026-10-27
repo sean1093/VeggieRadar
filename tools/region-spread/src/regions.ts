@@ -5,8 +5,15 @@
  * regions and marks the market list "to be verified against the actual
  * MarketCode"; the repository has never held MOA's market roster (the crop
  * crawler discovers it at runtime, `tools/catalog/src/build-catalog.ts`), so
- * the spellings below are seeded from the issue and from the two names the
- * committed fixture proves — `台北一`, `台北二` — and nothing else.
+ * the spellings below are seeded from the issue, from the names the committed
+ * fixture proves — `台北一`, `台北二`, `台中市` — and from the two a real run
+ * reported as unmapped (`三重區`, `桃農`); nothing else.
+ *
+ * The run that surfaced those two is the only evidence in this file that is
+ * not a guess, and it is also a reminder of what the unmapped check cannot do:
+ * it catches a name the table is MISSING, never a name the table places in the
+ * wrong region. That second kind has to be read off the report's market table,
+ * against the MarketCode, by a human.
  *
  * That is why `regionOf` never guesses. A market whose name is not in the
  * table lands in `其他`, the run reports every distinct market it saw with the
@@ -34,8 +41,12 @@ export const REGION_BY_MARKET: Record<string, Region> = {
   // 北
   台北一: '北', 臺北一: '北',
   台北二: '北', 臺北二: '北',
-  三重: '北', 三重市: '北',
-  桃園: '北', 桃園市: '北',
+  // `三重區` and `桃農` are the two the first real run (2026-09-27 → 10-26)
+  // reported as unmapped. `桃農` is MOA's short name for the 桃園 market; it is
+  // an abbreviation rather than a place, but both readings of 「桃」 are northern
+  // markets, so the region does not hinge on resolving it.
+  三重: '北', 三重市: '北', 三重區: '北',
+  桃園: '北', 桃園市: '北', 桃農: '北',
   板橋: '北', 板橋區: '北',
   台北市: '北', 臺北市: '北',
 

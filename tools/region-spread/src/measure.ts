@@ -32,8 +32,34 @@ import type { CropDef, MoaRow } from './backend.ts';
 import { regionOf, normalizeMarket, REGIONS } from './regions.ts';
 import type { Region } from './regions.ts';
 
-/** A region whose coverage is below this is reported as not viable as a tab. */
+/**
+ * Of the days the region traded the item, the share that must clear the gate.
+ *
+ * Applied to `coverageWhenOpen`, not to `coverage`. The first real run showed
+ * why: all five northern markets trade exactly 23 of 30 days — they rest on
+ * the same weekday — so 北's `coverage` is capped at 76.7% for any item that
+ * trades every day, and a threshold of 80% made the region holding 49.6% of
+ * the island's volume read as the least viable of the four. That number
+ * measured the market calendar, not whether the trade is there.
+ */
 export const VIABLE_COVERAGE = 0.8;
+
+/**
+ * And of ALL the item's trading days, the share on which the tab must show a
+ * number — because `VIABLE_COVERAGE` alone says nothing about that.
+ *
+ * Judging viability on `coverageWhenOpen` by itself over-corrects: a region
+ * that supplies the crop on 12 of 30 days and clears the gate on all 12 scores
+ * 100% there, while a user switching to it falls back to the nationwide price
+ * on the other 18. That is not a tab worth having.
+ *
+ * Unlike `VIABLE_COVERAGE` this is a product judgement rather than a
+ * measurement: a tab right three days in four is usable with the dimmed
+ * 「全台」 marker #23 already designs for, one empty most days is not. It sits
+ * below 北's structural ceiling of 76.7% on purpose — the ceiling is a fact
+ * about market calendars and must not be what disqualifies a region.
+ */
+export const VIABLE_WHOLE_WINDOW = 0.6;
 
 /**
  * And a ratio alone is not evidence. 2 qualifying days out of 2 is 100%
@@ -66,7 +92,29 @@ export type CropDay = {
 export type RegionStats = {
   region: Region;
   qualifiedDays: number;
+  /**
+   * Days the region traded THIS ITEM at all, whatever the volume — not days
+   * its markets were open, which this tool never establishes. The two differ
+   * when a crop simply is not supplied in a region, so the figure cannot tell
+   * a closed market from an unsupplied crop. What it does separate is the case
+   * it was added for: a day with no rows, from a day with rows below the gate.
+   * Only the second says anything about whether the trade is thin, and before
+   * the split both were counted against the region alike.
+   */
+  openDays: number;
+  /**
+   * Share of the item's trading days on which the tab would show a number.
+   * The product-facing figure: `1 - coverage` is how often a user switching to
+   * this region sees the nationwide fallback instead.
+   */
   coverage: number;
+  /**
+   * Share of the days the region traded this item on which it cleared the
+   * gate. The supply-side figure — a market resting on Mondays is not a reason
+   * to call a region dataless. Necessary for `viable` but not sufficient: see
+   * `VIABLE_WHOLE_WINDOW`.
+   */
+  coverageWhenOpen: number;
   medianMarkets: number;
   medianVolume: number;
   /** Signed median of (region − nationwide) / nationwide, in %. The level difference. */
@@ -96,6 +144,47 @@ export type CropStats = {
 
 /** What an unnamed market is called in the roster, so it cannot hide in a blank. */
 export const UNNAMED_MARKET = '（未具名）';
+
+/**
+ * The rule that picks the items a regional row is worth showing for.
+ *
+ * Issue #23 as written adds a region switcher over the whole board. The first
+ * live run plus GA4 argued it down to something smaller: a 「各區批發價」 row in
+ * the detail drawer, for the few items where the regional difference is big
+ * enough to be information rather than noise. These three thresholds are that
+ * "few", and they exist as code so the choice is auditable instead of eyeballed
+ * off a hundred-row table.
+ *
+ * Each one excludes a different way the row would mislead:
+ *
+ *   - `SHORTLIST_TOP_VOLUME` — the tail of the board is where a region
+ *     collapses to one small market and the spread becomes a grade difference
+ *     rather than a regional one (the run reported medians of 113.9% for
+ *     玉米筍 and 109.8% for 洋菇, both on under 500 tonnes).
+ *   - `SHORTLIST_MIN_SPREAD` — below this the row restates the nationwide
+ *     price in more words. Chosen by the repo owner at 30%.
+ *   - `SHORTLIST_MIN_VIABLE_REGIONS` — one region is not a comparison.
+ */
+export const SHORTLIST_TOP_VOLUME = 30;
+export const SHORTLIST_MIN_SPREAD = 30;
+export const SHORTLIST_MIN_VIABLE_REGIONS = 2;
+
+/**
+ * The qualifying items, in volume order, each with the regions it qualifies in.
+ *
+ * Ranking is by volume over the whole run, so "top 30" means the 30 items the
+ * board leans on — not the 30 with the widest spread, which would be the tail
+ * this rule exists to keep out.
+ */
+export function shortlist(crops: CropStats[]): { crop: CropStats; regions: Region[] }[] {
+  return [...crops]
+    .sort((a, b) => b.volume - a.volume)
+    .slice(0, SHORTLIST_TOP_VOLUME)
+    .filter((c) => c.spreadDays > 0
+      && c.medianSpreadPct >= SHORTLIST_MIN_SPREAD
+      && c.viableRegions >= SHORTLIST_MIN_VIABLE_REGIONS)
+    .map((crop) => ({ crop, regions: crop.regions.filter((r) => r.viable).map((r) => r.region) }));
+}
 
 /** One board item, its fetched rows, and the days the measurement kept. */
 export type MeasuredItem = { def: CropDef; rows: MoaRow[]; days: CropDay[] };
@@ -206,8 +295,11 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
   /** Only qualifying days, in date order — the series a regional tab would show. */
   const series: { day: CropDay; entry: RegionDay }[] = [];
 
+  let openDays = 0;
   for (const day of days) {
     const entry = day.regions.find((r) => r.region === region);
+    // Present at all — even below the gate — means the markets were open.
+    if (entry) openDays += 1;
     if (!entry || !entry.qualified) continue;
     series.push({ day, entry });
     markets.push(entry.markets.length);
@@ -231,10 +323,13 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
   }
 
   const coverage = days.length ? series.length / days.length : 0;
+  const coverageWhenOpen = openDays ? series.length / openDays : 0;
   return {
     region,
     qualifiedDays: series.length,
+    openDays,
     coverage,
+    coverageWhenOpen,
     medianMarkets: quantile(markets, 0.5),
     medianVolume: quantile(volumes, 0.5),
     medianDeviationPct: quantile(deviations, 0.5),
@@ -244,7 +339,10 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
     medianChangeGapPct: quantile(changeGaps, 0.5),
     p90ChangeGapPct: quantile(changeGaps, 0.9),
     mixChurn: changeGaps.length ? churned / changeGaps.length : 0,
-    viable: coverage >= VIABLE_COVERAGE && series.length >= VIABLE_MIN_DAYS,
+    viable:
+      coverageWhenOpen >= VIABLE_COVERAGE &&
+      coverage >= VIABLE_WHOLE_WINDOW &&
+      series.length >= VIABLE_MIN_DAYS,
   };
 }
 
@@ -260,14 +358,14 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
  * each item's own `selectRows` output, restricted to the days that item's
  * split actually published, with each row counted once. The unmapped-volume
  * share here is what decides whether the whole report can be trusted, so it
- * has to be a share OF the rows sections 2–5 are built from — counting crops
+ * has to be a share OF the rows sections 2–6 are built from — counting crops
  * no board item accepts, or days no statistic ever sees, would have it
  * quantify distortion in a different population than the one it gates.
  *
  * "Distinct" is the one deliberate difference from those sections. A row two
  * board items both select — `selectRows` matches `variety` by substring, so a
  * cultivar named for both would be — is one trade in one market, and the
- * roster says how much traded where. Sections 2–5 are per item and count it
+ * roster says how much traded where. Sections 2–6 are per item and count it
  * for each card it belongs to, which is right for a card and wrong for a
  * market's volume.
  *
@@ -299,7 +397,7 @@ export function marketSightings(measured: MeasuredItem[]): MarketSighting[] {
       // so the same row object can arrive twice and must be counted once. A
       // content hash would go further than that and collapse two rows that
       // merely look alike — which `weightedAverage` would still count, leaving
-      // 占全國 a share of a smaller population than sections 2–5 measure.
+      // 占全國 a share of a smaller population than sections 2–6 measure.
       if (counted.has(row)) continue;
       counted.add(row);
       let entry = seen.get(name);
