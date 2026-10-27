@@ -229,7 +229,8 @@ function liveRootCards(root, dates) {
   var todayPage = fetchPage(root, dates.latest);
   var todayRows = tradedRows(todayPage.rows);
   // A root that did not trade today needs no second query to prove it.
-  var prevRows = todayRows.length ? tradedRows(fetchCrop(root, dates.prev)) : [];
+  var prevPage = todayRows.length ? fetchPage(root, dates.prev) : { rows: [], answered: true };
+  var prevRows = tradedRows(prevPage.rows);
 
   // MOA matches `CropName` as a substring, so one query answers with every
   // related root (蘿蔔 also brings 胡蘿蔔). Grouping by root keeps a search
@@ -259,10 +260,14 @@ function liveRootCards(root, dates) {
   // Live cards come off the same `aggregateGroup` as the board's, so they
   // carry the guard's own `prev_volume` — which is neither cached nor served.
   var payload = { date: rocToISO(dates.latest), rows: todayRows.length, items: dropTransient(items) };
-  // Not a question MOA — or the relay to it — did not answer: cached, every
-  // visitor would get 「查無此品項」 for the hour, for a crop that trades.
-  if (!todayPage.answered) {
+  // A question MOA — or the relay to it — did not answer is kept for minutes,
+  // not the hour: long enough that visitors do not hammer a throttled MOA
+  // from the one address, short enough that the crop comes back once it
+  // answers (as `handleTrend`). Today unanswered is 「查無此品項」 that is not
+  // so; the day before unanswered is every card's change shown as none.
+  if (!todayPage.answered || !prevPage.answered) {
     payload.unanswered = true;
+    cache.put(cacheKey, JSON.stringify(payload), TREND_UNANSWERED_TTL);
     return payload;
   }
   cache.put(cacheKey, JSON.stringify(payload), SEARCH_CACHE_TTL);

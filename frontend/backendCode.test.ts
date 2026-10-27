@@ -1446,7 +1446,7 @@ describe('handleSearch', () => {
     expect(res.suggestion).toBeTruthy();
   });
 
-  it('says busy, and caches nothing, when MOA did not answer the query', () => {
+  it('says busy, and keeps it minutes not the hour, when MOA did not answer the query', () => {
     const rows = { 甘藍: [row('甘藍-初秋', 20, 60000)] };
     let throttled = true;
     const answer = (url: string) => {
@@ -1465,9 +1465,32 @@ describe('handleSearch', () => {
       },
     });
     expect(back.api.handleSearch({ query: 'cabbage' })).toMatchObject({ error: 'MOA 資料暫時無法取得', transient: true });
-    expect([...back.cache.keys()].filter((k) => k.startsWith(back.api.SEARCH_CACHE_PREFIX))).toEqual([]);
-    throttled = false; // the next visitor asks MOA again, and gets the crop
+    const keys = [...back.cache.keys()].filter((k) => k.startsWith(back.api.SEARCH_CACHE_PREFIX));
+    expect(keys.length).toBeGreaterThan(0);
+    expect(keys.every((k) => back.cacheTtls.get(k) === 120)).toBe(true); // minutes, so visitors do not hammer a throttled MOA
+    expect(back.api.handleSearch({ query: 'cabbage' })).toMatchObject({ transient: true }); // still busy meanwhile, not 查無此品項
+    throttled = false;
+    keys.forEach((k) => back.cache.delete(k)); // …and once it lapses, MOA is asked again
     expect(back.api.handleSearch({ query: 'cabbage' }).items[0].official_name).toBe('甘藍');
+  });
+
+  it('keeps cards whose previous day MOA did not answer minutes, not the hour', () => {
+    const rows = { 甘藍: [row('甘藍-初秋', 20, 60000)] };
+    let fetches = 0;
+    const answer = (url: string) => {
+      const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ RS: 'OK', Data: (rows as Record<string, unknown[]>)[root] || [] }) };
+    };
+    const back = loadBackend(rows, {
+      UrlFetchApp: {
+        // The probe (latest, prev) and today's query answer; the day before is throttled.
+        fetch: (url: string) => (++fetches === 4 ? { getResponseCode: () => 200, getContentText: () => '' } : answer(url)),
+        fetchAll: (reqs: { url: string }[]) => reqs.map((r) => answer(r.url)),
+      },
+    });
+    expect(back.api.handleSearch({ query: 'cabbage' }).items[0].official_name).toBe('甘藍');
+    const cabbage = [...back.cache.keys()].find((k) => k.startsWith(`${back.api.SEARCH_CACHE_PREFIX}甘藍_`)) as string;
+    expect(back.cacheTtls.get(cabbage)).toBe(120); // its day before went unanswered
   });
 
   it('says busy when no trading date can be found at all', () => {
@@ -1739,7 +1762,8 @@ describe('the MOA relay in Taiwan (#103)', () => {
     back.cache.set('veggie_trade_dates', JSON.stringify({ latest: back.api.dateToROC(new Date()), prev: null }));
     back.api.handleSearch({ query: 'cabbage' }); // no board stored: a live query
     expect(asked).toBeGreaterThan(0);
-    expect([...back.cache.keys()].filter((k) => k.startsWith(back.api.SEARCH_CACHE_PREFIX))).toEqual([]);
+    const keys = [...back.cache.keys()].filter((k) => k.startsWith(back.api.SEARCH_CACHE_PREFIX));
+    expect(keys.every((k) => back.cacheTtls.get(k) === 120)).toBe(true); // never the hour
   });
 
   it('counts the roots a failing relay left unasked as unanswered, so the archive does not settle without them', () => {
@@ -1779,6 +1803,20 @@ describe('the MOA relay in Taiwan (#103)', () => {
       },
     });
     expect(back.api.buildBoard().error).toBe('近期查無交易資料');
+  });
+
+  it('reads the store again after a failed read, rather than go without the relay all run', () => {
+    const back = loadBackend(plausibleRows());
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    back.breakRead('MOA_RELAY_URL');
+    back.api.handleTrend({ cropName: '甘藍' }); // this one goes to MOA directly…
+    back.breakRead('none');
+    back.cache.clear();
+    back.api.handleTrend({ cropName: '番茄' }); // …the next through the relay again
+    const calls = moaCalls(back);
+    expect(calls[0].url.startsWith(back.api.AGRICULTURE_API_URL)).toBe(true);
+    expect(calls[calls.length - 1].url.startsWith(`${RELAY}/?`)).toBe(true);
   });
 
   it('says in diag whether a relay is used, and never where or with what key', () => {

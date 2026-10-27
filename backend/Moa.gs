@@ -111,17 +111,19 @@ var moaRelayAnswered = false; // whether any request through it was answered
  */
 function moaRoute() {
   if (moaRouteRead) return moaRouteCached;
-  moaRouteRead = true;
-  moaRouteCached = null;
   try {
     var props = PropertiesService.getScriptProperties();
     var relay = moaRelayConfig(props.getProperty(MOA_RELAY_URL_PROP), props.getProperty(MOA_RELAY_KEY_PROP));
     if (relay.unused) Logger.log('moaRoute: MOA_RELAY_URL set, but ' + relay.unused + ': going to MOA directly');
     moaRouteCached = relay.route;
+    moaRouteRead = true;
+    return moaRouteCached;
   } catch (err) {
+    // This request goes to MOA directly; the next reads the store again,
+    // rather than the whole execution going without a relay for one blip.
     Logger.log('moaRoute: ' + err);
+    return null;
   }
-  return moaRouteCached;
 }
 
 /**
