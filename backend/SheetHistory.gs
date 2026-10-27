@@ -882,6 +882,9 @@ function backfillWindow(job, sheetId, lease) {
   // is MOA refusing those crops. Anything else — the probe refused, or a
   // batch-sized hole — is a throttle or an outage, and fails the window
   // until it clears.
+  // A relay set up wrong, or one nothing came back through, is no throttle
+  // and no outage of MOA's: say which.
+  if (relayFailure()) throw new Error(relayFailure());
   if (refused.length > SHEET_BACKFILL_MAX_REFUSED || refused.indexOf(PROBE_ROOT) !== -1) throw new Error(why);
 
   var built = backfillDays(fetched.rows, start, end, fetched.dropped);

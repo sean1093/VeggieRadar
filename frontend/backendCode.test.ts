@@ -85,8 +85,11 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
 
   let beforeFetch: ((urls: string[]) => void) | null = null;
   const silenced = new Set<string>();
+  const sleeps: number[] = [];
+  const sent: { url: string; headers: Record<string, string>; followRedirects?: unknown }[] = [];
   const respond = (url: string, options?: Record<string, unknown>) => {
     fetches.push(url);
+    sent.push({ url, headers: (options?.headers as Record<string, string>) ?? {}, followRedirects: options?.followRedirects });
     if (beforeFetch) beforeFetch([url]);
     if (url.indexOf('api.github.com') !== -1) {
       // UrlFetchApp throws on DNS and TLS failures whatever `muteHttpExceptions`
@@ -174,13 +177,13 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     },
     UrlFetchApp: {
       fetch: (url: string, options?: Record<string, unknown>) => respond(url, options),
-      fetchAll: (reqs: { url: string }[]) => {
+      fetchAll: (reqs: ({ url: string } & Record<string, unknown>)[]) => {
         // One round trip for the batch, as UrlFetchApp's own is.
         const hook = beforeFetch;
         if (hook) hook(reqs.map((r) => r.url));
         beforeFetch = null;
         try {
-          return reqs.map((r) => respond(r.url));
+          return reqs.map((r) => respond(r.url, r));
         } finally {
           beforeFetch = hook;
         }
@@ -248,7 +251,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     },
     Logger: { log: (m: unknown) => void logs.push(String(m)) },
     Utilities: {
-      sleep: () => {},
+      sleep: (ms: number) => void sleeps.push(ms),
       // Only the one pattern `SheetHistory.gs` asks for, and it records the
       // zone so a test can assert which one was used.
       formatDate: (date: Date, zone: string, pattern: string) => {
@@ -301,6 +304,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'readBoard', 'boardAgeMs', 'scheduleRefresh', 'refreshBoardCacheOnce', 'dropTriggers', 'handleWarm',
     'handleDiag', 'BOARD_MAX_AGE_MS', 'REFRESH_ONCE_FN',
     'handleTrend', 'resolveTradeDates', 'MAX_LOOKBACK_DAYS', 'CRAWL_BUDGET_MS', 'PROBE_ROOT',
+    'AGRICULTURE_API_URL', 'cropUrl', 'dateToROC',
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
     'applyBaselines', 'backfillHistory', 'backfillHistoryOnce', 'mergeCrawled', 'handleBackfill', 'buildBoard',
     'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown', 'handleSearch', 'RETAIL_BAND_ROOT',
@@ -337,6 +341,10 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     logs, props, cache, triggers, fetches, locks, mails, dispatches, tabs, openedIds,
     breakSheet: () => { sheetThrows = true; },
     formatZones, cacheRemovals, sheetReads,
+    /** Every request with the headers it carried. */
+    sent,
+    /** Every `Utilities.sleep`, in ms. */
+    sleeps,
     failWriteOnce: (tab: string) => { failingWrites.add(tab); },
     cellsRead, cacheTtls, freezes, afterRead,
     /** The id `ScriptApp` would pass a trigger's handler as `e.triggerUid`. */
@@ -1438,12 +1446,391 @@ describe('handleSearch', () => {
     expect(res.suggestion).toBeTruthy();
   });
 
+  it('says busy, and keeps it minutes not the hour, when MOA did not answer the query', () => {
+    const rows = { 甘藍: [row('甘藍-初秋', 20, 60000)] };
+    let throttled = true;
+    const answer = (url: string) => {
+      const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ RS: 'OK', Data: (rows as Record<string, unknown[]>)[root] || [] }) };
+    };
+    let queries = 0;
+    const back = loadBackend(rows, {
+      UrlFetchApp: {
+        fetch: (url: string) => {
+          // The date probe answers; the search's own query is throttled first.
+          if (++queries > 2 && throttled) return { getResponseCode: () => 200, getContentText: () => '' };
+          return answer(url);
+        },
+        fetchAll: (reqs: { url: string }[]) => reqs.map((r) => answer(r.url)),
+      },
+    });
+    expect(back.api.handleSearch({ query: 'cabbage' })).toMatchObject({ error: 'MOA 資料暫時無法取得', transient: true });
+    const keys = [...back.cache.keys()].filter((k) => k.startsWith(back.api.SEARCH_CACHE_PREFIX));
+    expect(keys.length).toBeGreaterThan(0);
+    expect(keys.every((k) => back.cacheTtls.get(k) === 120)).toBe(true); // minutes, so visitors do not hammer a throttled MOA
+    expect(back.api.handleSearch({ query: 'cabbage' })).toMatchObject({ transient: true }); // still busy meanwhile, not 查無此品項
+    throttled = false;
+    keys.forEach((k) => back.cache.delete(k)); // …and once it lapses, MOA is asked again
+    expect(back.api.handleSearch({ query: 'cabbage' }).items[0].official_name).toBe('甘藍');
+  });
+
+  it('keeps cards whose previous day MOA did not answer minutes, not the hour', () => {
+    const rows = { 甘藍: [row('甘藍-初秋', 20, 60000)] };
+    let fetches = 0;
+    const answer = (url: string) => {
+      const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ RS: 'OK', Data: (rows as Record<string, unknown[]>)[root] || [] }) };
+    };
+    const back = loadBackend(rows, {
+      UrlFetchApp: {
+        // The probe (latest, prev) and today's query answer; the day before is throttled.
+        fetch: (url: string) => (++fetches === 4 ? { getResponseCode: () => 200, getContentText: () => '' } : answer(url)),
+        fetchAll: (reqs: { url: string }[]) => reqs.map((r) => answer(r.url)),
+      },
+    });
+    expect(back.api.handleSearch({ query: 'cabbage' }).items[0].official_name).toBe('甘藍');
+    const cabbage = [...back.cache.keys()].find((k) => k.startsWith(`${back.api.SEARCH_CACHE_PREFIX}甘藍_`)) as string;
+    expect(back.cacheTtls.get(cabbage)).toBe(120); // its day before went unanswered
+  });
+
+  it('says busy when no trading date can be found at all', () => {
+    const back = loadBackend({}); // the probe answers nothing traded, a week and more
+    expect(back.api.handleSearch({ query: 'cabbage' })).toMatchObject({ error: '近期查無交易資料', transient: true });
+  });
+
   it('rejects an empty query without touching anything', () => {
     const { api, fetches } = loadBackend();
     expect(api.handleSearch({}).error).toBe('請輸入查詢關鍵字');
     expect(fetches).toHaveLength(0);
   });
 });
+describe('the MOA relay in Taiwan (#103)', () => {
+  const RELAY = 'https://moa-relay-abc-de.a.run.app';
+  const KEY = 'k'.repeat(64);
+  const moaCalls = (back: ReturnType<typeof loadBackend>) =>
+    back.sent.filter((r) => r.url.includes('CropName='));
+
+  it('goes to MOA directly while no relay is configured', () => {
+    const back = loadBackend(plausibleRows());
+    expect(back.api.buildBoard().count).toBeGreaterThan(0);
+    const calls = moaCalls(back);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((r) => r.url.startsWith(back.api.AGRICULTURE_API_URL + '?'))).toBe(true);
+    expect(calls.every((r) => !('X-Relay-Key' in r.headers))).toBe(true);
+  });
+
+  it('sends every crawl and visitor request through the relay, query unchanged, with its key', () => {
+    for (const configured of [RELAY, `${RELAY}/`, `${RELAY}/?stray=1`]) {
+      const back = loadBackend(plausibleRows());
+      back.props.set('MOA_RELAY_URL', configured);
+      back.props.set('MOA_RELAY_KEY', KEY);
+      expect(back.api.buildBoard().count).toBeGreaterThan(0); // the probe, both days, the retries
+      back.cache.clear();
+      back.api.handleSearch({ query: '高麗菜' });
+      back.api.handleTrend({ cropName: '甘藍' });
+      const calls = moaCalls(back);
+      expect(calls.length).toBeGreaterThan(0);
+      for (const r of calls) {
+        expect(r.url.startsWith(`${RELAY}/?CropName=`)).toBe(true);
+        expect(r.headers['X-Relay-Key']).toBe(KEY);
+        expect(r.followRedirects).toBe(false); // the key goes nowhere a redirect points
+      }
+      // The query is the one MOA itself would get.
+      expect(calls[0].url.slice(calls[0].url.indexOf('?'))).toBe(
+        back.api.cropUrl('甘藍', back.api.dateToROC(new Date())).slice(back.api.AGRICULTURE_API_URL.length));
+    }
+  });
+
+  it('goes to MOA directly when the store cannot be read, never nowhere', () => {
+    const back = loadBackend(plausibleRows());
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.breakRead('MOA_RELAY_URL');
+    expect(back.api.buildBoard().count).toBeGreaterThan(0);
+    expect(moaCalls(back).every((r) => r.url.startsWith(back.api.AGRICULTURE_API_URL))).toBe(true);
+  });
+
+  it('uses a relay only when configured whole: https, and with a key', () => {
+    for (const [url, key, why] of [[RELAY, '', 'no key, not used'], ['http://moa-relay.example', KEY, 'not https, not used']]) {
+      const back = loadBackend(plausibleRows());
+      back.props.set('MOA_RELAY_URL', url);
+      back.props.set('MOA_RELAY_KEY', key);
+      expect(back.api.buildBoard().count).toBeGreaterThan(0);
+      expect(moaCalls(back).every((r) => r.url.startsWith(back.api.AGRICULTURE_API_URL))).toBe(true);
+      expect(back.api.handleDiag().moa_relay).toBe(why);
+    }
+  });
+
+  it('reads a URL of only whitespace as no relay, in diag as in routing', () => {
+    const back = loadBackend();
+    back.props.set('MOA_RELAY_URL', ' \n');
+    back.props.set('MOA_RELAY_KEY', KEY);
+    expect(back.api.handleDiag().moa_relay).toBe(false);
+  });
+
+  it('trims a value pasted with whitespace', () => {
+    const back = loadBackend(plausibleRows());
+    back.props.set('MOA_RELAY_URL', `  ${RELAY}\n`);
+    back.props.set('MOA_RELAY_KEY', ` ${KEY} `);
+    back.api.buildBoard();
+    expect(moaCalls(back).every((r) => r.url.startsWith(`${RELAY}/?CropName=`) && r.headers['X-Relay-Key'] === KEY)).toBe(true);
+  });
+
+  it('fails the refresh with the reason when the relay refuses the key', () => {
+    const back = loadBackend(plausibleRows(), {
+      UrlFetchApp: {
+        fetch: () => ({ getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' }),
+        fetchAll: (reqs: unknown[]) => reqs.map(() => ({ getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' })),
+      },
+    });
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    back.api.refreshBoardCache();
+    expect(back.props.get('veggie_last_refresh_fail')).toMatch(/MOA_RELAY_KEY/);
+  });
+
+  it('says the key was refused when only the crawl batches are, not the date probe', () => {
+    // The probe answers (one request at a time); every batch is refused.
+    const rows = plausibleRows();
+    let batches = 0;
+    const refusedBatches = loadBackend(rows, {
+      UrlFetchApp: {
+        fetch: (url: string) => {
+          const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+          return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ RS: 'OK', Data: rows[root] || [] }) };
+        },
+        fetchAll: (reqs: unknown[]) => {
+          batches += 1;
+          return reqs.map(() => ({ getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' }));
+        },
+      },
+    });
+    refusedBatches.props.set('MOA_RELAY_URL', RELAY);
+    refusedBatches.props.set('MOA_RELAY_KEY', KEY);
+    expect(refusedBatches.api.buildBoard().error).toMatch(/MOA_RELAY_KEY/);
+    expect(batches).toBe(1); // the first refused batch ends the crawl
+  });
+
+  it('stops asking once the relay has refused the key', () => {
+    let asked = 0;
+    const refused = () => { asked += 1; return { getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' }; };
+    const back = loadBackend(plausibleRows(), {
+      UrlFetchApp: { fetch: refused, fetchAll: (reqs: unknown[]) => reqs.map(refused) },
+    });
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    expect(back.api.buildBoard().error).toMatch(/MOA_RELAY_KEY/);
+    expect(asked).toBe(1); // not every day of the probe, nor a crawl after it
+  });
+
+  /** A backend whose every MOA request through the relay gets `answer`. */
+  const relayed = (answer: () => { getResponseCode: () => number; getContentText: () => string }) => {
+    const back = loadBackend(plausibleRows(), { UrlFetchApp: { fetch: answer, fetchAll: (reqs: unknown[]) => reqs.map(answer) } });
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    return back;
+  };
+
+  it('stops at the relay\'s own word that it is set up wrong, and names it', () => {
+    const cases: [number, string, string][] = [
+      [404, 'moa-relay: not found', 'MOA 中繼站無法使用（HTTP 404）'],
+      [500, 'moa-relay: relay not configured: set RELAY_KEY', 'MOA 中繼站無法使用（HTTP 500）'],
+      [403, '<html><title>403 Forbidden</title>Error: Forbidden. Your client does not have permission to get URL / from this server.</html>',
+        'MOA 中繼站無法使用（HTTP 403：需以 --allow-unauthenticated 部署）'],
+    ];
+    for (const [code, body, reason] of cases) {
+      let asked = 0;
+      const back = relayed(() => { asked += 1; return { getResponseCode: () => code, getContentText: () => body }; });
+      back.api.refreshBoardCache();
+      expect(asked).toBe(1);
+      expect(back.props.get('veggie_last_refresh_fail')).toMatch(new RegExp(`${reason.replace(/[()（）：]/g, '.')}$`));
+      expect(back.api.handleDiag().last_refresh_fail).toMatch(/ relay_unusable$/);
+    }
+  });
+
+  it('asks on through anything short of that, as of MOA itself, and names it only if nothing answered', () => {
+    const cases: [() => never | { getResponseCode: () => number; getContentText: () => string }, string, string][] = [
+      [() => { throw new Error('DNS error: moa-relay-typo.a.run.app'); }, 'MOA 中繼站沒有回應', 'relay_unreachable'],
+      [() => ({ getResponseCode: () => 502, getContentText: () => 'moa-relay: upstream: timeout' }), 'MOA 中繼站連不到 MOA', 'relay_upstream'],
+      [() => ({ getResponseCode: () => 530, getContentText: () => 'error 1033' }), 'MOA 中繼站回應 HTTP 530', 'relay_http'], // a tunnel's own
+      [() => ({ getResponseCode: () => 404, getContentText: () => '<html>Not Found</html>' }), 'MOA 中繼站回應 HTTP 404', 'relay_http'], // MOA's, or a wrong host
+      [() => ({ getResponseCode: () => 403, getContentText: () => '<html>Request Rejected</html>' }), 'MOA 中繼站回應 HTTP 403', 'relay_http'], // MOA's firewall
+      [() => ({ getResponseCode: () => 401, getContentText: () => '{"message":"Unauthorized"}' }), 'MOA 中繼站回應 HTTP 401', 'relay_http'], // MOA's, not the key
+    ];
+    for (const [answer, reason, category] of cases) {
+      let asked = 0;
+      const back = relayed(() => { asked += 1; return answer(); });
+      back.api.refreshBoardCache();
+      expect(asked).toBe(back.api.MAX_LOOKBACK_DAYS); // the whole probe, not stopped at the first
+      expect(back.props.get('veggie_last_refresh_fail')).toMatch(new RegExp(` ${reason}$`)); // fixed text: no URL, no body
+      expect(back.api.handleDiag().last_refresh_fail).toMatch(new RegExp(` ${category}$`));
+      expect(back.cache.has('veggie_trade_dates')).toBe(false);
+    }
+  });
+
+  it('names no symptom once the relay has answered: then it is MOA\'s data, not the relay', () => {
+    let asked = 0;
+    const back = relayed(() => {
+      asked += 1;
+      return asked === 1
+        ? { getResponseCode: () => 200, getContentText: () => '{"RS":"OK","Data":[]}' } // answered: nothing traded that day
+        : { getResponseCode: () => 502, getContentText: () => 'moa-relay: upstream: timeout' };
+    });
+    expect(back.api.buildBoard().error).toBe('近期查無交易資料');
+  });
+
+  it('names a relay URL that answers with a web page instead of MOA', () => {
+    const back = relayed(() => ({ getResponseCode: () => 200, getContentText: () => '<!doctype html><title>Sign in</title>' }));
+    back.api.refreshBoardCache();
+    expect(back.props.get('veggie_last_refresh_fail')).toMatch(/ MOA 中繼站回應的不是 MOA 資料$/);
+    expect(back.api.handleDiag().last_refresh_fail).toMatch(/ relay_not_moa$/);
+  });
+
+  it('does not take MOA\'s throttle, passed through, for the wrong host', () => {
+    const back = relayed(() => ({ getResponseCode: () => 200, getContentText: () => '' }));
+    expect(back.api.buildBoard().error).toBe('近期查無交易資料');
+  });
+
+  it('names a relay that never answered even when waiting on it ran out the budget', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const hang = () => { vi.setSystemTime(Date.now() + 60_000); throw new Error('Timeout: https://moa-relay'); };
+      const back = loadBackend(plausibleRows(), { UrlFetchApp: { fetch: hang, fetchAll: hang } });
+      back.props.set('MOA_RELAY_URL', RELAY);
+      back.props.set('MOA_RELAY_KEY', KEY);
+      expect(back.api.buildBoard().error).toBe('MOA 中繼站沒有回應'); // not the budget's 「MOA 可能無法連線」
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('frees the rolling backfill\'s lock when a relay set up wrong stopped its crawl', () => {
+    const back = relayed(() => ({ getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' }));
+    back.api.handleBackfill({});
+    expect(back.api.backfillHistoryOnce().merged).toBe(false);
+    expect(back.cache.has('veggie_backfill_queued')).toBe(false); // ask again once the key is fixed
+  });
+
+  it('reads the relay\'s generic 500 as a passing failure, not a setup it names', () => {
+    let asked = 0;
+    const back = relayed(() => { asked += 1; return { getResponseCode: () => 500, getContentText: () => 'moa-relay: error' }; });
+    back.api.refreshBoardCache();
+    expect(asked).toBe(back.api.MAX_LOOKBACK_DAYS); // asked on
+    expect(back.api.handleDiag().last_refresh_fail).toMatch(/ relay_http$/);
+  });
+
+  it('tells a searcher the data is out of reach, not that the crop does not exist', () => {
+    const back = relayed(() => ({ getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' }));
+    back.cache.set('veggie_trade_dates', JSON.stringify({ latest: back.api.dateToROC(new Date()), prev: null }));
+    expect(back.api.handleSearch({ query: 'cabbage' })).toMatchObject({ error: 'MOA 資料暫時無法取得', items: [], transient: true });
+  });
+
+  it('frees the rolling backfill\'s lock when nothing came back through the relay', () => {
+    const back = relayed(() => { throw new Error('DNS error: moa-relay-typo'); });
+    back.api.handleBackfill({});
+    expect(back.api.backfillHistoryOnce().merged).toBe(false);
+    expect(back.cache.has('veggie_backfill_queued')).toBe(false);
+  });
+
+  it('costs a transient error a batch, never the run', () => {
+    const rows = plausibleRows();
+    let thrown = 0;
+    const back = loadBackend(rows, {
+      UrlFetchApp: {
+        fetch: (url: string) => {
+          const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+          return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ RS: 'OK', Data: rows[root] || [] }) };
+        },
+        fetchAll: (reqs: { url: string }[]) => {
+          if (thrown++ === 0) throw new Error('Address unavailable: moa-relay'); // the first batch only
+          return reqs.map((r) => {
+            const root = decodeURIComponent((r.url.match(/CropName=([^&]*)/) || [])[1] || '');
+            return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ RS: 'OK', Data: rows[root] || [] }) };
+          });
+        },
+      },
+    });
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    const board = back.api.buildBoard();
+    expect(board.error).toBeUndefined();
+    expect(board.count).toBeGreaterThan(0); // the throttled batch retried, the crawl went on
+  });
+
+  it('caches no search answer a relay set up wrong cut short', () => {
+    let asked = 0;
+    const back = relayed(() => { asked += 1; return { getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' }; });
+    back.cache.set('veggie_trade_dates', JSON.stringify({ latest: back.api.dateToROC(new Date()), prev: null }));
+    back.api.handleSearch({ query: 'cabbage' }); // no board stored: a live query
+    expect(asked).toBeGreaterThan(0);
+    const keys = [...back.cache.keys()].filter((k) => k.startsWith(back.api.SEARCH_CACHE_PREFIX));
+    expect(keys.every((k) => back.cacheTtls.get(k) === 120)).toBe(true); // never the hour
+  });
+
+  it('counts the roots a failing relay left unasked as unanswered, so the archive does not settle without them', () => {
+    let batches = 0;
+    const back = loadBackend(plausibleRows(), {
+      UrlFetchApp: {
+        fetch: () => ({ getResponseCode: () => 200, getContentText: () => '{"RS":"OK","Data":[]}' }),
+        fetchAll: (reqs: unknown[]) => {
+          batches += 1;
+          return reqs.map(() => ({ getResponseCode: () => 404, getContentText: () => 'moa-relay: not found' }));
+        },
+      },
+    });
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    const roots: string[] = back.api.boardRoots();
+    const fetched = back.api.fetchCompleteRows(roots, '115.10.01', '115.10.07');
+    expect(batches).toBe(1); // the relay failed in the first batch: nothing more was asked…
+    expect(back.sleeps).not.toContain(1500); // …not even after the retry's pause
+    expect([...fetched.unanswered].sort()).toEqual([...roots].sort()); // …and all of it is said to be missing
+  });
+
+  it('names the refused key in the public diag too, as a category', () => {
+    const refused = () => ({ getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' });
+    const back = loadBackend(plausibleRows(), { UrlFetchApp: { fetch: refused, fetchAll: (reqs: unknown[]) => reqs.map(refused) } });
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    back.api.refreshBoardCache();
+    expect(back.api.handleDiag().last_refresh_fail).toMatch(/ relay_refused$/);
+  });
+
+  it('reads a 401 from MOA itself, with no relay, as the silence it always was', () => {
+    const back = loadBackend(plausibleRows(), {
+      UrlFetchApp: {
+        fetch: () => ({ getResponseCode: () => 401, getContentText: () => '' }),
+        fetchAll: (reqs: unknown[]) => reqs.map(() => ({ getResponseCode: () => 401, getContentText: () => '' })),
+      },
+    });
+    expect(back.api.buildBoard().error).toBe('近期查無交易資料');
+  });
+
+  it('reads the store again after a failed read, rather than go without the relay all run', () => {
+    const back = loadBackend(plausibleRows());
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    back.breakRead('MOA_RELAY_URL');
+    back.api.handleTrend({ cropName: '甘藍' }); // this one goes to MOA directly…
+    back.breakRead('none');
+    back.cache.clear();
+    back.api.handleTrend({ cropName: '番茄' }); // …the next through the relay again
+    const calls = moaCalls(back);
+    expect(calls[0].url.startsWith(back.api.AGRICULTURE_API_URL)).toBe(true);
+    expect(calls[calls.length - 1].url.startsWith(`${RELAY}/?`)).toBe(true);
+  });
+
+  it('says in diag whether a relay is used, and never where or with what key', () => {
+    const back = loadBackend();
+    expect(back.api.handleDiag().moa_relay).toBe(false);
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    const diag = back.api.handleDiag(true);
+    expect(diag.moa_relay).toBe(true);
+    expect(JSON.stringify(diag)).not.toContain(KEY);
+    expect(JSON.stringify(diag)).not.toContain('moa-relay-abc');
+  });
+});
+
 describe('an MOA that does not answer (the crawl budget)', () => {
   afterEach(() => vi.useRealTimers());
 
@@ -1472,6 +1859,7 @@ describe('an MOA that does not answer (the crawl budget)', () => {
     expect(board.error).toMatch(/逾時/);
     expect(back.props.get('veggie_last_refresh_fail')).toMatch(/MOA 可能無法連線/);
     expect(back.props.get('veggie_alert_streak')).toBe('1');
+    expect(back.api.handleDiag().last_refresh_fail).toMatch(/ moa_timeout$/); // the public category
   });
 
   it('opens the incident after a streak of them, as any failing refresh does', () => {
@@ -2494,7 +2882,7 @@ const rocIso = (roc: string): string => {
  * newest rows kept and `Next: true` set. A day answering `null` makes the
  * whole request come back as MOA answers a burst: an empty body.
  */
-function moaRange(daily: (root: string, roc: string) => Row[] | null | 'error' | 'bare' | 'cut', cap = Infinity) {
+function moaRange(daily: (root: string, roc: string) => Row[] | null | 'error' | 'bare' | 'cut' | 'refused' | 'down', cap = Infinity) {
   const requests: { root: string; from: string; to: string }[] = [];
   const answer = (url: string) => {
     const q = new URL(url).searchParams;
@@ -2507,14 +2895,18 @@ function moaRange(daily: (root: string, roc: string) => Row[] | null | 'error' |
     let error = false;
     let bare = false;
     let cut = false;
+    let refused = false;
     for (let d = from; d <= to; d = rocShift(d, 1)) {
       const day = daily(root, d);
-      if (day === null) silent = true;
+      if (day === 'down') throw new Error('Address unavailable: moa-relay'); // a relay nothing reaches
+      if (day === 'refused') refused = true; // the relay refusing its key
+      else if (day === null) silent = true;
       else if (day === 'error') error = true;
       else if (day === 'bare') bare = true;
       else if (day === 'cut') cut = true;
       else rows = rows.concat(day);
     }
+    if (refused) return { getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' };
     if (cut && !silent) {
       return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ RS: 'OK', Data: rows, Next: true }) };
     }
@@ -2565,7 +2957,7 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
   const ROWS_A_DAY = 4 + (ITEMS.length - 2);
 
   const backfill = (
-    daily: (root: string, roc: string) => Row[] | null | 'error' | 'bare' | 'cut' = market,
+    daily: (root: string, roc: string) => Row[] | null | 'error' | 'bare' | 'cut' | 'refused' | 'down' = market,
     { cap = Infinity, boardRoc = BOARD_ROC, overrides = {} as Record<string, unknown> } = {},
   ) => {
     const moa = moaRange((root, roc) => daily(root, roc), cap);
@@ -2872,6 +3264,24 @@ describe('backfilling the archive from MOA (#22 §4)', () => {
         '2025-12-27', '2025-12-28', '2025-12-29', '2025-12-30', '2025-12-31',
       ]);
       expect(back.tabs.get('2025')?.rows[0]).toEqual(back.api.SHEET_HEADER);
+    });
+
+    it('names a relay nothing came back through as why a window failed, not MOA', () => {
+      const back = backfill(() => 'down');
+      back.props.set('MOA_RELAY_URL', 'https://moa-relay-abc-de.a.run.app');
+      back.props.set('MOA_RELAY_KEY', 'k'.repeat(64));
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+      expect(back.job().last_error).toContain('MOA 中繼站沒有回應');
+    });
+
+    it('names a relay set up wrong as why a window failed, not MOA', () => {
+      const back = backfill(() => 'refused');
+      back.props.set('MOA_RELAY_URL', 'https://moa-relay-abc-de.a.run.app');
+      back.props.set('MOA_RELAY_KEY', 'k'.repeat(64));
+      back.api.handleSheetBackfill({ months: '12' });
+      back.api.sheetBackfillStep();
+      expect(back.job().last_error).toContain('MOA_RELAY_KEY');
     });
 
     it('retries a failed crawl, and stops the chain once it keeps failing', () => {

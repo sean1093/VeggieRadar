@@ -43,11 +43,15 @@ function fetchCrop(cropName, rocStart, rocEnd) {
 
 /** Like `fetchCrop`, with the whole `parsePage` verdict rather than the rows. */
 function fetchPage(cropName, rocStart, rocEnd) {
-  if (!cropName || !rocStart || crawlOutOfTime()) return { rows: [], answered: false, next: false };
+  // Nor once the relay has refused the key: every request after would be too.
+  if (!cropName || !rocStart || moaRelayFault !== null || crawlOutOfTime()) return { rows: [], answered: false, next: false };
   try {
-    return parsePage(UrlFetchApp.fetch(cropUrl(cropName, rocStart, rocEnd), { muteHttpExceptions: true }));
+    var req = moaRequest(cropQuery(cropName, rocStart, rocEnd));
+    var resp = noteRelayAnswer(UrlFetchApp.fetch(req.url, req));
+    return noteRelayPage(parsePage(resp), resp);
   } catch (err) {
     Logger.log('fetchCrop error (' + cropName + ' ' + rocStart + '): ' + err);
+    noteRelayThrow(err);
     return { rows: [], answered: false, next: false };
   }
 }
@@ -89,9 +93,175 @@ function wholeDaysOf(page) {
   return page.rows.filter(function (r) { return r.TransDate !== oldest; });
 }
 
+// The route MOA requests take, read once per execution (`moaRoute`); and
+// what is wrong with the relay, once it has said — so the build can say so,
+// and no request goes out after.
+var moaRouteRead = false;
+var moaRouteCached = null;
+var moaRelayFault = null;
+var moaRelaySymptom = null;   // the last thing short of a fault (`noteRelayAnswer`)
+var moaRelayAnswered = false; // whether any request through it was answered
+
+/**
+ * Where MOA requests go: the relay in Taiwan when both `MOA_RELAY_URL` (an
+ * https URL) and `MOA_RELAY_KEY` are set, else null for MOA itself. Half a
+ * configuration — no key, a plain-http URL — and a store that cannot be read
+ * all mean MOA directly, the old way, never a relay that refuses every
+ * request.
+ */
+function moaRoute() {
+  if (moaRouteRead) return moaRouteCached;
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var relay = moaRelayConfig(props.getProperty(MOA_RELAY_URL_PROP), props.getProperty(MOA_RELAY_KEY_PROP));
+    if (relay.unused) Logger.log('moaRoute: MOA_RELAY_URL set, but ' + relay.unused + ': going to MOA directly');
+    moaRouteCached = relay.route;
+    moaRouteRead = true;
+    return moaRouteCached;
+  } catch (err) {
+    // This request goes to MOA directly; the next reads the store again,
+    // rather than the whole execution going without a relay for one blip.
+    Logger.log('moaRoute: ' + err);
+    return null;
+  }
+}
+
+/**
+ * The one reading of the two relay properties, for the route and for `diag`:
+ * `route` when both are usable, else null — with `unused` saying why a URL
+ * that is set is not used.
+ */
+function moaRelayConfig(rawUrl, rawKey) {
+  var url = String(rawUrl || '').trim();
+  var key = String(rawKey || '').trim();
+  if (!url) return { route: null, unused: null };
+  if (!/^https:\/\//.test(url)) return { route: null, unused: 'not https' };
+  if (!key) return { route: null, unused: 'no key' };
+  return { route: { url: url.replace(/[?#].*$/, '').replace(/\/?$/, '/'), key: key }, unused: null };
+}
+
+/**
+ * One MOA request as `UrlFetchApp` takes it (`fetch(req.url, req)` or an
+ * entry of `fetchAll`), for a query from `cropQuery`: to MOA, or to the
+ * relay with the same query and its key.
+ */
+function moaRequest(query) {
+  var relay = moaRoute();
+  if (!relay) return { url: AGRICULTURE_API_URL + '?' + query, muteHttpExceptions: true };
+  // Never after a redirect: the key is for the relay, and a redirect could
+  // take it to another host, or to plain http, which the https check exists
+  // to rule out. A 30x is a symptom like any other status (`noteRelayAnswer`).
+  return {
+    url: relay.url + '?' + query,
+    headers: { 'X-Relay-Key': relay.key },
+    followRedirects: false,
+    muteHttpExceptions: true
+  };
+}
+
+/**
+ * What the relay's answers say about the relay — never about MOA, whose
+ * answers pass through it untouched.
+ *
+ * A FAULT is the relay's own word that it is set up wrong: every answer it
+ * makes starts with `moa-relay: ` (`relay/handler.mjs`), a refused key being a
+ * 401 with its own body; and Google's 403 for a service deployed without
+ * `--allow-unauthenticated`. Every request after would go the same way, so
+ * none goes out, and the build fails naming it.
+ *
+ * Anything else — a request that throws, a status that is not the relay's
+ * (a tunnel's 530, MOA's own 404), a 502 for the relay not reaching MOA — is
+ * a SYMPTOM, as it would be of MOA itself: asking goes on, and only if nothing
+ * answered at all does the build name it. One transient error costs a batch,
+ * never the run.
+ *
+ * Both reasons are fixed text and a status code: they reach the public
+ * `diag`, which must show neither the relay's URL nor a platform's message.
+ * The detail is logged.
+ */
+function noteRelayAnswer(resp) {
+  try {
+    if (!moaRoute() || moaRelayFault) return resp;
+    var code = resp.getResponseCode();
+    if (code === 200) return resp; // MOA's, or not: `noteRelayPage` decides
+    var body = String(resp.getContentText());
+    var own = body.indexOf(MOA_RELAY_OWN_PREFIX) === 0;
+    if (code === 401 && body.indexOf(MOA_RELAY_REFUSED_BODY) === 0) {
+      relayFault('MOA 中繼站拒絕連線：MOA_RELAY_KEY 與中繼站的 RELAY_KEY 不符', body);
+    } else if (own && (code === 400 || code === 404 || code === 405 ||
+        body.indexOf(MOA_RELAY_OWN_PREFIX + 'relay not configured') === 0)) {
+      // What it says of how it is set up, or of how it is asked — never a
+      // passing failure, which its generic 500 may be.
+      relayFault('MOA 中繼站無法使用（HTTP ' + code + '）', body);
+    } else if (code === 403 && body.indexOf('does not have permission') !== -1) {
+      relayFault('MOA 中繼站無法使用（HTTP 403：需以 --allow-unauthenticated 部署）', body);
+    } else {
+      moaRelaySymptom = code === 502 ? 'MOA 中繼站連不到 MOA' : 'MOA 中繼站回應 HTTP ' + code;
+    }
+  } catch (err) {
+    // A response without a code says nothing about the relay.
+  }
+  return resp;
+}
+
+/**
+ * Whether the relay has answered with MOA's own answer at all, which no
+ * symptom outweighs. A 200 that is not — a page of HTML, the wrong host: a
+ * login page, a parked domain — is a symptom of its own; an empty body is
+ * MOA's throttle, passed through, and says nothing.
+ */
+function noteRelayPage(page, resp) {
+  if (!moaRoute()) return page;
+  if (page.answered) {
+    moaRelayAnswered = true;
+  } else if (moaRelayFault === null) {
+    try {
+      if (resp.getResponseCode() === 200 && /^\s*</.test(String(resp.getContentText()))) {
+        moaRelaySymptom = 'MOA 中繼站回應的不是 MOA 資料';
+      }
+    } catch (err) {
+      // Nothing to read is nothing to say.
+    }
+  }
+  return page;
+}
+
+/** A request to the relay that threw: a symptom (see `noteRelayAnswer`). */
+function noteRelayThrow(err) {
+  if (!moaRoute() || moaRelayFault) return;
+  moaRelaySymptom = 'MOA 中繼站沒有回應';
+  Logger.log('relay: no answer: ' + err);
+}
+
+function relayFault(reason, detail) {
+  moaRelayFault = reason;
+  Logger.log('relay: ' + reason + ' — ' + String(detail).substring(0, 200));
+}
+
+/**
+ * Why the build found nothing, when the relay is why: a symptom no answer
+ * contradicted. Null when it answered at all, or is not in use.
+ */
+function relaySymptom() {
+  return moaRoute() && !moaRelayAnswered ? moaRelaySymptom : null;
+}
+
+/**
+ * Why nothing came back, when the relay is why — a fault, or a symptom no
+ * answer contradicted — else null. The one question every caller asks.
+ */
+function relayFailure() {
+  return moaRelayFault || relaySymptom();
+}
+
 /** Single-date URL when `rocEnd` is omitted; a closed range otherwise. */
 function cropUrl(cropName, rocStart, rocEnd) {
-  return AGRICULTURE_API_URL + '?' + [
+  return AGRICULTURE_API_URL + '?' + cropQuery(cropName, rocStart, rocEnd);
+}
+
+/** `cropUrl`'s query, for whichever host takes it (`moaRequest`). */
+function cropQuery(cropName, rocStart, rocEnd) {
+  return [
     'CropName=' + encodeURIComponent(cropName),
     'Start_time=' + encodeURIComponent(rocStart),
     'End_time=' + encodeURIComponent(rocEnd || rocStart)
@@ -146,19 +316,27 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta, spare) {
   var out = {};
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
-    if (spare ? crawlTimeSpent() : crawlOutOfTime()) break; // only a crawl has a deadline
+    if (moaRelayFault !== null || (spare ? crawlTimeSpent() : crawlOutOfTime())) {
+      // Unasked: unanswered, for a caller that keeps count — the archive's
+      // backfill must not settle a window on the roots that were asked.
+      if (meta) {
+        for (var k = start; k < cropNames.length; k++) notePage(meta, cropNames[k], { answered: false, next: false });
+      }
+      break;
+    }
     var requests = slice.map(function (name) {
-      return { url: cropUrl(name, rocStart, rocEnd), muteHttpExceptions: true };
+      return moaRequest(cropQuery(name, rocStart, rocEnd));
     });
     try {
       var responses = UrlFetchApp.fetchAll(requests);
       for (var i = 0; i < responses.length; i++) {
-        var page = parsePage(responses[i]);
+        var page = noteRelayPage(parsePage(noteRelayAnswer(responses[i])), responses[i]);
         out[slice[i]] = page.rows;
         if (meta) notePage(meta, slice[i], page);
       }
     } catch (err) {
       Logger.log('fetchAllRows batch error (' + rocStart + '): ' + err);
+      noteRelayThrow(err);
       // Asked, and unanswered: a batch that threw is a throttle's silence by
       // other means, and the crawl's budget tells asked from never asked.
       for (var j = 0; j < slice.length; j++) {
@@ -204,7 +382,8 @@ function fetchRootRows(roots, rocStart, rocEnd, meta) {
   meta = meta || { answered: {}, truncated: {}, unanswered: {} };
   var out = fetchAllRows(roots, rocStart, rocEnd, meta);
   var misses = roots.filter(function (r) { return !out[r] || !out[r].length; });
-  if (!misses.length) return out;
+  // Nor after a relay fault: every request would be refused the same way.
+  if (!misses.length || moaRelayFault !== null) return out;
 
   // The retry is a second chance, run only while the crawl has time — and
   // stopped by its budget without marking the crawl cut short (`spare`).
@@ -331,9 +510,9 @@ function resolveTradeDates(fresh) {
   }
 
   var dates = { latest: latest, prev: prev };
-  // Nor a probe the crawl's budget cut short: the previous day it did not
-  // reach would be missing from every search for the cache's hour.
-  if (!crawlCutShort) cache.put(TRADE_DATES_CACHE_KEY, JSON.stringify(dates), TRADE_DATES_TTL);
+  // Nor a probe the crawl's budget or a failing relay cut short: the previous
+  // day it did not reach would be missing from every search for the hour.
+  if (!crawlCutShort && !moaRelayFault) cache.put(TRADE_DATES_CACHE_KEY, JSON.stringify(dates), TRADE_DATES_TTL);
   return dates;
 }
 

@@ -731,6 +731,13 @@ emailed to the maintainer instead, each once per 24 h incident window:
 | **Failure streak** | 3 consecutive refreshes that yield no board | One failure is routine (MOA throttles a batch) and self-heals; alerting on it would train the recipient to ignore the mail |
 | **Silence** | Served board older than 12 h | A deleted or broken trigger produces *no* failures to count. Nothing is running to notice, so the serving path raises this one |
 
+MOA itself refuses connections from outside Taiwan (#103), and Apps Script
+runs on Google's servers abroad. With the `MOA_RELAY_URL` / `MOA_RELAY_KEY`
+script properties set, every MOA request — the crawl's, and the trend's and
+search's — goes through `relay/`, a small keyed forwarder running in Taiwan
+(Cloud Run, `asia-east1`); `relay/README.md` has the deploy. Unset, requests
+go to MOA directly, and `diag.moa_relay` says which.
+
 A refresh Apps Script kills at its six-minute limit is neither: it records
 nothing at all, so there is no failure to count. That is what an MOA that
 does not answer used to cause — each request waits about a minute before it

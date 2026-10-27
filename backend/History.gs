@@ -325,8 +325,13 @@ function backfillHistory() {
   // a 30 s wait can genuinely time out — and a thrown timeout here would throw
   // away a crawl that took minutes, behind a one-hour queue lock that stops
   // anyone simply asking again.
-  var outcome = mergeCrawled(crawled);
+  // A relay set up wrong, or one nothing came back through: nothing was
+  // crawled, and merging nothing as "merged" would hold the hour's lock
+  // against the retry once it is fixed.
+  var relay = relayFailure();
+  var outcome = relay ? 'failed' : mergeCrawled(crawled);
   if (outcome === 'busy') outcome = mergeCrawled(crawled);
+  if (relay) Logger.log('backfillHistory: ' + relay);
   var summary = historySummary();
   summary.merged = outcome === 'merged';
   Logger.log(summary.merged

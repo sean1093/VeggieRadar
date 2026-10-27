@@ -147,6 +147,12 @@ function handleWarm(params) {
   };
 }
 
+/** `diag.moa_relay`: true, false, or why a URL that is set is not used. */
+function publicMoaRelay(props) {
+  var relay = moaRelayConfig(props[MOA_RELAY_URL_PROP], props[MOA_RELAY_KEY_PROP]);
+  return relay.route ? true : relay.unused ? relay.unused + ', not used' : false;
+}
+
 /**
  * `?action=diag` — makes refresh liveness observable without opening the GAS
  * console. Public, so the last failure is reduced to a category unless the
@@ -191,6 +197,10 @@ function handleDiag(full, props) {
     // fallback cron: an expired PAT would 401 on every refresh and nothing
     // else here would say so. Outcome and time only, never the token.
     mirror_dispatch: parseDispatch(props[GH_DISPATCH_PROP], props[GH_DISPATCH_OK_PROP]),
+    // Whether MOA is reached through the relay in Taiwan (#103) — never its
+    // URL or key: `diag` is public. A URL without a key, or not https, is not
+    // used, and says so rather than read as either.
+    moa_relay: publicMoaRelay(props),
     // Alert state, so a silent mailbox can be told apart from a silent
     // pipeline. The recipient address is deliberately not exposed — diag is a
     // public endpoint.
@@ -245,6 +255,13 @@ function redactFailure(value) {
   if (reason.indexOf('近期查無交易資料') !== -1) category = 'no_trade_dates';
   else if (reason.indexOf('empty board') !== -1) category = 'empty_board';
   else if (reason.indexOf('implausible:') === 0) category = 'implausible';
+  else if (reason.indexOf('MOA 中繼站拒絕連線') === 0) category = 'relay_refused';
+  else if (reason.indexOf('MOA 中繼站無法使用') === 0) category = 'relay_unusable';
+  else if (reason.indexOf('MOA 中繼站沒有回應') === 0) category = 'relay_unreachable';
+  else if (reason.indexOf('MOA 中繼站連不到 MOA') === 0) category = 'relay_upstream';
+  else if (reason.indexOf('MOA 中繼站回應 HTTP') === 0) category = 'relay_http';
+  else if (reason.indexOf('MOA 中繼站回應的不是 MOA 資料') === 0) category = 'relay_not_moa';
+  else if (reason.indexOf('向 MOA 抓取資料逾時') === 0) category = 'moa_timeout';
   return at + ' ' + category;
 }
 
