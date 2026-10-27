@@ -16,6 +16,12 @@ export const ALLOWED_PARAMS = new Set(['CropName', 'CropCode', 'MarketName', 'Ma
 /** Under Apps Script's own fetch timeout, so the caller hears why. */
 export const UPSTREAM_TIMEOUT_MS = 50_000;
 
+/**
+ * The body of the relay's own refusal, so the backend can tell it from a 401
+ * MOA itself sent, which passes through like any other answer.
+ */
+export const REFUSED_BODY = 'moa-relay: unauthorized';
+
 const text = (status, body) => ({ status, contentType: 'text/plain; charset=utf-8', body });
 
 function sameKey(given, expected) {
@@ -40,7 +46,7 @@ export async function handle(req, { key, fetchImpl = fetch, timeoutMs = UPSTREAM
     return text(400, 'bad request target'); // e.g. `GET http://[` — never a crash
   }
   if (url.pathname !== '/') return text(404, 'not found');
-  if (!sameKey(req.headers['x-relay-key'], key)) return text(401, 'unauthorized');
+  if (!sameKey(req.headers['x-relay-key'], key)) return text(401, REFUSED_BODY);
 
   const query = new URLSearchParams();
   for (const [name, value] of url.searchParams) {

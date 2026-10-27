@@ -43,7 +43,8 @@ function fetchCrop(cropName, rocStart, rocEnd) {
 
 /** Like `fetchCrop`, with the whole `parsePage` verdict rather than the rows. */
 function fetchPage(cropName, rocStart, rocEnd) {
-  if (!cropName || !rocStart || crawlOutOfTime()) return { rows: [], answered: false, next: false };
+  // Nor once the relay has refused the key: every request after would be too.
+  if (!cropName || !rocStart || moaRelayRefused || crawlOutOfTime()) return { rows: [], answered: false, next: false };
   try {
     var req = moaRequest(cropQuery(cropName, rocStart, rocEnd));
     return parsePage(noteRelayAnswer(UrlFetchApp.fetch(req.url, req)));
@@ -109,18 +110,27 @@ function moaRoute() {
   moaRouteCached = null;
   try {
     var props = PropertiesService.getScriptProperties();
-    var url = String(props.getProperty(MOA_RELAY_URL_PROP) || '').trim();
-    var key = String(props.getProperty(MOA_RELAY_KEY_PROP) || '').trim();
-    if (!url) return null;
-    if (!/^https:\/\//.test(url) || !key) {
-      Logger.log('moaRoute: MOA_RELAY_URL set, but ' + (key ? 'not https' : 'no MOA_RELAY_KEY') + ': going to MOA directly');
-      return null;
-    }
-    moaRouteCached = { url: url.replace(/[?#].*$/, '').replace(/\/?$/, '/'), key: key };
+    var relay = moaRelayConfig(props.getProperty(MOA_RELAY_URL_PROP), props.getProperty(MOA_RELAY_KEY_PROP));
+    if (relay.unused) Logger.log('moaRoute: MOA_RELAY_URL set, but ' + relay.unused + ': going to MOA directly');
+    moaRouteCached = relay.route;
   } catch (err) {
     Logger.log('moaRoute: ' + err);
   }
   return moaRouteCached;
+}
+
+/**
+ * The one reading of the two relay properties, for the route and for `diag`:
+ * `route` when both are usable, else null — with `unused` saying why a URL
+ * that is set is not used.
+ */
+function moaRelayConfig(rawUrl, rawKey) {
+  var url = String(rawUrl || '').trim();
+  var key = String(rawKey || '').trim();
+  if (!url) return { route: null, unused: null };
+  if (!/^https:\/\//.test(url)) return { route: null, unused: 'not https' };
+  if (!key) return { route: null, unused: 'no key' };
+  return { route: { url: url.replace(/[?#].*$/, '').replace(/\/?$/, '/'), key: key }, unused: null };
 }
 
 /**
@@ -136,11 +146,16 @@ function moaRequest(query) {
 
 /**
  * Notes a relay that refused the key: its 401 is not MOA's silence, and a
- * crawl of them would otherwise read as "no trading data".
+ * crawl of them would otherwise read as "no trading data". Its own refusal
+ * only (`relay/handler.mjs`'s REFUSED_BODY): a 401 MOA sent passes through it
+ * like any other answer, and says nothing about the key.
  */
 function noteRelayAnswer(resp) {
   try {
-    if (moaRoute() && resp.getResponseCode() === 401) moaRelayRefused = true;
+    if (moaRoute() && resp.getResponseCode() === 401 &&
+        String(resp.getContentText()).indexOf(MOA_RELAY_REFUSED_BODY) === 0) {
+      moaRelayRefused = true;
+    }
   } catch (err) {
     // A response without a code says nothing about the key.
   }
@@ -209,7 +224,7 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta, spare) {
   var out = {};
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
-    if (spare ? crawlTimeSpent() : crawlOutOfTime()) break; // only a crawl has a deadline
+    if (moaRelayRefused || (spare ? crawlTimeSpent() : crawlOutOfTime())) break; // only a crawl has a deadline
     var requests = slice.map(function (name) {
       return moaRequest(cropQuery(name, rocStart, rocEnd));
     });

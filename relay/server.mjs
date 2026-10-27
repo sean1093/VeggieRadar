@@ -1,8 +1,4 @@
-import { createServer } from 'node:http';
-import { pathToFileURL } from 'node:url';
 import { handle } from './handler.mjs';
-
-const port = Number(process.env.PORT) || 8080;
 
 /**
  * One request's answer, whatever goes wrong producing or sending it: an
@@ -29,9 +25,4 @@ export async function serve(req, res, handleImpl = handle) {
       res.destroy();
     }
   }
-}
-
-// Listening only when run (`npm start`), not when a test imports `serve`.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  createServer((req, res) => void serve(req, res)).listen(port, () => console.log(`moa-relay listening on ${port}`));
 }

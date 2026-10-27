@@ -4,8 +4,10 @@
  * no open proxy for anyone else.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 // @ts-expect-error — a plain ES module outside the app, with no types
-import { handle, MOA_ENDPOINT } from '../relay/handler.mjs';
+import { handle, MOA_ENDPOINT, REFUSED_BODY } from '../relay/handler.mjs';
 // @ts-expect-error — the same
 import { serve } from '../relay/server.mjs';
 
@@ -47,6 +49,12 @@ describe('MOA relay', () => {
       expect((await call(QUERY, headers, 'GET', upstream.fetchImpl)).status).toBe(401);
     }
     expect(upstream.asked).toEqual([]);
+    expect((await call(QUERY, {}, 'GET', upstream.fetchImpl)).body).toBe(REFUSED_BODY); // what the backend tells from MOA's own 401
+  });
+
+  it('refuses with the body the backend looks for', () => {
+    const config = readFileSync(resolve(__dirname, '../backend/Config.gs'), 'utf8');
+    expect(config).toContain(`var MOA_RELAY_REFUSED_BODY = '${REFUSED_BODY}';`);
   });
 
   it("is no open proxy: one path, MOA's parameters only, GET only", async () => {

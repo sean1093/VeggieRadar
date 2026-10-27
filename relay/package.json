@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Forwards the backend's MOA queries from Taiwan (#103).",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node main.mjs"
   },
   "engines": {
     "node": ">=22"

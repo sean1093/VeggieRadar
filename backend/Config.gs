@@ -21,6 +21,7 @@ var AGRICULTURE_API_URL = 'https://data.moa.gov.tw/api/v1/AgriProductsTransType/
 // request goes to MOA directly, as before.
 var MOA_RELAY_URL_PROP = 'MOA_RELAY_URL';
 var MOA_RELAY_KEY_PROP = 'MOA_RELAY_KEY';
+var MOA_RELAY_REFUSED_BODY = 'moa-relay: unauthorized'; // relay/handler.mjs REFUSED_BODY
 
 // Operator actions. The Web App is anonymous by necessity (browsers call it),
 // but `warm&force=1`, `backfill` and `alerttest` each start a crawl or a mail

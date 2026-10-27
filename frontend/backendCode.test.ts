@@ -1504,6 +1504,13 @@ describe('the MOA relay in Taiwan (#103)', () => {
     }
   });
 
+  it('reads a URL of only whitespace as no relay, in diag as in routing', () => {
+    const back = loadBackend();
+    back.props.set('MOA_RELAY_URL', ' \n');
+    back.props.set('MOA_RELAY_KEY', KEY);
+    expect(back.api.handleDiag().moa_relay).toBe(false);
+  });
+
   it('trims a value pasted with whitespace', () => {
     const back = loadBackend(plausibleRows());
     back.props.set('MOA_RELAY_URL', `  ${RELAY}\n`);
@@ -1515,8 +1522,8 @@ describe('the MOA relay in Taiwan (#103)', () => {
   it('fails the refresh with the reason when the relay refuses the key', () => {
     const back = loadBackend(plausibleRows(), {
       UrlFetchApp: {
-        fetch: () => ({ getResponseCode: () => 401, getContentText: () => 'unauthorized' }),
-        fetchAll: (reqs: unknown[]) => reqs.map(() => ({ getResponseCode: () => 401, getContentText: () => 'unauthorized' })),
+        fetch: () => ({ getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' }),
+        fetchAll: (reqs: unknown[]) => reqs.map(() => ({ getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' })),
       },
     });
     back.props.set('MOA_RELAY_URL', RELAY);
@@ -1528,18 +1535,45 @@ describe('the MOA relay in Taiwan (#103)', () => {
   it('says the key was refused when only the crawl batches are, not the date probe', () => {
     // The probe answers (one request at a time); every batch is refused.
     const rows = plausibleRows();
+    let batches = 0;
     const refusedBatches = loadBackend(rows, {
       UrlFetchApp: {
         fetch: (url: string) => {
           const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
           return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ RS: 'OK', Data: rows[root] || [] }) };
         },
-        fetchAll: (reqs: unknown[]) => reqs.map(() => ({ getResponseCode: () => 401, getContentText: () => 'unauthorized' })),
+        fetchAll: (reqs: unknown[]) => {
+          batches += 1;
+          return reqs.map(() => ({ getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' }));
+        },
       },
     });
     refusedBatches.props.set('MOA_RELAY_URL', RELAY);
     refusedBatches.props.set('MOA_RELAY_KEY', KEY);
     expect(refusedBatches.api.buildBoard().error).toMatch(/MOA_RELAY_KEY/);
+    expect(batches).toBe(1); // the first refused batch ends the crawl
+  });
+
+  it('stops asking once the relay has refused the key', () => {
+    let asked = 0;
+    const refused = () => { asked += 1; return { getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' }; };
+    const back = loadBackend(plausibleRows(), {
+      UrlFetchApp: { fetch: refused, fetchAll: (reqs: unknown[]) => reqs.map(refused) },
+    });
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    expect(back.api.buildBoard().error).toMatch(/MOA_RELAY_KEY/);
+    expect(asked).toBe(1); // not every day of the probe, nor a crawl after it
+  });
+
+  it('does not blame the key for a 401 MOA itself sent through the relay', () => {
+    const fromMoa = () => ({ getResponseCode: () => 401, getContentText: () => '{"message":"Unauthorized"}' });
+    const back = loadBackend(plausibleRows(), {
+      UrlFetchApp: { fetch: fromMoa, fetchAll: (reqs: unknown[]) => reqs.map(fromMoa) },
+    });
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    expect(back.api.buildBoard().error).toBe('近期查無交易資料');
   });
 
   it('reads a 401 from MOA itself, with no relay, as the silence it always was', () => {

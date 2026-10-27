@@ -147,6 +147,12 @@ function handleWarm(params) {
   };
 }
 
+/** `diag.moa_relay`: true, false, or why a URL that is set is not used. */
+function publicMoaRelay(props) {
+  var relay = moaRelayConfig(props[MOA_RELAY_URL_PROP], props[MOA_RELAY_KEY_PROP]);
+  return relay.route ? true : relay.unused ? relay.unused + ', not used' : false;
+}
+
 /**
  * `?action=diag` — makes refresh liveness observable without opening the GAS
  * console. Public, so the last failure is reduced to a category unless the
@@ -194,10 +200,7 @@ function handleDiag(full, props) {
     // Whether MOA is reached through the relay in Taiwan (#103) — never its
     // URL or key: `diag` is public. A URL without a key, or not https, is not
     // used, and says so rather than read as either.
-    moa_relay: !props[MOA_RELAY_URL_PROP] ? false
-      : !String(props[MOA_RELAY_KEY_PROP] || '').trim() ? 'no key, not used'
-      : !/^https:\/\//.test(String(props[MOA_RELAY_URL_PROP]).trim()) ? 'not https, not used'
-      : true,
+    moa_relay: publicMoaRelay(props),
     // Alert state, so a silent mailbox can be told apart from a silent
     // pipeline. The recipient address is deliberately not exposed — diag is a
     // public endpoint.

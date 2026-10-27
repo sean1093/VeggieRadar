@@ -13,7 +13,8 @@ forward the backend's queries to the one MOA endpoint:
   MOA itself.
 
 The rule lives in `handler.mjs` and is tested in `frontend/relay.test.ts`;
-`server.mjs` only wraps it in Node's HTTP server.
+`server.mjs` turns a request into its answer whatever fails, and `main.mjs`
+(`npm start`) listens.
 
 ## Deploy (Cloud Run, Taiwan)
 
@@ -57,7 +58,7 @@ curl -H "X-Relay-Key: $KEY" "$URL/?CropName=%E7%94%98%E8%97%8D&Start_time=115.10
 `"RS":"OK"` with `Data` means MOA accepts the relay's address. If it hangs or
 answers `502 upstream: timeout`, MOA refuses this address too, and the relay
 has to run somewhere else in Taiwan (a machine on a Taiwanese ISP behind a
-tunnel) — the same `server.mjs`, `node server.mjs` with `RELAY_KEY` and `PORT`.
+tunnel) — the same code, `npm start` with `RELAY_KEY` and `PORT`.
 
 ## Point the backend at it
 
