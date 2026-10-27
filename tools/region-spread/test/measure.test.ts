@@ -131,6 +131,43 @@ describe('cropStats', () => {
     expect(stats.viableRegions).toBe(0);
   });
 
+  it('does not punish a region for resting, which is what the first real run hit', () => {
+    // The live finding: all five northern markets trade 23 of 30 days, resting
+    // on the same weekday, so 北's whole-window coverage is capped at 76.7%.
+    // Judged on that, the region holding 49.6% of the island's volume read as
+    // the least viable of four — a measurement of the market calendar, not of
+    // whether the trade is there.
+    const rows = [];
+    for (let day = 1; day <= 30; day += 1) {
+      const date = `115.09.${`${day}`.padStart(2, '0')}`;
+      rows.push(row(date, '台中市', 30, 1000)); // open every day
+      if (day % 10 !== 0) rows.push(row(date, '台北一', 20, 1000)); // shut 3 of 30
+    }
+    const north = cropStats(CABBAGE, dailySplit(rows, CABBAGE)).regions.find((r) => r.region === '北')!;
+    expect(north.openDays).toBe(27);
+    expect(north.qualifiedDays).toBe(27);
+    // Open every day it could be, so the supply side is perfect…
+    expect(north.coverageWhenOpen).toBe(1);
+    // …while the user still sees a fallback on the days the market is shut.
+    expect(north.coverage).toBeCloseTo(27 / 30, 6);
+    expect(north.viable).toBe(true);
+  });
+
+  it('still calls a region unviable when it is open and short of the gate', () => {
+    // The other half: open every day, but the trade is genuinely thin. That is
+    // a data problem, and the distinction is the whole point of the split.
+    const rows = [];
+    for (let day = 1; day <= 30; day += 1) {
+      const date = `115.09.${`${day}`.padStart(2, '0')}`;
+      rows.push(row(date, '台中市', 30, 1000));
+      rows.push(row(date, '台北一', 20, day % 2 ? 100 : 1000)); // half the days below 200 kg
+    }
+    const north = cropStats(CABBAGE, dailySplit(rows, CABBAGE)).regions.find((r) => r.region === '北')!;
+    expect(north.openDays).toBe(30);
+    expect(north.coverageWhenOpen).toBeLessThan(0.8);
+    expect(north.viable).toBe(false);
+  });
+
   it('calls it viable once there are enough qualifying days behind the ratio', () => {
     const long = [];
     for (let day = 1; day <= VIABLE_MIN_DAYS; day += 1) {

@@ -32,7 +32,16 @@ import type { CropDef, MoaRow } from './backend.ts';
 import { regionOf, normalizeMarket, REGIONS } from './regions.ts';
 import type { Region } from './regions.ts';
 
-/** A region whose coverage is below this is reported as not viable as a tab. */
+/**
+ * A region whose coverage is below this is reported as not viable as a tab.
+ *
+ * Applied to `coverageWhenOpen`, not to `coverage`. The first real run showed
+ * why: all five northern markets trade exactly 23 of 30 days — they rest on
+ * the same weekday — so 北's `coverage` is capped at 76.7% for any item that
+ * trades every day, and a threshold of 80% made the region holding 49.6% of
+ * the island's volume read as the least viable of the four. That number
+ * measured the market calendar, not whether the trade is there.
+ */
 export const VIABLE_COVERAGE = 0.8;
 
 /**
@@ -66,7 +75,25 @@ export type CropDay = {
 export type RegionStats = {
   region: Region;
   qualifiedDays: number;
+  /**
+   * Days the region's markets traded this item at all, whatever the volume.
+   * The rest are days they were SHUT, which is a different fact from a day
+   * they traded 50 kg: one is a closed market, the other is thin trade, and
+   * only the second says anything about whether a regional tab has the data.
+   */
+  openDays: number;
+  /**
+   * Share of the item's trading days on which the tab would show a number.
+   * The product-facing figure: `1 - coverage` is how often a user switching to
+   * this region sees the nationwide fallback instead.
+   */
   coverage: number;
+  /**
+   * Share of the days the region was OPEN on which it cleared the gate. The
+   * supply-side figure, and what `viable` is judged on — a market resting on
+   * Mondays is not a reason to call a region dataless.
+   */
+  coverageWhenOpen: number;
   medianMarkets: number;
   medianVolume: number;
   /** Signed median of (region − nationwide) / nationwide, in %. The level difference. */
@@ -206,8 +233,11 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
   /** Only qualifying days, in date order — the series a regional tab would show. */
   const series: { day: CropDay; entry: RegionDay }[] = [];
 
+  let openDays = 0;
   for (const day of days) {
     const entry = day.regions.find((r) => r.region === region);
+    // Present at all — even below the gate — means the markets were open.
+    if (entry) openDays += 1;
     if (!entry || !entry.qualified) continue;
     series.push({ day, entry });
     markets.push(entry.markets.length);
@@ -231,10 +261,13 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
   }
 
   const coverage = days.length ? series.length / days.length : 0;
+  const coverageWhenOpen = openDays ? series.length / openDays : 0;
   return {
     region,
     qualifiedDays: series.length,
+    openDays,
     coverage,
+    coverageWhenOpen,
     medianMarkets: quantile(markets, 0.5),
     medianVolume: quantile(volumes, 0.5),
     medianDeviationPct: quantile(deviations, 0.5),
@@ -244,7 +277,7 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
     medianChangeGapPct: quantile(changeGaps, 0.5),
     p90ChangeGapPct: quantile(changeGaps, 0.9),
     mixChurn: changeGaps.length ? churned / changeGaps.length : 0,
-    viable: coverage >= VIABLE_COVERAGE && series.length >= VIABLE_MIN_DAYS,
+    viable: coverageWhenOpen >= VIABLE_COVERAGE && series.length >= VIABLE_MIN_DAYS,
   };
 }
 
