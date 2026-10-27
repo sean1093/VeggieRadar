@@ -145,6 +145,47 @@ export type CropStats = {
 /** What an unnamed market is called in the roster, so it cannot hide in a blank. */
 export const UNNAMED_MARKET = '（未具名）';
 
+/**
+ * The rule that picks the items a regional row is worth showing for.
+ *
+ * Issue #23 as written adds a region switcher over the whole board. The first
+ * live run plus GA4 argued it down to something smaller: a 「各區批發價」 row in
+ * the detail drawer, for the few items where the regional difference is big
+ * enough to be information rather than noise. These three thresholds are that
+ * "few", and they exist as code so the choice is auditable instead of eyeballed
+ * off a hundred-row table.
+ *
+ * Each one excludes a different way the row would mislead:
+ *
+ *   - `SHORTLIST_TOP_VOLUME` — the tail of the board is where a region
+ *     collapses to one small market and the spread becomes a grade difference
+ *     rather than a regional one (the run reported medians of 113.9% for
+ *     玉米筍 and 109.8% for 洋菇, both on under 500 tonnes).
+ *   - `SHORTLIST_MIN_SPREAD` — below this the row restates the nationwide
+ *     price in more words. Chosen by the repo owner at 30%.
+ *   - `SHORTLIST_MIN_VIABLE_REGIONS` — one region is not a comparison.
+ */
+export const SHORTLIST_TOP_VOLUME = 30;
+export const SHORTLIST_MIN_SPREAD = 30;
+export const SHORTLIST_MIN_VIABLE_REGIONS = 2;
+
+/**
+ * The qualifying items, in volume order, each with the regions it qualifies in.
+ *
+ * Ranking is by volume over the whole run, so "top 30" means the 30 items the
+ * board leans on — not the 30 with the widest spread, which would be the tail
+ * this rule exists to keep out.
+ */
+export function shortlist(crops: CropStats[]): { crop: CropStats; regions: Region[] }[] {
+  return [...crops]
+    .sort((a, b) => b.volume - a.volume)
+    .slice(0, SHORTLIST_TOP_VOLUME)
+    .filter((c) => c.spreadDays > 0
+      && c.medianSpreadPct >= SHORTLIST_MIN_SPREAD
+      && c.viableRegions >= SHORTLIST_MIN_VIABLE_REGIONS)
+    .map((crop) => ({ crop, regions: crop.regions.filter((r) => r.viable).map((r) => r.region) }));
+}
+
 /** One board item, its fetched rows, and the days the measurement kept. */
 export type MeasuredItem = { def: CropDef; rows: MoaRow[]; days: CropDay[] };
 
@@ -317,14 +358,14 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
  * each item's own `selectRows` output, restricted to the days that item's
  * split actually published, with each row counted once. The unmapped-volume
  * share here is what decides whether the whole report can be trusted, so it
- * has to be a share OF the rows sections 2–5 are built from — counting crops
+ * has to be a share OF the rows sections 2–6 are built from — counting crops
  * no board item accepts, or days no statistic ever sees, would have it
  * quantify distortion in a different population than the one it gates.
  *
  * "Distinct" is the one deliberate difference from those sections. A row two
  * board items both select — `selectRows` matches `variety` by substring, so a
  * cultivar named for both would be — is one trade in one market, and the
- * roster says how much traded where. Sections 2–5 are per item and count it
+ * roster says how much traded where. Sections 2–6 are per item and count it
  * for each card it belongs to, which is right for a card and wrong for a
  * market's volume.
  *
@@ -356,7 +397,7 @@ export function marketSightings(measured: MeasuredItem[]): MarketSighting[] {
       // so the same row object can arrive twice and must be counted once. A
       // content hash would go further than that and collapse two rows that
       // merely look alike — which `weightedAverage` would still count, leaving
-      // 占全國 a share of a smaller population than sections 2–5 measure.
+      // 占全國 a share of a smaller population than sections 2–6 measure.
       if (counted.has(row)) continue;
       counted.add(row);
       let entry = seen.get(name);
