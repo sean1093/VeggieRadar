@@ -39,6 +39,13 @@ var BOARD_CACHE_KEY = 'veggie_board_v2';
 var BOARD_CACHE_TTL = 6 * 60 * 60; // 6 hours
 var MAX_LOOKBACK_DAYS = 8;       // walk back to the latest day that has data
 var FETCH_BATCH = 13;            // concurrent UrlFetchApp requests; a 70+ burst trips MOA's per-IP limit
+// The crawl's own time budget. Apps Script ends an execution at six minutes
+// without running anything after it — no failure recorded, no streak, no
+// alert — and an MOA that does not answer costs about a minute a request
+// before the fetch times out, so the trading-date probe alone outlasts the
+// limit. Past this budget no more MOA requests go out and the build fails
+// with a reason the alerting carries. A healthy crawl takes well under one.
+var CRAWL_BUDGET_MS = 3 * 60 * 1000;
 // Trend serving. One drawer open used to cost 7 sequential MOA fetches plus
 // 480 ms of sleeps; a range query and a short shared cache make it at most
 // 1 fetch per crop per hour across ALL users, keeping the URLFetch daily quota

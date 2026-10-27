@@ -6,6 +6,23 @@
 
 // --- MOA API access ---
 
+// While `buildBoard` crawls: the time past which no more requests go out
+// (ms since the epoch), else null; and whether that cut the crawl short.
+// Per execution, as every global is in Apps Script.
+var crawlDeadline = null;
+var crawlCutShort = false;
+
+/**
+ * Whether the crawl's budget (`CRAWL_BUDGET_MS`) is spent, noting that it
+ * was, so the build can say why it came back short. Always false outside a
+ * crawl: the trend and search answer visitors, each within its own request.
+ */
+function crawlOutOfTime() {
+  if (crawlDeadline === null || Date.now() < crawlDeadline) return false;
+  crawlCutShort = true;
+  return true;
+}
+
 /**
  * Fetches all rows for a crop-name term on a ROC date, or across a closed
  * date range when `rocEnd` is given. MOA matches the term anywhere inside
@@ -18,7 +35,7 @@ function fetchCrop(cropName, rocStart, rocEnd) {
 
 /** Like `fetchCrop`, with the whole `parsePage` verdict rather than the rows. */
 function fetchPage(cropName, rocStart, rocEnd) {
-  if (!cropName || !rocStart) return { rows: [], answered: false, next: false };
+  if (!cropName || !rocStart || crawlOutOfTime()) return { rows: [], answered: false, next: false };
   try {
     return parsePage(UrlFetchApp.fetch(cropUrl(cropName, rocStart, rocEnd), { muteHttpExceptions: true }));
   } catch (err) {
@@ -118,6 +135,13 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta) {
   var out = {};
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
+    if (crawlOutOfTime()) {
+      // Unasked, which is unanswered: the archive's backfill retries those.
+      if (meta) {
+        for (var k = start; k < cropNames.length; k++) notePage(meta, cropNames[k], { answered: false, next: false });
+      }
+      break;
+    }
     var requests = slice.map(function (name) {
       return { url: cropUrl(name, rocStart, rocEnd), muteHttpExceptions: true };
     });
