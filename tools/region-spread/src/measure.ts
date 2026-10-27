@@ -33,7 +33,7 @@ import { regionOf, normalizeMarket, REGIONS } from './regions.ts';
 import type { Region } from './regions.ts';
 
 /**
- * A region whose coverage is below this is reported as not viable as a tab.
+ * Of the days the region traded the item, the share that must clear the gate.
  *
  * Applied to `coverageWhenOpen`, not to `coverage`. The first real run showed
  * why: all five northern markets trade exactly 23 of 30 days — they rest on
@@ -43,6 +43,23 @@ import type { Region } from './regions.ts';
  * measured the market calendar, not whether the trade is there.
  */
 export const VIABLE_COVERAGE = 0.8;
+
+/**
+ * And of ALL the item's trading days, the share on which the tab must show a
+ * number — because `VIABLE_COVERAGE` alone says nothing about that.
+ *
+ * Judging viability on `coverageWhenOpen` by itself over-corrects: a region
+ * that supplies the crop on 12 of 30 days and clears the gate on all 12 scores
+ * 100% there, while a user switching to it falls back to the nationwide price
+ * on the other 18. That is not a tab worth having.
+ *
+ * Unlike `VIABLE_COVERAGE` this is a product judgement rather than a
+ * measurement: a tab right three days in four is usable with the dimmed
+ * 「全台」 marker #23 already designs for, one empty most days is not. It sits
+ * below 北's structural ceiling of 76.7% on purpose — the ceiling is a fact
+ * about market calendars and must not be what disqualifies a region.
+ */
+export const VIABLE_WHOLE_WINDOW = 0.6;
 
 /**
  * And a ratio alone is not evidence. 2 qualifying days out of 2 is 100%
@@ -76,10 +93,13 @@ export type RegionStats = {
   region: Region;
   qualifiedDays: number;
   /**
-   * Days the region's markets traded this item at all, whatever the volume.
-   * The rest are days they were SHUT, which is a different fact from a day
-   * they traded 50 kg: one is a closed market, the other is thin trade, and
-   * only the second says anything about whether a regional tab has the data.
+   * Days the region traded THIS ITEM at all, whatever the volume — not days
+   * its markets were open, which this tool never establishes. The two differ
+   * when a crop simply is not supplied in a region, so the figure cannot tell
+   * a closed market from an unsupplied crop. What it does separate is the case
+   * it was added for: a day with no rows, from a day with rows below the gate.
+   * Only the second says anything about whether the trade is thin, and before
+   * the split both were counted against the region alike.
    */
   openDays: number;
   /**
@@ -89,9 +109,10 @@ export type RegionStats = {
    */
   coverage: number;
   /**
-   * Share of the days the region was OPEN on which it cleared the gate. The
-   * supply-side figure, and what `viable` is judged on — a market resting on
-   * Mondays is not a reason to call a region dataless.
+   * Share of the days the region traded this item on which it cleared the
+   * gate. The supply-side figure — a market resting on Mondays is not a reason
+   * to call a region dataless. Necessary for `viable` but not sufficient: see
+   * `VIABLE_WHOLE_WINDOW`.
    */
   coverageWhenOpen: number;
   medianMarkets: number;
@@ -277,7 +298,10 @@ function regionStats(region: Region, days: CropDay[]): RegionStats {
     medianChangeGapPct: quantile(changeGaps, 0.5),
     p90ChangeGapPct: quantile(changeGaps, 0.9),
     mixChurn: changeGaps.length ? churned / changeGaps.length : 0,
-    viable: coverageWhenOpen >= VIABLE_COVERAGE && series.length >= VIABLE_MIN_DAYS,
+    viable:
+      coverageWhenOpen >= VIABLE_COVERAGE &&
+      coverage >= VIABLE_WHOLE_WINDOW &&
+      series.length >= VIABLE_MIN_DAYS,
   };
 }
 

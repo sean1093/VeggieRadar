@@ -153,6 +153,23 @@ describe('cropStats', () => {
     expect(north.viable).toBe(true);
   });
 
+  it('will not call a tab viable when it is empty most of the window', () => {
+    // The over-correction the first version of this fix had: 北 supplies the
+    // crop on 12 of 30 days and clears the gate on all 12, so the supply-side
+    // figure is a perfect 100% — while a user switching to it falls back to
+    // the nationwide price on the other 18 days.
+    const rows = [];
+    for (let day = 1; day <= 30; day += 1) {
+      const date = `115.09.${`${day}`.padStart(2, '0')}`;
+      rows.push(row(date, '台中市', 30, 1000));
+      if (day <= 12) rows.push(row(date, '台北一', 20, 1000));
+    }
+    const north = cropStats(CABBAGE, dailySplit(rows, CABBAGE)).regions.find((r) => r.region === '北')!;
+    expect(north.coverageWhenOpen).toBe(1);
+    expect(north.coverage).toBeCloseTo(0.4, 6);
+    expect(north.viable).toBe(false);
+  });
+
   it('still calls a region unviable when it is open and short of the gate', () => {
     // The other half: open every day, but the trade is genuinely thin. That is
     // a data problem, and the distinction is the whole point of the split.

@@ -82,16 +82,22 @@ issue, not into the tree.
 | --- | --- |
 | 1. 市場對照表 | Every market seen, its codes, and the region `src/regions.ts` gave it. **Stays red while any market is unmapped** — unmapped volume still counts nationwide, so the regional numbers would describe a board nobody would ship. Volume is counted over exactly the rows sections 2–5 use — each item's `selectRows` output, restricted to the days its split published — so the share that gates the report is a share of what the report is built from. |
 | 2. 區域價差 | Per crop and per day, the gap between the dearest and cheapest qualifying region as a share of today's nationwide price. Median and p90. |
-| 3. 樣本量 | Two coverage figures per region, because they answer different questions. **開市覆蓋** (of the days the region's markets were open) is the supply side — is the trade there. **全期覆蓋** (of the item's national trading days) is the product side — `1 −` it is how often a user switching to that region sees the nationwide fallback. Viability is judged on the first, with a floor on qualifying days: the first live run found all five northern markets resting on the same weekday, capping whole-window coverage at 76.7% and making the region with 49.6% of the island's volume read as the least viable of four. |
+| 3. 樣本量 | Two coverage figures per region, because they answer different questions. **開市覆蓋** (of the days the region traded the item at all) is the supply side — is the trade there. **全期覆蓋** (of the item's national trading days) is the product side — `1 −` it is how often a user switching to that region sees the nationwide fallback. Viability needs **both**, plus a floor on qualifying days. The first live run found all five northern markets resting on the same weekday, capping whole-window coverage at 76.7% and making the region with 49.6% of the island's volume read as the least viable of four — so that figure cannot be the gate on its own; nor can the other, which a region supplying the crop 12 days in 30 scores 100% on. |
 | 4. 分區漲跌 | `changeGap` (how far the regional move lands from the nationwide one over the same date pair) and `mixChurn` (how often the contributing markets changed between consecutive qualifying days). |
-| 5. 每個品項 | Coverage and signed deviation from nationwide, per crop per region. |
+| 5. 每個品項 | Both coverage figures and the signed deviation from nationwide, per crop per region. A gap between the two is the region's closed days: the wider it is, the more often the user sees the fallback — which is not the same as the region lacking data. |
 
 ## The region table is a hypothesis
 
-`src/regions.ts` is seeded from #23's own table plus the two market names the
-committed fixture proves (`台北一`, `台北二`). `regionOf` never guesses: no
-prefix search, no fuzzy match. Anything it has not been told lands in `其他`,
-is reported with its volume share, and keeps the run's own mapping check red.
+`src/regions.ts` is seeded from #23's own table, the three market names the
+committed fixture proves (`台北一`, `台北二`, `台中市`), and the two a real run
+reported as unmapped (`三重區`, `桃農`). `regionOf` never guesses: no prefix
+search, no fuzzy match. Anything it has not been told lands in `其他`, is
+reported with its volume share, and keeps the run's own mapping check red.
+
+The check catches a name the table is **missing**. It can never catch one the
+table puts in the **wrong region** — that resolves cleanly and looks exactly
+like a real regional price difference — so the report's market table, with its
+`MarketCode` column, has to be read by a human once per new market.
 
 A near-miss that quietly landed a market in the wrong region would be
 indistinguishable from a real regional price difference — the exact error this
