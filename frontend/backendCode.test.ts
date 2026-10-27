@@ -84,6 +84,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
   };
 
   let beforeFetch: ((urls: string[]) => void) | null = null;
+  const silenced = new Set<string>();
   const respond = (url: string, options?: Record<string, unknown>) => {
     fetches.push(url);
     if (beforeFetch) beforeFetch([url]);
@@ -95,6 +96,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
       return { getResponseCode: () => dispatchStatus, getContentText: () => '' };
     }
     const hit = Object.keys(responses).find((key) => url.includes(encodeURIComponent(key)));
+    if (hit && silenced.has(hit)) return { getResponseCode: () => 200, getContentText: () => '' }; // throttled
     const rows = hit ? responses[hit] : [];
     return {
       getResponseCode: () => 200,
@@ -344,6 +346,8 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     breakTriggerDelete: () => { triggerDeleteThrows = true; },
     /** Runs before every MOA round trip (once per `fetchAll` batch), e.g. to let time pass. */
     onFetch: (fn: (urls: string[]) => void) => { beforeFetch = fn; },
+    /** MOA answers this root with an empty body, as a throttle does. */
+    silence: (root: string, on = true) => { if (on) silenced.add(root); else silenced.delete(root); },
     breakTriggerList: () => { triggerListThrows = true; },
     breakDispatch: () => { dispatchThrows = true; },
     rejectDispatch: (code: number) => { dispatchStatus = code; },
@@ -1524,6 +1528,48 @@ describe('an MOA that does not answer (the crawl budget)', () => {
       if (jumped || urls.length < 2) return; // the date probe asks one at a time
       if (urls.some((u) => u.includes(last) && u.includes(prevDay))) {
         jumped = true;
+        vi.setSystemTime(Date.now() + 4 * 60_000);
+      }
+    });
+    const board = back.api.buildBoard();
+    expect(jumped).toBe(true);
+    expect(board.error).toBeUndefined();
+    expect(board.count).toBeGreaterThan(0);
+  });
+
+  it('fails a crawl out of time with a root MOA never answered, rather than publish it missing', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back0 = loadBackend();
+    const roots: string[] = back0.api.boardRoots();
+    const throttled = roots.filter((r) => r !== back0.api.PROBE_ROOT)[0];
+    const back = loadBackend(plausibleRows());
+    const last = encodeURIComponent(roots[roots.length - 1]);
+    const prevDay = back.api.resolveTradeDates(true).prev as string;
+    back.cache.clear();
+    back.onFetch((urls) => {
+      if (urls.length < 2) return;
+      if (urls.some((u) => u.includes(prevDay))) back.silence(throttled); // the second day's pass is throttled…
+      if (urls.some((u) => u.includes(last) && u.includes(prevDay))) vi.setSystemTime(Date.now() + 4 * 60_000); // …and ends past the budget
+    });
+    const board = back.api.buildBoard();
+    expect(board.error).toMatch(/逾時/);
+  });
+
+  it('keeps the board when the retry of out-of-season roots crosses the budget between its batches', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back0 = loadBackend();
+    const roots: string[] = back0.api.boardRoots();
+    const empty = roots.filter((r) => r !== back0.api.PROBE_ROOT).slice(0, 20); // two retry batches' worth
+    const back = loadBackend(plausibleRowsWith(Object.fromEntries(empty.map((r) => [r, []]))));
+    const prevDay = back.api.resolveTradeDates(true).prev as string;
+    const retried = encodeURIComponent(empty[0]);
+    back.cache.clear();
+    let seen = 0;
+    let jumped = false;
+    back.onFetch((urls) => {
+      if (urls.length < 2 || jumped) return;
+      if (urls.some((u) => u.includes(retried) && u.includes(prevDay)) && ++seen === 2) {
+        jumped = true; // the retry's first batch returns past the budget
         vi.setSystemTime(Date.now() + 4 * 60_000);
       }
     });

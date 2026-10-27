@@ -739,7 +739,10 @@ crawl has its own budget (`CRAWL_BUDGET_MS`, 3 min, far above a healthy
 crawl's): past it no more MOA requests go out, and the build fails as
 「向 MOA 抓取資料逾時…MOA 可能無法連線」 — a failure like any other, counted
 toward the streak. A crawl cut short publishes nothing, never the cards that
-came back in time.
+came back in time. The retry of roots that came back empty is the one pass
+the budget may end without failing the build — out-of-season roots are empty
+every time — unless a root among them was never answered at all (a throttled
+batch), which would be published as missing.
 
 A recovering refresh closes the incident with one 「已恢復正常」 mail, so an
 alert always has a matching all-clear — and the mail is sent **before** the

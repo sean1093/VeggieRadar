@@ -137,13 +137,16 @@ function parsePage(resp) {
  * @param {Object=} meta optional; `meta.truncated[root]` is set for every root
  *   MOA cut short and `meta.unanswered[root]` for every root it did not
  *   answer, each cleared again by a later call that answers it whole.
+ * @param {boolean=} spare a pass the build can do without (the retry): past
+ *   the crawl's budget it stops without marking the crawl cut short, and
+ *   its caller judges what that left out.
  * @returns {Object} map of root → rows[]
  */
-function fetchAllRows(cropNames, rocStart, rocEnd, meta) {
+function fetchAllRows(cropNames, rocStart, rocEnd, meta, spare) {
   var out = {};
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
-    if (crawlOutOfTime()) break; // only a crawl has a deadline, and it keeps no `meta`
+    if (spare ? crawlTimeSpent() : crawlOutOfTime()) break; // only a crawl has a deadline
     var requests = slice.map(function (name) {
       return { url: cropUrl(name, rocStart, rocEnd), muteHttpExceptions: true };
     });
@@ -192,19 +195,26 @@ function notePage(meta, root, page) {
  * end for the backfill path.
  */
 function fetchRootRows(roots, rocStart, rocEnd, meta) {
+  // What MOA answered, kept here when the caller keeps none: the crawl's
+  // budget needs to tell a root that answered "nothing traded" from one a
+  // throttle silenced.
+  meta = meta || { answered: {}, truncated: {}, unanswered: {} };
   var out = fetchAllRows(roots, rocStart, rocEnd, meta);
   var misses = roots.filter(function (r) { return !out[r] || !out[r].length; });
-  // The retry is a second chance, not part of the answer: out-of-season roots
-  // are empty every time. Past the crawl's budget it is skipped without
-  // marking the crawl cut short — every root has answered once.
-  if (!misses.length || crawlTimeSpent()) return out;
+  if (!misses.length) return out;
 
-  Utilities.sleep(1500);
-  var retry = fetchAllRows(misses, rocStart, rocEnd, meta);
+  // The retry is a second chance, run only while the crawl has time — and
+  // stopped by its budget without marking the crawl cut short (`spare`).
+  if (!crawlTimeSpent()) Utilities.sleep(1500);
+  var retry = crawlTimeSpent() ? {} : fetchAllRows(misses, rocStart, rocEnd, meta, true);
   for (var i = 0; i < misses.length; i++) {
     var root = misses[i];
     if (retry[root] && retry[root].length) out[root] = retry[root];
   }
+  // Out of time, an empty root that answered is out of season, as it is every
+  // time. One MOA never answered — a throttled batch — would be published
+  // as missing: that is a crawl cut short.
+  if (crawlTimeSpent() && misses.some(function (r) { return meta.unanswered[r]; })) crawlCutShort = true;
   return out;
 }
 
