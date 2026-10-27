@@ -12,13 +12,15 @@ forward the backend's queries to the one MOA endpoint:
 - MOA's answer and status pass through untouched; a timeout (50 s) or a failed
   connection is a `502`, which the backend reads as "not answered", as it would
   MOA itself.
-- Every answer the relay makes itself starts with `moa-relay: `. The backend
-  fails the refresh naming the relay when it sees one, a `404`, Google's
-  sign-in `403`, or no answer at all — `diag.last_refresh_fail` reads
-  `relay_refused` (wrong key), `relay_unusable` or `relay_unreachable` —
-  instead of reading it as MOA having no data. A `502` is the relay not
-  reaching MOA: asked on as MOA itself would be, and named (`relay_upstream`)
-  if nothing answers.
+- Every answer the relay makes itself starts with `moa-relay: `. Such an
+  answer (other than a `502`), or Google's sign-in `403`, means the relay is
+  set up wrong: the backend stops asking and fails the refresh naming it —
+  `diag.last_refresh_fail` reads `relay_refused` (wrong key) or
+  `relay_unusable`. Anything else (no answer, a tunnel's own status, a `502`
+  for the relay not reaching MOA) is treated as MOA's own trouble would be:
+  asking goes on, and only if nothing answered does the refresh name it
+  (`relay_unreachable`, `relay_http`, `relay_upstream`). The reasons are fixed
+  text and a status code — `diag` is public — with the detail in the log.
 
 The rule lives in `handler.mjs` and is tested in `frontend/relay.test.ts`;
 `server.mjs` turns a request into its answer whatever fails, and `main.mjs`

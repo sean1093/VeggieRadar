@@ -248,7 +248,9 @@ function liveRootCards(root, dates) {
   // Live cards come off the same `aggregateGroup` as the board's, so they
   // carry the guard's own `prev_volume` — which is neither cached nor served.
   var payload = { date: rocToISO(dates.latest), rows: todayRows.length, items: dropTransient(items) };
-  cache.put(cacheKey, JSON.stringify(payload), SEARCH_CACHE_TTL);
+  // Not an answer a relay set up wrong stopped short (`noteRelayAnswer`):
+  // cached, every visitor would get 「查無此品項」 for the hour after it is fixed.
+  if (!moaRelayFault) cache.put(cacheKey, JSON.stringify(payload), SEARCH_CACHE_TTL);
   return payload;
 }
 

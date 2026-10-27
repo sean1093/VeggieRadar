@@ -99,7 +99,8 @@ var moaRouteRead = false;
 var moaRouteCached = null;
 var moaRelayRefused = false;
 var moaRelayFault = null;
-var moaRelayUpstream = null; // the relay's last word on not reaching MOA (a 502)
+var moaRelaySymptom = null;   // the last thing short of a fault (`noteRelayAnswer`)
+var moaRelayAnswered = false; // whether any request through it was answered
 
 /**
  * Where MOA requests go: the relay in Taiwan when both `MOA_RELAY_URL` (an
@@ -149,29 +150,42 @@ function moaRequest(query) {
 }
 
 /**
- * Notes a relay that cannot serve, so the build fails saying so rather than
- * as "no trading data", and stops asking. The relay's own word: every answer
- * it makes starts with `moa-relay: ` (`relay/handler.mjs`) — a refused key is
- * a 401 with its own body. Besides it, only what cannot be MOA's: a 404 (the
- * relay answers its own; any other is a wrong URL) and Google's 403 for a
- * service deployed without `--allow-unauthenticated`. MOA's answers pass
- * through untouched and say nothing about the relay — a 403 from its
- * firewall included — and a 502, the relay not reaching MOA, is MOA not
- * answering, as it would be direct: kept to name it if nothing answers.
+ * What the relay's answers say about the relay — never about MOA, whose
+ * answers pass through it untouched.
+ *
+ * A FAULT is the relay's own word that it is set up wrong: every answer it
+ * makes starts with `moa-relay: ` (`relay/handler.mjs`), a refused key being a
+ * 401 with its own body; and Google's 403 for a service deployed without
+ * `--allow-unauthenticated`. Every request after would go the same way, so
+ * none goes out, and the build fails naming it.
+ *
+ * Anything else — a request that throws, a status that is not the relay's
+ * (a tunnel's 530, MOA's own 404), a 502 for the relay not reaching MOA — is
+ * a SYMPTOM, as it would be of MOA itself: asking goes on, and only if nothing
+ * answered at all does the build name it. One transient error costs a batch,
+ * never the run.
+ *
+ * Both reasons are fixed text and a status code: they reach the public
+ * `diag`, which must show neither the relay's URL nor a platform's message.
+ * The detail is logged.
  */
 function noteRelayAnswer(resp) {
   try {
     if (!moaRoute() || moaRelayFault) return resp;
     var code = resp.getResponseCode();
-    if (code === 200) return resp;
+    if (code === 200) {
+      moaRelayAnswered = true;
+      return resp;
+    }
     var body = String(resp.getContentText());
-    if (code === 502) {
-      moaRelayUpstream = body.substring(0, 120);
-    } else if (code === 401 && body.indexOf(MOA_RELAY_REFUSED_BODY) === 0) {
-      relayFault('MOA 中繼站拒絕連線：MOA_RELAY_KEY 與中繼站的 RELAY_KEY 不符');
-    } else if (body.indexOf(MOA_RELAY_OWN_PREFIX) === 0 || code === 404 ||
-        (code === 403 && body.indexOf('does not have permission') !== -1)) {
-      relayFault('MOA 中繼站無法使用（HTTP ' + code + '）：' + body.substring(0, 80));
+    if (code === 401 && body.indexOf(MOA_RELAY_REFUSED_BODY) === 0) {
+      relayFault('MOA 中繼站拒絕連線：MOA_RELAY_KEY 與中繼站的 RELAY_KEY 不符', body);
+    } else if (code !== 502 && body.indexOf(MOA_RELAY_OWN_PREFIX) === 0) {
+      relayFault('MOA 中繼站無法使用（HTTP ' + code + '）', body);
+    } else if (code === 403 && body.indexOf('does not have permission') !== -1) {
+      relayFault('MOA 中繼站無法使用（HTTP 403：需以 --allow-unauthenticated 部署）', body);
+    } else {
+      moaRelaySymptom = code === 502 ? 'MOA 中繼站連不到 MOA' : 'MOA 中繼站回應 HTTP ' + code;
     }
   } catch (err) {
     // A response without a code says nothing about the relay.
@@ -179,18 +193,25 @@ function noteRelayAnswer(resp) {
   return resp;
 }
 
-/**
- * A request to the relay that threw: it could not be reached at all — a
- * wrong host, a deleted service. MOA being slow is the relay's 502, never
- * this.
- */
+/** A request to the relay that threw: a symptom (see `noteRelayAnswer`). */
 function noteRelayThrow(err) {
-  if (moaRoute() && !moaRelayFault) relayFault('MOA 中繼站連不上：' + String(err && err.message || err).substring(0, 80));
+  if (!moaRoute() || moaRelayFault) return;
+  moaRelaySymptom = 'MOA 中繼站沒有回應';
+  Logger.log('relay: no answer: ' + err);
 }
 
-function relayFault(reason) {
+function relayFault(reason, detail) {
   moaRelayRefused = true;
   moaRelayFault = reason;
+  Logger.log('relay: ' + reason + ' — ' + String(detail).substring(0, 200));
+}
+
+/**
+ * Why the build found nothing, when the relay is why: a symptom no answer
+ * contradicted. Null when it answered at all, or is not in use.
+ */
+function relaySymptom() {
+  return moaRoute() && !moaRelayAnswered ? moaRelaySymptom : null;
 }
 
 /** Single-date URL when `rocEnd` is omitted; a closed range otherwise. */
