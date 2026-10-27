@@ -64,22 +64,36 @@ function boardAgeMs(board) {
 /**
  * Crawls the MOA API and assembles the board. Slow (many requests) — only ever
  * called from the time-driven trigger / manual setup, never from doGet.
+ *
+ * Within `CRAWL_BUDGET_MS`: an MOA that does not answer would otherwise run
+ * the execution into Apps Script's limit, which ends it with nothing
+ * recorded. A crawl the budget cut short is a failed build with that reason,
+ * never a board of whatever came back in time.
  */
 function buildBoard() {
-  var dates = resolveTradeDates(true);
-  if (!dates.latest) {
-    return {
-      type: 'board',
-      error: '近期查無交易資料',
-      generated_at: new Date().toISOString(),
-      count: 0,
-      items: []
-    };
+  crawlDeadline = Date.now() + CRAWL_BUDGET_MS;
+  crawlCutShort = false;
+  try {
+    return crawlBoard();
+  } finally {
+    crawlDeadline = null;
   }
+}
+
+/** A board that says why there is none. */
+function failedBoard(error) {
+  return { type: 'board', error: error, generated_at: new Date().toISOString(), count: 0, items: [] };
+}
+
+function crawlBoard() {
+  var cutShort = '向 MOA 抓取資料逾時（' + Math.round(CRAWL_BUDGET_MS / 1000) + ' 秒內未完成）：MOA 可能無法連線';
+  var dates = resolveTradeDates(true);
+  if (!dates.latest) return failedBoard(crawlCutShort ? cutShort : '近期查無交易資料');
 
   var roots = boardRoots();
   var today = fetchRootRows(roots, dates.latest);
   var prev = dates.prev ? fetchRootRows(roots, dates.prev) : {};
+  if (crawlCutShort) return failedBoard(cutShort);
 
   var items = boardCards(today, prev);
   applyBaselines(items, readHistory(), dates.latest);

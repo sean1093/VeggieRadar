@@ -6,6 +6,31 @@
 
 // --- MOA API access ---
 
+// While `buildBoard` crawls: the time past which no more requests go out
+// (ms since the epoch), else null; and whether that cut the crawl short.
+// Per execution, as every global is in Apps Script.
+var crawlDeadline = null;
+var crawlCutShort = false;
+
+/**
+ * Whether the crawl's budget (`CRAWL_BUDGET_MS`) is spent. Always false
+ * outside a crawl: the trend and search answer visitors, each within its own
+ * request.
+ */
+function crawlTimeSpent() {
+  return crawlDeadline !== null && Date.now() >= crawlDeadline;
+}
+
+/**
+ * …and, asked before a request the build needs, noting that it was cut, so
+ * the build can say why it came back short.
+ */
+function crawlOutOfTime() {
+  if (!crawlTimeSpent()) return false;
+  crawlCutShort = true;
+  return true;
+}
+
 /**
  * Fetches all rows for a crop-name term on a ROC date, or across a closed
  * date range when `rocEnd` is given. MOA matches the term anywhere inside
@@ -18,7 +43,7 @@ function fetchCrop(cropName, rocStart, rocEnd) {
 
 /** Like `fetchCrop`, with the whole `parsePage` verdict rather than the rows. */
 function fetchPage(cropName, rocStart, rocEnd) {
-  if (!cropName || !rocStart) return { rows: [], answered: false, next: false };
+  if (!cropName || !rocStart || crawlOutOfTime()) return { rows: [], answered: false, next: false };
   try {
     return parsePage(UrlFetchApp.fetch(cropUrl(cropName, rocStart, rocEnd), { muteHttpExceptions: true }));
   } catch (err) {
@@ -112,12 +137,16 @@ function parsePage(resp) {
  * @param {Object=} meta optional; `meta.truncated[root]` is set for every root
  *   MOA cut short and `meta.unanswered[root]` for every root it did not
  *   answer, each cleared again by a later call that answers it whole.
+ * @param {boolean=} spare a pass the build can do without (the retry): past
+ *   the crawl's budget it stops without marking the crawl cut short, and
+ *   its caller judges what that left out.
  * @returns {Object} map of root → rows[]
  */
-function fetchAllRows(cropNames, rocStart, rocEnd, meta) {
+function fetchAllRows(cropNames, rocStart, rocEnd, meta, spare) {
   var out = {};
   for (var start = 0; start < cropNames.length; start += FETCH_BATCH) {
     var slice = cropNames.slice(start, start + FETCH_BATCH);
+    if (spare ? crawlTimeSpent() : crawlOutOfTime()) break; // only a crawl has a deadline
     var requests = slice.map(function (name) {
       return { url: cropUrl(name, rocStart, rocEnd), muteHttpExceptions: true };
     });
@@ -130,8 +159,11 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta) {
       }
     } catch (err) {
       Logger.log('fetchAllRows batch error (' + rocStart + '): ' + err);
-      if (meta) {
-        for (var j = 0; j < slice.length; j++) notePage(meta, slice[j], { answered: false, next: false });
+      // Asked, and unanswered: a batch that threw is a throttle's silence by
+      // other means, and the crawl's budget tells asked from never asked.
+      for (var j = 0; j < slice.length; j++) {
+        out[slice[j]] = [];
+        if (meta) notePage(meta, slice[j], { answered: false, next: false });
       }
     }
     if (start + FETCH_BATCH < cropNames.length) Utilities.sleep(120);
@@ -166,15 +198,29 @@ function notePage(meta, root, page) {
  * end for the backfill path.
  */
 function fetchRootRows(roots, rocStart, rocEnd, meta) {
+  // What MOA answered, kept here when the caller keeps none: the crawl's
+  // budget needs to tell a root that answered "nothing traded" from one a
+  // throttle silenced.
+  meta = meta || { answered: {}, truncated: {}, unanswered: {} };
   var out = fetchAllRows(roots, rocStart, rocEnd, meta);
   var misses = roots.filter(function (r) { return !out[r] || !out[r].length; });
   if (!misses.length) return out;
 
-  Utilities.sleep(1500);
-  var retry = fetchAllRows(misses, rocStart, rocEnd, meta);
+  // The retry is a second chance, run only while the crawl has time — and
+  // stopped by its budget without marking the crawl cut short (`spare`).
+  if (!crawlTimeSpent()) Utilities.sleep(1500);
+  var retry = crawlTimeSpent() ? {} : fetchAllRows(misses, rocStart, rocEnd, meta, true);
   for (var i = 0; i < misses.length; i++) {
     var root = misses[i];
     if (retry[root] && retry[root].length) out[root] = retry[root];
+  }
+  // A root the retry did not get to ask — the budget stopped it, or it never
+  // started — is cut short only if MOA never answered it: an empty root that
+  // answered is out of season, as it is every time, while one a throttle
+  // silenced would be published as missing. A root the retry asked and MOA
+  // silenced again stays out, as it would with all the time in the world.
+  if (crawlTimeSpent() && misses.some(function (r) { return !(r in retry) && meta.unanswered[r]; })) {
+    crawlCutShort = true;
   }
   return out;
 }
@@ -285,7 +331,9 @@ function resolveTradeDates(fresh) {
   }
 
   var dates = { latest: latest, prev: prev };
-  cache.put(TRADE_DATES_CACHE_KEY, JSON.stringify(dates), TRADE_DATES_TTL);
+  // Nor a probe the crawl's budget cut short: the previous day it did not
+  // reach would be missing from every search for the cache's hour.
+  if (!crawlCutShort) cache.put(TRADE_DATES_CACHE_KEY, JSON.stringify(dates), TRADE_DATES_TTL);
   return dates;
 }
 

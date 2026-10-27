@@ -10,7 +10,7 @@
  *   - Closed markets (and today, before closing prices publish) come back as
  *     `CropName: "休市"` rows with zero price/quantity.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { BOARD_MIN_ITEMS, BOARD_HEALTHY_ITEMS, BoardResponseSchema } from './src/types/board.schema';
@@ -83,8 +83,11 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     if (new TextEncoder().encode(String(v)).length > 9 * 1024) throw new Error('Argument too large: value');
   };
 
+  let beforeFetch: ((urls: string[]) => void) | null = null;
+  const silenced = new Set<string>();
   const respond = (url: string, options?: Record<string, unknown>) => {
     fetches.push(url);
+    if (beforeFetch) beforeFetch([url]);
     if (url.indexOf('api.github.com') !== -1) {
       // UrlFetchApp throws on DNS and TLS failures whatever `muteHttpExceptions`
       // says, so a broken dispatch has to be reachable both ways.
@@ -93,6 +96,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
       return { getResponseCode: () => dispatchStatus, getContentText: () => '' };
     }
     const hit = Object.keys(responses).find((key) => url.includes(encodeURIComponent(key)));
+    if (hit && silenced.has(hit)) return { getResponseCode: () => 200, getContentText: () => '' }; // throttled
     const rows = hit ? responses[hit] : [];
     return {
       getResponseCode: () => 200,
@@ -170,7 +174,17 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     },
     UrlFetchApp: {
       fetch: (url: string, options?: Record<string, unknown>) => respond(url, options),
-      fetchAll: (reqs: { url: string }[]) => reqs.map((r) => respond(r.url)),
+      fetchAll: (reqs: { url: string }[]) => {
+        // One round trip for the batch, as UrlFetchApp's own is.
+        const hook = beforeFetch;
+        if (hook) hook(reqs.map((r) => r.url));
+        beforeFetch = null;
+        try {
+          return reqs.map((r) => respond(r.url));
+        } finally {
+          beforeFetch = hook;
+        }
+      },
     },
     CacheService: {
       getScriptCache: () => ({
@@ -286,7 +300,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'RETAIL_MARKUP_ROOT', 'RETAIL_MARKUP_CATEGORY', 'storeBoard', 'readDurableBoard',
     'readBoard', 'boardAgeMs', 'scheduleRefresh', 'refreshBoardCacheOnce', 'dropTriggers', 'handleWarm',
     'handleDiag', 'BOARD_MAX_AGE_MS', 'REFRESH_ONCE_FN',
-    'handleTrend', 'resolveTradeDates',
+    'handleTrend', 'resolveTradeDates', 'MAX_LOOKBACK_DAYS', 'CRAWL_BUDGET_MS', 'PROBE_ROOT',
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
     'applyBaselines', 'backfillHistory', 'backfillHistoryOnce', 'mergeCrawled', 'handleBackfill', 'buildBoard',
     'BASELINE_WINDOW', 'BASELINE_MIN_DAYS', 'varietyBreakdown', 'handleSearch', 'RETAIL_BAND_ROOT',
@@ -330,6 +344,10 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     breakRead: (key: string) => { brokenReadKey = key; },
     setSheetZone: (zone: string) => { sheetZone = zone; },
     breakTriggerDelete: () => { triggerDeleteThrows = true; },
+    /** Runs before every MOA round trip (once per `fetchAll` batch), e.g. to let time pass. */
+    onFetch: (fn: (urls: string[]) => void) => { beforeFetch = fn; },
+    /** MOA answers this root with an empty body, as a throttle does. */
+    silence: (root: string, on = true) => { if (on) silenced.add(root); else silenced.delete(root); },
     breakTriggerList: () => { triggerListThrows = true; },
     breakDispatch: () => { dispatchThrows = true; },
     rejectDispatch: (code: number) => { dispatchStatus = code; },
@@ -1426,6 +1444,208 @@ describe('handleSearch', () => {
     expect(fetches).toHaveLength(0);
   });
 });
+describe('an MOA that does not answer (the crawl budget)', () => {
+  afterEach(() => vi.useRealTimers());
+
+  /** UrlFetchApp as an unreachable host: each request times out after a minute. */
+  const unreachable = (calls: { n: number }) => {
+    const timeOut = () => {
+      calls.n += 1;
+      vi.setSystemTime(Date.now() + 60_000);
+      throw new Error('Timeout: https://data.moa.gov.tw/api/v1/AgriProductsTransType/');
+    };
+    return { UrlFetchApp: { fetch: timeOut, fetchAll: timeOut } };
+  };
+
+  it('stops asking within the budget, and fails the refresh with a reason the alerting carries', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const calls = { n: 0 };
+    const back = loadBackend({}, unreachable(calls));
+    const started = Date.now();
+
+    const board = back.api.refreshBoardCache();
+
+    // Inside Apps Script's six minutes, with the outcome written down: before
+    // this the probe ran into the limit and nothing was recorded at all.
+    expect(Date.now() - started).toBeLessThan(6 * 60_000);
+    expect(calls.n).toBeLessThan(back.api.MAX_LOOKBACK_DAYS);
+    expect(board.error).toMatch(/逾時/);
+    expect(back.props.get('veggie_last_refresh_fail')).toMatch(/MOA 可能無法連線/);
+    expect(back.props.get('veggie_alert_streak')).toBe('1');
+  });
+
+  it('opens the incident after a streak of them, as any failing refresh does', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back = loadBackend({}, unreachable({ n: 0 }));
+    for (let i = 0; i < back.api.ALERT_FAILURE_STREAK; i++) back.api.refreshBoardCache();
+    expect(back.api.handleDiag().alert.incident_open).toBe(true);
+  });
+
+  it('fails a crawl cut short after the dates, rather than publish what came back in time', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back = loadBackend(plausibleRows());
+    let batches = 0;
+    back.onFetch(() => {
+      // The date probe answers at once; the crawl's batches crawl.
+      if (back.fetches.length > 2) {
+        batches += 1;
+        vi.setSystemTime(Date.now() + 2 * 60_000);
+      }
+    });
+    const board = back.api.buildBoard();
+    expect(batches).toBeGreaterThan(0);
+    expect(board.items).toEqual([]); // not the cards that came back in time
+    expect(board.error).toMatch(/逾時/);
+  });
+
+  it('does not cache trading dates whose probe the budget cut short', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back = loadBackend(plausibleRows());
+    let probes = 0;
+    back.onFetch(() => {
+      probes += 1;
+      if (probes === 1) vi.setSystemTime(Date.now() + 4 * 60_000); // the latest day answers, then time is up
+    });
+    const board = back.api.buildBoard();
+    expect(board.error).toMatch(/逾時/);
+    expect(back.cache.has('veggie_trade_dates')).toBe(false); // search must not get a date pair without its previous day
+  });
+
+  it('keeps a board whose every root answered when only the retry of empty ones runs late', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    // Every root answers; the out-of-season ones answer empty, so a retry
+    // pass follows each day's — and the second day's main pass ends just past
+    // the budget, leaving only that retry for after it.
+    const back0 = loadBackend();
+    const roots: string[] = back0.api.boardRoots();
+    const [a, b] = roots.filter((r) => r !== back0.api.PROBE_ROOT);
+    const back = loadBackend(plausibleRowsWith({ [a]: [], [b]: [] })); // out of season
+    const last = encodeURIComponent(roots[roots.length - 1]);
+    const prevDay = back.api.resolveTradeDates(true).prev as string;
+    back.cache.clear();
+    let jumped = false;
+    back.onFetch((urls) => {
+      if (jumped || urls.length < 2) return; // the date probe asks one at a time
+      if (urls.some((u) => u.includes(last) && u.includes(prevDay))) {
+        jumped = true;
+        vi.setSystemTime(Date.now() + 4 * 60_000);
+      }
+    });
+    const board = back.api.buildBoard();
+    expect(jumped).toBe(true);
+    expect(board.error).toBeUndefined();
+    expect(board.count).toBeGreaterThan(0);
+  });
+
+  it('fails a crawl out of time with a root MOA never answered, rather than publish it missing', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back0 = loadBackend();
+    const roots: string[] = back0.api.boardRoots();
+    const throttled = roots.filter((r) => r !== back0.api.PROBE_ROOT)[0];
+    const back = loadBackend(plausibleRows());
+    const last = encodeURIComponent(roots[roots.length - 1]);
+    const prevDay = back.api.resolveTradeDates(true).prev as string;
+    back.cache.clear();
+    back.onFetch((urls) => {
+      if (urls.length < 2) return;
+      if (urls.some((u) => u.includes(prevDay))) back.silence(throttled); // the second day's pass is throttled…
+      if (urls.some((u) => u.includes(last) && u.includes(prevDay))) vi.setSystemTime(Date.now() + 4 * 60_000); // …and ends past the budget
+    });
+    const board = back.api.buildBoard();
+    expect(board.error).toMatch(/逾時/);
+  });
+
+  it('publishes as it would anyway when the retry asked every root, however late it came back', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back0 = loadBackend();
+    const roots: string[] = back0.api.boardRoots();
+    const throttled = roots.filter((r) => r !== back0.api.PROBE_ROOT)[0];
+    const back = loadBackend(plausibleRows());
+    const prevDay = back.api.resolveTradeDates(true).prev as string;
+    const asked = encodeURIComponent(throttled);
+    back.cache.clear();
+    let seen = 0;
+    back.onFetch((urls) => {
+      if (urls.length < 1 || !urls.some((u) => u.includes(prevDay))) return;
+      back.silence(throttled); // silenced on the second day, retry included
+      if (urls.some((u) => u.includes(asked)) && ++seen === 2) vi.setSystemTime(Date.now() + 4 * 60_000); // the retry returns late
+    });
+    const board = back.api.buildBoard();
+    expect(seen).toBe(2);
+    expect(board.error).toBeUndefined(); // the same board as with time to spare: that root without its day
+  });
+
+  it('counts a retry batch that threw as asked, as an empty one is', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back0 = loadBackend();
+    const roots: string[] = back0.api.boardRoots();
+    const throttled = roots.filter((r) => r !== back0.api.PROBE_ROOT)[0];
+    const asked = encodeURIComponent(throttled);
+    const back = loadBackend(plausibleRows());
+    const prevDay = back.api.resolveTradeDates(true).prev as string;
+    back.cache.clear();
+    let seen = 0;
+    back.onFetch((urls) => {
+      if (urls.length < 1 || !urls.some((u) => u.includes(prevDay))) return;
+      back.silence(throttled); // throttled in the second day's pass…
+      if (urls.some((u) => u.includes(asked)) && ++seen === 2) {
+        vi.setSystemTime(Date.now() + 4 * 60_000); // …and its retry batch throws, late
+        throw new Error('Timeout: https://data.moa.gov.tw/');
+      }
+    });
+    const board = back.api.buildBoard();
+    expect(seen).toBe(2);
+    expect(board.error).toBeUndefined(); // as with an empty answer: that root without its day
+  });
+
+  it('keeps the board when the retry of out-of-season roots crosses the budget between its batches', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back0 = loadBackend();
+    const roots: string[] = back0.api.boardRoots();
+    const empty = roots.filter((r) => r !== back0.api.PROBE_ROOT).slice(0, 20); // two retry batches' worth
+    const back = loadBackend(plausibleRowsWith(Object.fromEntries(empty.map((r) => [r, []]))));
+    const prevDay = back.api.resolveTradeDates(true).prev as string;
+    const retried = encodeURIComponent(empty[0]);
+    back.cache.clear();
+    let seen = 0;
+    let jumped = false;
+    back.onFetch((urls) => {
+      if (urls.length < 2 || jumped) return;
+      if (urls.some((u) => u.includes(retried) && u.includes(prevDay)) && ++seen === 2) {
+        jumped = true; // the retry's first batch returns past the budget
+        vi.setSystemTime(Date.now() + 4 * 60_000);
+      }
+    });
+    const board = back.api.buildBoard();
+    expect(jumped).toBe(true);
+    expect(board.error).toBeUndefined();
+    expect(board.count).toBeGreaterThan(0);
+  });
+
+  it('starts each build with a fresh budget, so one cut short does not fail the next', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back = loadBackend(plausibleRows());
+    back.onFetch(() => vi.setSystemTime(Date.now() + 2 * 60_000));
+    expect(back.api.buildBoard().error).toMatch(/逾時/);
+    back.onFetch(() => {}); // MOA answers again
+    back.cache.clear();
+    const board = back.api.buildBoard();
+    expect(board.error).toBeUndefined();
+    expect(board.count).toBeGreaterThan(0);
+  });
+
+  it('leaves the trend and search, which answer visitors, without a deadline', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const back = loadBackend(plausibleRows());
+    back.api.buildBoard(); // a crawl came and went
+    vi.setSystemTime(Date.now() + 60 * 60_000);
+    back.cache.clear(); // nothing served from the crawl's cache
+    const before = back.fetches.length;
+    back.api.handleSearch({ query: '高麗菜' });
+    expect(back.fetches.length).toBeGreaterThan(before); // it still asks MOA
+  });
+});
+
 /**
  * Alerting is the only part of the pipeline whose failure is invisible: if the
  * mail never arrives, nobody learns the app is stale. These lock down when it

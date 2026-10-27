@@ -731,6 +731,19 @@ emailed to the maintainer instead, each once per 24 h incident window:
 | **Failure streak** | 3 consecutive refreshes that yield no board | One failure is routine (MOA throttles a batch) and self-heals; alerting on it would train the recipient to ignore the mail |
 | **Silence** | Served board older than 12 h | A deleted or broken trigger produces *no* failures to count. Nothing is running to notice, so the serving path raises this one |
 
+A refresh Apps Script kills at its six-minute limit is neither: it records
+nothing at all, so there is no failure to count. That is what an MOA that
+does not answer used to cause — each request waits about a minute before it
+times out, and the trading-date probe alone asks up to sixteen times. So the
+crawl has its own budget (`CRAWL_BUDGET_MS`, 3 min, far above a healthy
+crawl's): past it no more MOA requests go out, and the build fails as
+「向 MOA 抓取資料逾時…MOA 可能無法連線」 — a failure like any other, counted
+toward the streak. A crawl cut short publishes nothing, never the cards that
+came back in time. The retry of roots that came back empty is the one pass
+the budget may end without failing the build — out-of-season roots are empty
+every time — unless a root among them was never answered at all (a throttled
+batch), which would be published as missing.
+
 A recovering refresh closes the incident with one 「已恢復正常」 mail, so an
 alert always has a matching all-clear — and the mail is sent **before** the
 state is cleared, because clearing first would close the incident even when the
