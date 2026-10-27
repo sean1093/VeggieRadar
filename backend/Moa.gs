@@ -92,10 +92,12 @@ function wholeDaysOf(page) {
 }
 
 // The route MOA requests take, read once per execution (`moaRoute`); and
-// whether the relay refused the key, so the build can say so.
+// what is wrong with the relay, once it has said — so the build can say so,
+// and no request goes out after.
 var moaRouteRead = false;
 var moaRouteCached = null;
 var moaRelayRefused = false;
+var moaRelayFault = null;
 
 /**
  * Where MOA requests go: the relay in Taiwan when both `MOA_RELAY_URL` (an
@@ -145,19 +147,28 @@ function moaRequest(query) {
 }
 
 /**
- * Notes a relay that refused the key: its 401 is not MOA's silence, and a
- * crawl of them would otherwise read as "no trading data". Its own refusal
- * only (`relay/handler.mjs`'s REFUSED_BODY): a 401 MOA sent passes through it
- * like any other answer, and says nothing about the key.
+ * Notes a relay that cannot serve, so the build fails saying so rather than
+ * as "no trading data", and stops asking. Only the relay's own word counts
+ * (`relay/handler.mjs` starts every answer it makes with `moa-relay: `), and
+ * Google's 403 for a service deployed without `--allow-unauthenticated`;
+ * MOA's answers pass through the relay untouched and say nothing about it.
+ * A timeout reaching MOA (502) is MOA not answering, as it would be direct.
  */
 function noteRelayAnswer(resp) {
   try {
-    if (moaRoute() && resp.getResponseCode() === 401 &&
-        String(resp.getContentText()).indexOf(MOA_RELAY_REFUSED_BODY) === 0) {
+    if (!moaRoute() || moaRelayFault) return resp;
+    var code = resp.getResponseCode();
+    if (code === 200 || code === 502) return resp;
+    var body = String(resp.getContentText());
+    if (code === 401 && body.indexOf(MOA_RELAY_REFUSED_BODY) === 0) {
       moaRelayRefused = true;
+      moaRelayFault = 'MOA 中繼站拒絕連線：MOA_RELAY_KEY 與中繼站的 RELAY_KEY 不符';
+    } else if (body.indexOf(MOA_RELAY_OWN_PREFIX) === 0 || code === 403) {
+      moaRelayRefused = true;
+      moaRelayFault = 'MOA 中繼站無法使用（HTTP ' + code + '）：' + body.substring(0, 80);
     }
   } catch (err) {
-    // A response without a code says nothing about the key.
+    // A response without a code says nothing about the relay.
   }
   return resp;
 }

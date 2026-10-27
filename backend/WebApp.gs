@@ -255,6 +255,9 @@ function redactFailure(value) {
   if (reason.indexOf('近期查無交易資料') !== -1) category = 'no_trade_dates';
   else if (reason.indexOf('empty board') !== -1) category = 'empty_board';
   else if (reason.indexOf('implausible:') === 0) category = 'implausible';
+  else if (reason.indexOf('MOA 中繼站拒絕連線') === 0) category = 'relay_refused';
+  else if (reason.indexOf('MOA 中繼站無法使用') === 0) category = 'relay_unusable';
+  else if (reason.indexOf('向 MOA 抓取資料逾時') === 0) category = 'moa_timeout';
   return at + ' ' + category;
 }
 

@@ -8,9 +8,9 @@ import { handle } from './handler.mjs';
 export async function serve(req, res, handleImpl = handle) {
   let out;
   try {
-    out = await handleImpl({ method: req.method, url: req.url, headers: req.headers }, { key: process.env.RELAY_KEY });
+    out = await handleImpl({ method: req.method, url: req.url, headers: req.headers }, { key: (process.env.RELAY_KEY || '').trim() });
   } catch (err) {
-    out = { status: 500, contentType: 'text/plain; charset=utf-8', body: 'relay error' };
+    out = { status: 500, contentType: 'text/plain; charset=utf-8', body: 'moa-relay: error' };
     console.error('relay:', err);
   }
   try {
@@ -20,7 +20,7 @@ export async function serve(req, res, handleImpl = handle) {
     console.error('relay: answer not sent:', err); // e.g. a header value Node refuses
     if (!res.headersSent) {
       res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-      res.end('upstream: unusable answer');
+      res.end('moa-relay: upstream answer unusable');
     } else {
       res.destroy();
     }

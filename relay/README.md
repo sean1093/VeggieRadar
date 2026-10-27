@@ -6,11 +6,15 @@ is a few dozen lines of Node with no dependencies that run in Taiwan and
 forward the backend's queries to the one MOA endpoint:
 
 - **Only** `GET /?CropName=…&Start_time=…&End_time=…` (MOA's own parameters;
-  anything else is refused), so it is no open proxy.
+  anything else is refused), so it is no open proxy. Mounted under a prefix
+  (`https://tunnel.example/moa/`), the path is that prefix.
 - **Only** for a caller sending the key in `X-Relay-Key`.
 - MOA's answer and status pass through untouched; a timeout (50 s) or a failed
   connection is a `502`, which the backend reads as "not answered", as it would
   MOA itself.
+- Every answer the relay makes itself starts with `moa-relay: `; the backend
+  fails the refresh naming the relay when it sees one (or Google's `403`),
+  instead of reading it as MOA having no data.
 
 The rule lives in `handler.mjs` and is tested in `frontend/relay.test.ts`;
 `server.mjs` turns a request into its answer whatever fails, and `main.mjs`

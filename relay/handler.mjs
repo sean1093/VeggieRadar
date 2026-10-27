@@ -22,7 +22,14 @@ export const UPSTREAM_TIMEOUT_MS = 50_000;
  */
 export const REFUSED_BODY = 'moa-relay: unauthorized';
 
-const text = (status, body) => ({ status, contentType: 'text/plain; charset=utf-8', body });
+/**
+ * Every answer the relay makes itself starts so — a refusal, a bad request,
+ * an unconfigured key — so the backend can tell the relay's word from MOA's,
+ * which passes through untouched.
+ */
+export const OWN_PREFIX = 'moa-relay: ';
+
+const text = (status, body) => ({ status, contentType: 'text/plain; charset=utf-8', body: body.startsWith(OWN_PREFIX) ? body : OWN_PREFIX + body });
 
 function sameKey(given, expected) {
   const a = Buffer.from(String(given ?? ''));
@@ -45,7 +52,9 @@ export async function handle(req, { key, fetchImpl = fetch, timeoutMs = UPSTREAM
   } catch {
     return text(400, 'bad request target'); // e.g. `GET http://[` — never a crash
   }
-  if (url.pathname !== '/') return text(404, 'not found');
+  // `/`, or a prefix a tunnel mounts it under (`/moa/`): the backend always
+  // asks for the URL it was given plus `/?…`.
+  if (!url.pathname.endsWith('/')) return text(404, 'not found');
   if (!sameKey(req.headers['x-relay-key'], key)) return text(401, REFUSED_BODY);
 
   const query = new URLSearchParams();

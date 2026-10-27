@@ -7,7 +7,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 // @ts-expect-error — a plain ES module outside the app, with no types
-import { handle, MOA_ENDPOINT, REFUSED_BODY } from '../relay/handler.mjs';
+import { handle, MOA_ENDPOINT, REFUSED_BODY, OWN_PREFIX } from '../relay/handler.mjs';
 // @ts-expect-error — the same
 import { serve } from '../relay/server.mjs';
 
@@ -50,6 +50,25 @@ describe('MOA relay', () => {
     }
     expect(upstream.asked).toEqual([]);
     expect((await call(QUERY, {}, 'GET', upstream.fetchImpl)).body).toBe(REFUSED_BODY); // what the backend tells from MOA's own 401
+  });
+
+  it('serves under a prefix a tunnel mounts it at', async () => {
+    const upstream = moa();
+    expect((await call(`/moa${QUERY}`, undefined, 'GET', upstream.fetchImpl)).status).toBe(200);
+    expect(upstream.asked).toHaveLength(1);
+  });
+
+  it('starts every answer of its own with its prefix, so the backend can tell it from MOA', async () => {
+    const outs: Out[] = [
+      await call(QUERY, {}),
+      await call('/nope', undefined),
+      await call(`${QUERY}&x=1`),
+      await call(QUERY, undefined, 'POST'),
+      await handle({ method: 'GET', url: QUERY, headers: {} }, { key: undefined }),
+    ];
+    for (const out of outs) expect(out.body.startsWith(OWN_PREFIX)).toBe(true);
+    const config = readFileSync(resolve(__dirname, '../backend/Config.gs'), 'utf8');
+    expect(config).toContain(`var MOA_RELAY_OWN_PREFIX = '${OWN_PREFIX}';`);
   });
 
   it('refuses with the body the backend looks for', () => {
@@ -106,6 +125,21 @@ describe('MOA relay server', () => {
     return res;
   };
   const req = { method: 'GET', url: QUERY, headers: {} };
+
+  it('compares the key as configured less surrounding whitespace, as the backend sends it', async () => {
+    const before = process.env.RELAY_KEY;
+    process.env.RELAY_KEY = `${KEY}\n`; // a secret saved with `echo`
+    try {
+      let given: string | undefined;
+      await serve(req, response(), async (_r: unknown, opts: { key: string }) => {
+        given = opts.key;
+        return { status: 200, contentType: 'text/plain', body: '' };
+      });
+      expect(given).toBe(KEY);
+    } finally {
+      process.env.RELAY_KEY = before;
+    }
+  });
 
   it('answers 500 when handling throws, rather than end the process', async () => {
     const res = response();

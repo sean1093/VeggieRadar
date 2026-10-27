@@ -1566,6 +1566,42 @@ describe('the MOA relay in Taiwan (#103)', () => {
     expect(asked).toBe(1); // not every day of the probe, nor a crawl after it
   });
 
+  it('names the relay when it cannot serve, rather than blame MOA, and stops asking', () => {
+    const cases: [number, string, RegExp][] = [
+      [404, 'moa-relay: not found', /中繼站無法使用（HTTP 404）/],
+      [500, 'moa-relay: relay not configured: set RELAY_KEY', /中繼站無法使用（HTTP 500）/],
+      [403, '<html>Error: Forbidden</html>', /中繼站無法使用（HTTP 403）/], // deployed without --allow-unauthenticated
+    ];
+    for (const [code, body, reason] of cases) {
+      let asked = 0;
+      const answer = () => { asked += 1; return { getResponseCode: () => code, getContentText: () => body }; };
+      const back = loadBackend(plausibleRows(), { UrlFetchApp: { fetch: answer, fetchAll: (reqs: unknown[]) => reqs.map(answer) } });
+      back.props.set('MOA_RELAY_URL', RELAY);
+      back.props.set('MOA_RELAY_KEY', KEY);
+      back.api.refreshBoardCache();
+      expect(back.props.get('veggie_last_refresh_fail')).toMatch(reason);
+      expect(asked).toBe(1);
+      expect(back.api.handleDiag().last_refresh_fail).toMatch(/relay_unusable$/);
+    }
+  });
+
+  it('reads MOA not answering the relay (502) as MOA not answering, not as a broken relay', () => {
+    const answer = () => ({ getResponseCode: () => 502, getContentText: () => 'moa-relay: upstream: timeout' });
+    const back = loadBackend(plausibleRows(), { UrlFetchApp: { fetch: answer, fetchAll: (reqs: unknown[]) => reqs.map(answer) } });
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    expect(back.api.buildBoard().error).toBe('近期查無交易資料');
+  });
+
+  it('names the refused key in the public diag too, as a category', () => {
+    const refused = () => ({ getResponseCode: () => 401, getContentText: () => 'moa-relay: unauthorized' });
+    const back = loadBackend(plausibleRows(), { UrlFetchApp: { fetch: refused, fetchAll: (reqs: unknown[]) => reqs.map(refused) } });
+    back.props.set('MOA_RELAY_URL', RELAY);
+    back.props.set('MOA_RELAY_KEY', KEY);
+    back.api.refreshBoardCache();
+    expect(back.api.handleDiag().last_refresh_fail).toMatch(/ relay_refused$/);
+  });
+
   it('does not blame the key for a 401 MOA itself sent through the relay', () => {
     const fromMoa = () => ({ getResponseCode: () => 401, getContentText: () => '{"message":"Unauthorized"}' });
     const back = loadBackend(plausibleRows(), {
@@ -1626,6 +1662,7 @@ describe('an MOA that does not answer (the crawl budget)', () => {
     expect(board.error).toMatch(/逾時/);
     expect(back.props.get('veggie_last_refresh_fail')).toMatch(/MOA 可能無法連線/);
     expect(back.props.get('veggie_alert_streak')).toBe('1');
+    expect(back.api.handleDiag().last_refresh_fail).toMatch(/ moa_timeout$/); // the public category
   });
 
   it('opens the incident after a streak of them, as any failing refresh does', () => {
