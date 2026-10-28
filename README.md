@@ -737,6 +737,10 @@ script properties set, every MOA request — the crawl's, and the trend's and
 search's — goes through `relay/`, a small keyed forwarder running in Taiwan
 (Cloud Run, `asia-east1`); `relay/README.md` has the deploy. Unset, requests
 go to MOA directly, and `diag.moa_relay` says which.
+Without a relay, the board can be refreshed by hand from any machine in
+Taiwan: `tools/push-board` runs the backend's own crawl there and POSTs the
+rows to `?action=push`, where a normal refresh — guard, store, archive,
+mirror — runs on them. Nothing to host; see `tools/push-board/README.md`.
 
 A refresh Apps Script kills at its six-minute limit is neither: it records
 nothing at all, so there is no failure to count. That is what an MOA that
@@ -967,12 +971,20 @@ GET {WEB_APP_URL}/exec?action=diag[&token=…]
 
 GET {WEB_APP_URL}/exec?action=alerttest&token=…
 → { "type": "alerttest", "sent": true, "message": "已寄出測試信" }
+
+POST {WEB_APP_URL}/exec?action=push&token=…      body: { "dates": { "latest": "115.10.27", "prev": "115.10.26" },
+                                                         "today": { "甘藍": [ …MOA rows… ], … }, "prev": { … } }
+→ { "type": "push", "stored": true, "reasons": [], "roc_date": "115.10.27", "count": 97, "generated_at": "…" }
+→ { "type": "push", "stored": false, "message": "dates.latest must be a ROC date like 115.10.27" }   # not a crawl
 ```
 `warm` and `backfill` both queue their crawl in a one-off trigger and answer at
 once — the crawls take minutes and would blow the Web App response window.
 `backfill` is idempotent per trading date, so re-running only fills gaps; with
 `sheet=1` it backfills the long-term archive instead (§2), and `diag` publishes
-that job's progress but never its `last_error`, which is platform text. `diag`
+that job's progress but never its `last_error`, which is platform text.
+`push` is the one POST: a crawl made in Taiwan by `tools/push-board` (MOA
+refuses Apps Script's servers, #103), refreshed on as if the backend had
+fetched it. `diag`
 is how you tell "markets closed" from "refresh pipeline dead" without the GAS
 console, and how you confirm history coverage after a backfill.
 
@@ -984,7 +996,7 @@ text that could quote something we would rather not publish.
 | --- | --- | --- |
 | `board`, `search`, `getTrend` | ✅ | — |
 | `warm` | ✅ (`force` ignored, `forced: false`) | ✅ `force` honoured |
-| `backfill`, `alerttest` | ❌ `unauthorized` | ✅ |
+| `backfill`, `alerttest`, `push` | ❌ `unauthorized` | ✅ |
 | `diag` | ✅ failure reason as a category | ✅ raw failure reason |
 
 `token` must equal the `ADMIN_TOKEN` script property; see §2 and §7.

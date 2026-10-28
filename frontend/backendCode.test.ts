@@ -12,8 +12,14 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { createServer } from 'node:http';
 import { resolve } from 'node:path';
 import { BOARD_MIN_ITEMS, BOARD_HEALTHY_ITEMS, BoardResponseSchema } from './src/types/board.schema';
+// @ts-expect-error — plain ES modules outside the app, with no types
+import { loadBackend as loadPushTool } from '../tools/push-board/backend.mjs';
+// @ts-expect-error — the same
+import { crawl as pushCrawl } from '../tools/push-board/crawl.mjs';
 
 type Row = {
   CropName: string;
@@ -320,7 +326,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'refreshYearAgo', 'keptYearAgo', 'applyYearOverYear', 'YOY_PROP', 'YOY_SOON_MS', 'YOY_KEEP_MS',
     'refreshVarietyBaselines', 'keptVarietyBaselines', 'applyVarietyBaselines',
     'GH_DISPATCH_MIN_INTERVAL_MS', 'GH_DISPATCH_FAIL_BACKOFF_MS', 'GH_DISPATCH_PROP', 'GH_DISPATCH_OK_PROP',
-    'validateBoard', 'markSuspects', 'readChunkedProp', 'writeChunkedProp', 'VARIETY_BASE_PREFIX', 'VARIETY_BASE_COUNT',
+    'validateBoard', 'markSuspects', 'readChunkedProp', 'writeChunkedProp', 'doPost', 'handlePush', 'parsePushedCrawl', 'VARIETY_BASE_PREFIX', 'VARIETY_BASE_COUNT',
     'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
     'normalizeQuery', 'searchTerms', 'catalogRoots', 'withinOneEdit', 'CROP_CATALOG', 'SEARCH_ALIASES',
     'catalogUsable', 'CROP_CATALOG_CRAWLED_AT', 'CATALOG_MAX_AGE_DAYS', 'defsForRoot',
@@ -1504,6 +1510,245 @@ describe('handleSearch', () => {
     expect(fetches).toHaveLength(0);
   });
 });
+describe('a crawl pushed from Taiwan (#103)', () => {
+  const TOKEN = 't'.repeat(64);
+  /** MOA as seen from Taiwan: every board root trading, as `plausibleRows` has it. */
+  const moaFromTaiwan = (rows: Record<string, Row[]>) => {
+    let asked = 0;
+    const get = (url: string) => {
+      asked += 1;
+      const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+      return { status: 200, body: JSON.stringify({ RS: 'OK', Data: rows[root] || [] }) };
+    };
+    return { get, asked: () => asked };
+  };
+  const tool = (get: (url: string) => { status: number; body: string }) =>
+    loadPushTool((urls: string[]) => urls.map(get));
+  const pushed = () => {
+    const moa = moaFromTaiwan(plausibleRows());
+    const { payload, unanswered } = pushCrawl(tool(moa.get));
+    return { payload, unanswered, asked: moa.asked() };
+  };
+  const post = (back: ReturnType<typeof loadBackend>, body: string, token = TOKEN) =>
+    JSON.parse(back.api.doPost({ parameter: { action: 'push', token }, postData: { contents: body } }).body);
+
+  it('crawls with the backend\'s own code, there, and the backend stores the board from it', () => {
+    const { payload, unanswered, asked } = pushed();
+    expect(asked).toBeGreaterThan(0);
+    expect(unanswered).toEqual({ latest: [], prev: [] });
+    const back = loadBackend({}); // MOA unreachable from here: it must not be asked
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const out = post(back, JSON.stringify(payload));
+    expect(out).toMatchObject({ type: 'push', stored: true, roc_date: payload.dates.latest });
+    expect(out.count).toBeGreaterThanOrEqual(back.api.BOARD_MIN_ITEMS);
+    expect(back.fetches.filter((u) => u.includes('CropName='))).toEqual([]);
+    const board = back.api.readBoard();
+    expect(board.roc_date).toBe(payload.dates.latest);
+    expect(BoardResponseSchema.safeParse(board).success).toBe(true);
+    expect(back.props.get('veggie_last_refresh_ok')).toContain(payload.dates.latest);
+    // The pushed rows were that one push's: the next refresh asks MOA again.
+    back.api.refreshBoardCache();
+    expect(back.fetches.filter((u) => u.includes('CropName=')).length).toBeGreaterThan(0);
+  });
+
+  it('refuses without the operator token, and changes nothing', () => {
+    const { payload } = pushed();
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    expect(post(back, JSON.stringify(payload), 'wrong')).toMatchObject({ error: 'unauthorized' });
+    expect(back.props.has('veggie_last_refresh_ok')).toBe(false);
+  });
+
+  it('refuses a body that is not a crawl, whole', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    const bad: [string, RegExp][] = [
+      ['', /empty/],
+      ['{nope', /JSON/],
+      [JSON.stringify({ ...payload, dates: { latest: '2026-10-27', prev: null } }), /ROC/],
+      [JSON.stringify({ ...payload, dates: { latest: payload.dates.latest, prev: payload.dates.latest } }), /earlier/],
+      [JSON.stringify({ ...payload, dates: { latest: '199.01.01', prev: null } }), /future/],
+      [JSON.stringify({ ...payload, dates: { latest: back.api.dateToROC(new Date(Date.now() + 86400000)), prev: null } }), /future/],
+      [JSON.stringify({ ...payload, dates: { latest: [payload.dates.latest], prev: null } }), /ROC/],
+      [JSON.stringify({ ...payload, dates: { latest: payload.dates.latest, prev: [payload.dates.prev] } }), /earlier/],
+      [JSON.stringify({ ...payload, dates: { latest: '114.13.40', prev: null } }), /ROC/],
+      [JSON.stringify({ ...payload, dates: { latest: payload.dates.latest, prev: '114.02.30' } }), /earlier/],
+      [JSON.stringify({ ...payload, today: [] }), /today/],
+      [JSON.stringify({ ...payload, today: {} }), /no rows/],
+      [JSON.stringify({ ...payload, today: { 不是看板的作物: [{ Avg_Price: 1 }] } }), /no rows/],
+      [JSON.stringify({ ...payload, today: Object.fromEntries(Object.keys(payload.today).map((r) => [r, [{ CropName: '休市' }]])) }), /no rows/],
+      [JSON.stringify({ ...payload, today: Object.fromEntries(Object.entries(payload.today).map(([r, rows]) =>
+        [r, (rows as Row[]).map((x) => ({ ...x, CropName: 123 }))])) }), /no rows/],
+    ];
+    for (const [body, why] of bad) {
+      const out = post(back, body);
+      expect(out.stored).toBe(false);
+      expect(out.message).toMatch(why);
+    }
+    expect(back.props.has('veggie_last_refresh_ok')).toBe(false);
+    expect(back.props.has('veggie_last_validation')).toBe(false); // refused, not a failed refresh
+  });
+
+  it('refuses a second push while the first is being stored, and takes one after', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    let during: unknown;
+    const set = back.props.set.bind(back.props);
+    back.props.set = (k: string, v: string) => {
+      // The operator re-runs the tool while the first push's refresh stores.
+      if (k === 'veggie_last_validation' && during === undefined) during = post(back, JSON.stringify(payload));
+      return set(k, v);
+    };
+    expect(post(back, JSON.stringify(payload))).toMatchObject({ stored: true });
+    expect(during).toMatchObject({ stored: false, busy: true });
+    expect(post(back, JSON.stringify(payload))).toMatchObject({ stored: true });
+  });
+
+  it('keeps only the board\'s roots and each row\'s plain values', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    const root = Object.keys(payload.today)[0];
+    payload.today['不是看板的作物'] = [{ CropName: 'x', Avg_Price: 1 }];
+    payload.today[root] = payload.today[root].map((r: Record<string, unknown>) => ({ ...r, nested: { a: 1 } }));
+    const crawl = back.api.parsePushedCrawl(JSON.stringify(payload));
+    expect(crawl.today).not.toHaveProperty('不是看板的作物');
+    expect(crawl.today[root].every((r: Record<string, unknown>) => !('nested' in r))).toBe(true);
+    // A row of another day is not this day's.
+    const dated = JSON.parse(JSON.stringify(payload));
+    dated.today[root] = [
+      { ...dated.today[root][0], TransDate: payload.dates.latest, Avg_Price: 1 },
+      { ...dated.today[root][0], TransDate: payload.dates.prev, Avg_Price: 2 },
+    ];
+    expect(back.api.parsePushedCrawl(JSON.stringify(dated)).today[root].map((r: Row) => r.Avg_Price)).toEqual([1]);
+    // Names every object has are not board roots, nor a way to its prototype.
+    const inherited = JSON.stringify(payload).replace('"today":{', '"today":{"__proto__":[{"a":1}],"constructor":[{"a":1}],');
+    const kept = back.api.parsePushedCrawl(inherited).today;
+    expect(Object.getPrototypeOf(kept)).toBe(Object.prototype);
+    expect(Object.prototype.hasOwnProperty.call(kept, 'constructor')).toBe(false);
+  });
+
+  it('does not replace the board on air with an older trading day', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    expect(post(back, JSON.stringify(payload))).toMatchObject({ stored: true });
+    const older = { ...payload, dates: { latest: payload.dates.prev, prev: null }, today: payload.prev, prev: {} };
+    const out = post(back, JSON.stringify(older));
+    expect(out.stored).toBe(false);
+    expect(out.reasons.join(' ')).toMatch(/older than the stored/);
+    expect(back.api.readBoard().roc_date).toBe(payload.dates.latest);
+  });
+
+  it('says it was not stored when the durable store would not take the board', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    back.breakProp('veggie_board_v2_chunks');
+    const out = post(back, JSON.stringify(payload));
+    expect(out.stored).toBe(false);
+    expect(out.reasons.join(' ')).toMatch(/could not be written/);
+  });
+
+  it('says what came of its own refresh, whatever another wrote alongside', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    // A scheduled refresh abroad fails just after this one stores its board.
+    const set = back.props.set.bind(back.props);
+    back.props.set = (k: string, v: string) => {
+      set(k, v);
+      if (k === 'veggie_last_validation') set(k, JSON.stringify({ ok: false, reasons: ['近期查無交易資料'] }));
+      return back.props;
+    };
+    expect(post(back, JSON.stringify(payload))).toMatchObject({ stored: true, reasons: [] });
+  });
+
+  it('crawls under a budget of its own: past the backend\'s, and still ending', () => {
+    const rows = plausibleRows();
+    const real = Date.now;
+    const crawlTaking = (perBatchMs: number) => {
+      let skew = 0;
+      Date.now = () => real() + skew;
+      try {
+        return pushCrawl(loadPushTool((urls: string[]) => {
+          skew += perBatchMs; // a slow MOA, or a slow line
+          return urls.map((url) => {
+            const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+            return { status: 200, body: JSON.stringify({ RS: 'OK', Data: rows[root] || [] }) };
+          });
+        }));
+      } finally {
+        Date.now = real;
+      }
+    };
+    const slow = crawlTaking(15 * 1000);
+    expect(slow.error).toBeNull(); // several minutes: too long for Apps Script, not for here
+    expect(slow.payload.today).toEqual(pushed().payload.today);
+    const stalled = crawlTaking(60 * 1000);
+    expect(stalled.payload).toBeNull();
+    expect(stalled.error).toMatch(/600 秒內未完成/);
+  });
+
+  it('lists, per day, the roots MOA did not answer', () => {
+    const rows = plausibleRows();
+    const { payload } = pushed();
+    // Not the probe's root: silencing that would move the previous trading date.
+    const root = Object.keys(payload.today).find((r) => r !== loadBackend().api.PROBE_ROOT)!;
+    const out = pushCrawl(tool((url) => {
+      const asked = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+      if (asked === root && decodeURIComponent(url).includes(payload.dates.prev)) return { status: 0, body: '' };
+      return { status: 200, body: JSON.stringify({ RS: 'OK', Data: rows[asked] || [] }) };
+    }));
+    expect(out.unanswered).toEqual({ latest: [], prev: [root] });
+  });
+
+  it('fails like a refresh when the rows are implausible, and stores nothing', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    const thin = { ...payload, today: Object.fromEntries(Object.entries(payload.today).slice(0, 3)) };
+    const out = post(back, JSON.stringify(thin));
+    expect(out.stored).toBe(false);
+    expect(out.reasons.join(' ')).toMatch(/floor|empty/);
+  });
+
+  it('fetches a batch at once, in order, any failure a status 0', async () => {
+    const server = createServer((req, res) => {
+      setTimeout(() => {
+        res.writeHead(req.url!.includes('bad') ? 500 : 200);
+        res.end(`甘藍 ${decodeURIComponent(req.url!)}`);
+      }, 1000);
+    });
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const urls = [`${base}/?CropName=${encodeURIComponent('甘藍')}`, `${base}/bad`, 'http://127.0.0.1:1/', `${base}/last`];
+    const started = Date.now();
+    const out = await new Promise<string>((done, fail) => {
+      const child = execFile(process.execPath, [resolve(__dirname, '../tools/push-board/fetch-batch.mjs')],
+        { env: { ...process.env, NO_PROXY: '*' } }, (err, stdout) => (err ? fail(err) : done(stdout)));
+      // Split mid-character, as a pipe may: the batch is read as one UTF-8 text.
+      const body = Buffer.from(JSON.stringify(urls.concat(`${base}/${'菜'.repeat(3)}`)));
+      const cut = body.indexOf(Buffer.from('菜')) + 1;
+      child.stdin!.write(body.subarray(0, cut));
+      setTimeout(() => child.stdin!.end(body.subarray(cut)), 100);
+    }).finally(() => server.close());
+    const answers = JSON.parse(out);
+    expect(answers.map((a: { status: number }) => a.status)).toEqual([200, 500, 0, 200, 200]);
+    expect(answers[0].body).toBe('甘藍 /?CropName=甘藍');
+    expect(answers[4].body).toBe('甘藍 /菜菜菜');
+    // Together: one after another, the four answered would take 4 s at least.
+    expect(Date.now() - started).toBeLessThan(3500);
+  });
+
+  it('accepts no other POST', () => {
+    const back = loadBackend({});
+    expect(JSON.parse(back.api.doPost({ parameter: { action: 'warm' } }).body)).toMatchObject({ error: 'unknown action' });
+  });
+});
+
 describe('the MOA relay in Taiwan (#103)', () => {
   const RELAY = 'https://moa-relay-abc-de.a.run.app';
   const KEY = 'k'.repeat(64);

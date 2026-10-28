@@ -82,6 +82,22 @@ function doGet(e) {
   }
 }
 
+/**
+ * `POST` entry point: only `?action=push&token=…`, a crawl pushed from Taiwan
+ * (`Push.gs`). Operator only.
+ */
+function doPost(e) {
+  var params = (e && e.parameter) || {};
+  try {
+    if (params.action !== 'push') return jsonOut({ error: 'unknown action', message: 'POST 只接受 action=push' });
+    if (!isAdmin(params)) return jsonOut(unauthorized('push'));
+    return jsonOut(handlePush(e && e.postData ? e.postData.contents : ''));
+  } catch (err) {
+    Logger.log('doPost error: ' + err);
+    return jsonOut({ type: 'push', stored: false, error: '系統錯誤', message: String(err && err.message || err) });
+  }
+}
+
 function jsonOut(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))

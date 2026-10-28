@@ -69,15 +69,27 @@ function boardAgeMs(board) {
  * the execution into Apps Script's limit, which ends it with nothing
  * recorded. A crawl the budget cut short is a failed build with that reason,
  * never a board of whatever came back in time.
+ * @param {Object=} pushed a crawl made in Taiwan (`Push.gs`): the board is
+ *   built from its rows, and MOA is not asked.
  */
-function buildBoard() {
-  crawlDeadline = Date.now() + CRAWL_BUDGET_MS;
+function buildBoard(pushed) {
+  return boardFromCrawl(pushed || withCrawlBudget(crawlDays));
+}
+
+/**
+ * Runs `crawl` as one crawl: under `CRAWL_BUDGET_MS` (or `budgetMs`, for a
+ * crawl Apps Script's limit does not bind: `tools/push-board`), with the
+ * relay's state fresh. `crawl` is passed the budget.
+ */
+function withCrawlBudget(crawl, budgetMs) {
+  var ms = budgetMs || CRAWL_BUDGET_MS;
+  crawlDeadline = Date.now() + ms;
   crawlCutShort = false;
   moaRelayFault = null;
   moaRelaySymptom = null;
   moaRelayAnswered = false;
   try {
-    return crawlBoard();
+    return crawl(ms);
   } finally {
     crawlDeadline = null;
   }
@@ -88,22 +100,12 @@ function failedBoard(error) {
   return { type: 'board', error: error, generated_at: new Date().toISOString(), count: 0, items: [] };
 }
 
-function crawlBoard() {
-  var cutShort = '向 MOA 抓取資料逾時（' + Math.round(CRAWL_BUDGET_MS / 1000) + ' 秒內未完成）：MOA 可能無法連線';
-  var dates = resolveTradeDates(true);
-  if (!dates.latest) {
-    // The relay first: a probe it never answered runs out the budget too, and
-    // the budget is not what to look at then.
-    return failedBoard(relayFailure() || (crawlCutShort ? cutShort : '近期查無交易資料'));
-  }
+/** The board from a crawl: `crawlDays`' rows, or a push's. */
+function boardFromCrawl(crawl) {
+  if (crawl.error) return failedBoard(crawl.error);
+  var dates = crawl.dates;
 
-  var roots = boardRoots();
-  var today = fetchRootRows(roots, dates.latest);
-  var prev = dates.prev ? fetchRootRows(roots, dates.prev) : {};
-  if (moaRelayFault) return failedBoard(moaRelayFault);
-  if (crawlCutShort) return failedBoard(cutShort);
-
-  var items = boardCards(today, prev);
+  var items = boardCards(crawl.today, crawl.prev);
   applyBaselines(items, readHistory(), dates.latest);
   // The medians kept from the last read: a Sheets read has no place before
   // the board is stored (`refreshYearAgo` runs last in the refresh).
@@ -121,6 +123,37 @@ function crawlBoard() {
     generated_at: new Date().toISOString(),
     count: items.length,
     items: items
+  };
+}
+
+/**
+ * The rows a board is built from: the trading date and the one before, and
+ * every board root's rows on each — or `{error}` saying why there are none.
+ * Run by `withCrawlBudget`, which passes the budget; also what
+ * `tools/push-board` crawls in Taiwan.
+ * `unanswered` lists, per day, the roots MOA did not answer even on retry.
+ */
+function crawlDays(budgetMs) {
+  var cutShort = '向 MOA 抓取資料逾時（' + Math.round((budgetMs || CRAWL_BUDGET_MS) / 1000) + ' 秒內未完成）：MOA 可能無法連線';
+  var dates = resolveTradeDates(true);
+  if (!dates.latest) {
+    // The relay first: a probe it never answered runs out the budget too, and
+    // the budget is not what to look at then.
+    return { error: relayFailure() || (crawlCutShort ? cutShort : '近期查無交易資料') };
+  }
+
+  var roots = boardRoots();
+  var metaToday = newFetchMeta();
+  var metaPrev = newFetchMeta();
+  var today = fetchRootRows(roots, dates.latest, undefined, metaToday);
+  var prev = dates.prev ? fetchRootRows(roots, dates.prev, undefined, metaPrev) : {};
+  if (moaRelayFault) return { error: moaRelayFault };
+  if (crawlCutShort) return { error: cutShort };
+  return {
+    dates: dates,
+    today: today,
+    prev: prev,
+    unanswered: { latest: Object.keys(metaToday.unanswered).sort(), prev: Object.keys(metaPrev.unanswered).sort() }
   };
 }
 
@@ -160,7 +193,7 @@ function boardRoots() {
 function storeBoard(payload) {
   var json = JSON.stringify(payload);
   CacheService.getScriptCache().put(BOARD_CACHE_KEY, json, BOARD_CACHE_TTL);
-  writeChunkedProp(BOARD_PROP_PREFIX, BOARD_PROP_COUNT, json);
+  return writeChunkedProp(BOARD_PROP_PREFIX, BOARD_PROP_COUNT, json);
 }
 
 /** Reassembles the chunked durable board, or null when absent/incomplete. */
@@ -258,8 +291,23 @@ function chunkedFrom(all, prefix, countKey) {
  * can show that refreshes are running and what they decided.
  */
 function refreshBoardCache() {
-  var started = Date.now();
-  var board = buildBoard();
+  return refreshBoard().board; // never the trigger's event object as a crawl
+}
+
+/**
+ * `refreshBoardCache`, with the guard's verdict on the board it built — for a
+ * caller that has to say what came of its own refresh (`handlePush`): the
+ * stored `LAST_VALIDATION_PROP` is shared with any refresh running alongside.
+ * @param {Object=} pushed a crawl made in Taiwan, as `buildBoard` takes it.
+ * @param {number=} startedAt when the execution began, if before this call:
+ *   the late Sheets reads are budgeted from it.
+ * @returns {{board: Object, verdict: {ok: boolean, reasons: string[]}, durable: boolean}}
+ *   `durable`: the board reached the durable store, not only the cache.
+ */
+function refreshBoard(pushed, startedAt) {
+  var started = startedAt || Date.now();
+  var durable = false;
+  var board = buildBoard(pushed);
   var props = PropertiesService.getScriptProperties();
   var verdict = board.items && board.items.length
     ? validateBoard(board, parseStoredBoard(readDurableBoard()))
@@ -279,7 +327,7 @@ function refreshBoardCache() {
     // rather than never attached, because the guard's own comparison is a
     // build-time fact: see `prev_volume` in `aggregateGroup`.
     dropTransient(board.items);
-    storeBoard(board);
+    durable = storeBoard(board);
     updateHistory(board);
     props.setProperty(LAST_OK_PROP, board.generated_at + ' ' + board.roc_date + ' ' + board.count + ' items');
     // Ask for the mirror deploy now the board exists to mirror — after the
@@ -314,7 +362,7 @@ function refreshBoardCache() {
     recordRefreshOutcome(false, reason);
   }
   Logger.log('Board refreshed: ' + (board.count || 0) + ' items for ' + (board.roc_date || 'n/a'));
-  return board;
+  return { board: board, verdict: verdict, durable: durable };
 }
 
 /**

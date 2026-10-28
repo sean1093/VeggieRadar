@@ -54,6 +54,16 @@ var FETCH_BATCH = 13;            // concurrent UrlFetchApp requests; a 70+ burst
 // limit. Past this budget no more MOA requests go out and the build fails
 // with a reason the alerting carries. A healthy crawl takes well under one.
 var CRAWL_BUDGET_MS = 3 * 60 * 1000;
+// A crawl pushed from Taiwan (`Push.gs`): a day and the one before of ~100
+// roots is a few MB of JSON; past this it is not a crawl.
+var PUSH_MAX_CHARS = 20 * 1000 * 1000;
+var PUSH_CLOCK_SKEW_MS = 10 * 60 * 1000;
+// Set while a push's refresh runs (its whole six-minute execution at most):
+// a second push meanwhile — the operator re-running after a timeout — would
+// write the chunked board over the first's.
+var PUSH_LOCK_KEY = 'veggie_push_running';
+var PUSH_LOCK_TTL = 6 * 60; // seconds
+var ROC_DAY = /^\d{3}\.\d{2}\.\d{2}$/;
 // Trend serving. One drawer open used to cost 7 sequential MOA fetches plus
 // 480 ms of sleeps; a range query and a short shared cache make it at most
 // 1 fetch per crop per hour across ALL users, keeping the URLFetch daily quota

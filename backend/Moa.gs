@@ -349,6 +349,11 @@ function fetchAllRows(cropNames, rocStart, rocEnd, meta, spare) {
   return out;
 }
 
+/** What `notePage` keeps about the roots one crawl asked for. */
+function newFetchMeta() {
+  return { answered: {}, truncated: {}, unanswered: {} };
+}
+
 /**
  * Records what one response said about a root. An answer is never taken back:
  * `fetchRootRows` retries every root that came back empty, out-of-season ones
@@ -379,7 +384,7 @@ function fetchRootRows(roots, rocStart, rocEnd, meta) {
   // What MOA answered, kept here when the caller keeps none: the crawl's
   // budget needs to tell a root that answered "nothing traded" from one a
   // throttle silenced.
-  meta = meta || { answered: {}, truncated: {}, unanswered: {} };
+  meta = meta || newFetchMeta();
   var out = fetchAllRows(roots, rocStart, rocEnd, meta);
   var misses = roots.filter(function (r) { return !out[r] || !out[r].length; });
   // Nor after a relay fault: every request would be refused the same way.
@@ -421,7 +426,7 @@ function fetchRootRows(roots, rocStart, rocEnd, meta) {
  *   maps a root to the days left out of it because they truncate alone.
  */
 function fetchCompleteRows(roots, rocStart, rocEnd) {
-  var meta = { answered: {}, truncated: {}, unanswered: {} };
+  var meta = newFetchMeta();
   var rows = fetchRootRows(roots, rocStart, rocEnd, meta);
   var dropped = {};
   Object.keys(meta.truncated).forEach(function (root) {
