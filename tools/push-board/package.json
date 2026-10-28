@@ -1,0 +1,13 @@
+{
+  "name": "push-board",
+  "private": true,
+  "type": "module",
+  "description": "Crawl MOA from Taiwan and push the rows to the backend (#103).",
+  "scripts": {
+    "push": "node push.mjs",
+    "dry-run": "node push.mjs --dry-run"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

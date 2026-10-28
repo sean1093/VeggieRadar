@@ -90,7 +90,9 @@ function failedBoard(error) {
 
 function crawlBoard() {
   var cutShort = '向 MOA 抓取資料逾時（' + Math.round(CRAWL_BUDGET_MS / 1000) + ' 秒內未完成）：MOA 可能無法連線';
-  var dates = resolveTradeDates(true);
+  // A crawl pushed from Taiwan (`Push.gs`) is the rows, already fetched.
+  var pushed = pushedCrawl;
+  var dates = pushed ? pushed.dates : resolveTradeDates(true);
   if (!dates.latest) {
     // The relay first: a probe it never answered runs out the budget too, and
     // the budget is not what to look at then.
@@ -98,8 +100,8 @@ function crawlBoard() {
   }
 
   var roots = boardRoots();
-  var today = fetchRootRows(roots, dates.latest);
-  var prev = dates.prev ? fetchRootRows(roots, dates.prev) : {};
+  var today = pushed ? pushed.today : fetchRootRows(roots, dates.latest);
+  var prev = pushed ? pushed.prev : dates.prev ? fetchRootRows(roots, dates.prev) : {};
   if (moaRelayFault) return failedBoard(moaRelayFault);
   if (crawlCutShort) return failedBoard(cutShort);
 

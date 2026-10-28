@@ -14,6 +14,10 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { BOARD_MIN_ITEMS, BOARD_HEALTHY_ITEMS, BoardResponseSchema } from './src/types/board.schema';
+// @ts-expect-error — plain ES modules outside the app, with no types
+import { loadBackend as loadPushTool } from '../tools/push-board/backend.mjs';
+// @ts-expect-error — the same
+import { crawl as pushCrawl } from '../tools/push-board/crawl.mjs';
 
 type Row = {
   CropName: string;
@@ -320,7 +324,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'refreshYearAgo', 'keptYearAgo', 'applyYearOverYear', 'YOY_PROP', 'YOY_SOON_MS', 'YOY_KEEP_MS',
     'refreshVarietyBaselines', 'keptVarietyBaselines', 'applyVarietyBaselines',
     'GH_DISPATCH_MIN_INTERVAL_MS', 'GH_DISPATCH_FAIL_BACKOFF_MS', 'GH_DISPATCH_PROP', 'GH_DISPATCH_OK_PROP',
-    'validateBoard', 'markSuspects', 'readChunkedProp', 'writeChunkedProp', 'VARIETY_BASE_PREFIX', 'VARIETY_BASE_COUNT',
+    'validateBoard', 'markSuspects', 'readChunkedProp', 'writeChunkedProp', 'doPost', 'handlePush', 'parsePushedCrawl', 'VARIETY_BASE_PREFIX', 'VARIETY_BASE_COUNT',
     'BOARD_MIN_ITEMS', 'REJECTED_PROP_PREFIX', 'REJECTED_PROP_COUNT',
     'normalizeQuery', 'searchTerms', 'catalogRoots', 'withinOneEdit', 'CROP_CATALOG', 'SEARCH_ALIASES',
     'catalogUsable', 'CROP_CATALOG_CRAWLED_AT', 'CATALOG_MAX_AGE_DAYS', 'defsForRoot',
@@ -1504,6 +1508,101 @@ describe('handleSearch', () => {
     expect(fetches).toHaveLength(0);
   });
 });
+describe('a crawl pushed from Taiwan (#103)', () => {
+  const TOKEN = 't'.repeat(64);
+  /** MOA as seen from Taiwan: every board root trading, as `plausibleRows` has it. */
+  const moaFromTaiwan = (rows: Record<string, Row[]>) => {
+    let asked = 0;
+    const get = (url: string) => {
+      asked += 1;
+      const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+      return { status: 200, body: JSON.stringify({ RS: 'OK', Data: rows[root] || [] }) };
+    };
+    return { get, asked: () => asked };
+  };
+  const pushed = () => {
+    const moa = moaFromTaiwan(plausibleRows());
+    const { payload, summary } = pushCrawl(loadPushTool(moa.get));
+    return { payload, summary, asked: moa.asked() };
+  };
+  const post = (back: ReturnType<typeof loadBackend>, body: string, token = TOKEN) =>
+    JSON.parse(back.api.doPost({ parameter: { action: 'push', token }, postData: { contents: body } }).body);
+
+  it('crawls with the backend\'s own code, there, and the backend stores the board from it', () => {
+    const { payload, summary, asked } = pushed();
+    expect(asked).toBeGreaterThan(0);
+    expect(summary.answered).toBe(summary.roots);
+    const back = loadBackend({}); // MOA unreachable from here: it must not be asked
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const out = post(back, JSON.stringify(payload));
+    expect(out).toMatchObject({ type: 'push', stored: true, roc_date: payload.dates.latest });
+    expect(out.count).toBeGreaterThanOrEqual(back.api.BOARD_MIN_ITEMS);
+    expect(back.fetches.filter((u) => u.includes('CropName='))).toEqual([]);
+    const board = back.api.readBoard();
+    expect(board.roc_date).toBe(payload.dates.latest);
+    expect(BoardResponseSchema.safeParse(board).success).toBe(true);
+    expect(back.props.get('veggie_last_refresh_ok')).toContain(payload.dates.latest);
+    // The pushed rows were that one push's: the next refresh asks MOA again.
+    back.api.refreshBoardCache();
+    expect(back.fetches.filter((u) => u.includes('CropName=')).length).toBeGreaterThan(0);
+  });
+
+  it('refuses without the operator token, and changes nothing', () => {
+    const { payload } = pushed();
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    expect(post(back, JSON.stringify(payload), 'wrong')).toMatchObject({ error: 'unauthorized' });
+    expect(back.props.has('veggie_last_refresh_ok')).toBe(false);
+  });
+
+  it('refuses a body that is not a crawl, whole', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    const bad: [string, RegExp][] = [
+      ['', /empty/],
+      ['{nope', /JSON/],
+      [JSON.stringify({ ...payload, dates: { latest: '2026-10-27', prev: null } }), /ROC/],
+      [JSON.stringify({ ...payload, dates: { latest: payload.dates.latest, prev: payload.dates.latest } }), /earlier/],
+      [JSON.stringify({ ...payload, dates: { latest: '199.01.01', prev: null } }), /future/],
+      [JSON.stringify({ ...payload, today: [] }), /today/],
+    ];
+    for (const [body, why] of bad) {
+      const out = post(back, body);
+      expect(out.stored).toBe(false);
+      expect(out.message).toMatch(why);
+    }
+    expect(back.props.has('veggie_last_refresh_ok')).toBe(false);
+  });
+
+  it('keeps only the board\'s roots and each row\'s plain values', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    const root = Object.keys(payload.today)[0];
+    payload.today['不是看板的作物'] = [{ CropName: 'x', Avg_Price: 1 }];
+    payload.today[root] = payload.today[root].map((r: Record<string, unknown>) => ({ ...r, nested: { a: 1 } }));
+    const crawl = back.api.parsePushedCrawl(JSON.stringify(payload));
+    expect(crawl.today).not.toHaveProperty('不是看板的作物');
+    expect(crawl.today[root].every((r: Record<string, unknown>) => !('nested' in r))).toBe(true);
+  });
+
+  it('fails like a refresh when the rows are implausible, and stores nothing', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    const thin = { ...payload, today: Object.fromEntries(Object.entries(payload.today).slice(0, 3)) };
+    const out = post(back, JSON.stringify(thin));
+    expect(out.stored).toBe(false);
+    expect(out.reasons.join(' ')).toMatch(/floor|empty/);
+  });
+
+  it('accepts no other POST', () => {
+    const back = loadBackend({});
+    expect(JSON.parse(back.api.doPost({ parameter: { action: 'warm' } }).body)).toMatchObject({ error: 'unknown action' });
+  });
+});
+
 describe('the MOA relay in Taiwan (#103)', () => {
   const RELAY = 'https://moa-relay-abc-de.a.run.app';
   const KEY = 'k'.repeat(64);
