@@ -73,9 +73,7 @@ function boardAgeMs(board) {
  *   built from its rows, and MOA is not asked.
  */
 function buildBoard(pushed) {
-  return withCrawlBudget(function (budgetMs) {
-    return crawlBoard(budgetMs, pushed);
-  });
+  return crawlBoard(pushed || withCrawlBudget(crawlDays));
 }
 
 /**
@@ -84,13 +82,14 @@ function buildBoard(pushed) {
  * relay's state fresh. `crawl` is passed the budget.
  */
 function withCrawlBudget(crawl, budgetMs) {
-  crawlDeadline = Date.now() + (budgetMs || CRAWL_BUDGET_MS);
+  var ms = budgetMs || CRAWL_BUDGET_MS;
+  crawlDeadline = Date.now() + ms;
   crawlCutShort = false;
   moaRelayFault = null;
   moaRelaySymptom = null;
   moaRelayAnswered = false;
   try {
-    return crawl(budgetMs || CRAWL_BUDGET_MS);
+    return crawl(ms);
   } finally {
     crawlDeadline = null;
   }
@@ -101,8 +100,8 @@ function failedBoard(error) {
   return { type: 'board', error: error, generated_at: new Date().toISOString(), count: 0, items: [] };
 }
 
-function crawlBoard(budgetMs, pushed) {
-  var crawl = pushed || crawlDays(budgetMs);
+/** The board from a crawl: `crawlDays`' rows, or a push's. */
+function crawlBoard(crawl) {
   if (crawl.error) return failedBoard(crawl.error);
   var dates = crawl.dates;
 
@@ -130,11 +129,12 @@ function crawlBoard(budgetMs, pushed) {
 /**
  * The rows a board is built from: the trading date and the one before, and
  * every board root's rows on each — or `{error}` saying why there are none.
- * Run within `withCrawlBudget`; also what `tools/push-board` crawls in Taiwan.
+ * Run by `withCrawlBudget`, which passes the budget; also what
+ * `tools/push-board` crawls in Taiwan.
  * `unanswered` lists, per day, the roots MOA did not answer even on retry.
  */
 function crawlDays(budgetMs) {
-  var cutShort = '向 MOA 抓取資料逾時（' + Math.round((budgetMs || CRAWL_BUDGET_MS) / 1000) + ' 秒內未完成）：MOA 可能無法連線';
+  var cutShort = '向 MOA 抓取資料逾時（' + Math.round(budgetMs / 1000) + ' 秒內未完成）：MOA 可能無法連線';
   var dates = resolveTradeDates(true);
   if (!dates.latest) {
     // The relay first: a probe it never answered runs out the budget too, and

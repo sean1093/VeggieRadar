@@ -78,6 +78,7 @@ refresh in `last_refresh_ok`.
 | `Refused: ADMIN_TOKEN does not match` | The token is not the `ADMIN_TOKEN` script property |
 | `The Web App does not take a push yet` | The deployment predates `doPost`: see above |
 | `No answer from the backend` | The request gave up before the refresh did; the tool then reads `?action=diag` and says whether the day was stored. Check it before pushing again |
+| `Another push is still being stored` | A push made moments ago is still running its refresh; one push at a time, so the board is never written twice at once |
 | `Not stored: …` | The plausibility guard rejected the board, with its reasons — the same verdict a scheduled refresh would get |
 
 ## The static mirror

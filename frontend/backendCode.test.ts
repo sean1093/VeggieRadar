@@ -1526,16 +1526,16 @@ describe('a crawl pushed from Taiwan (#103)', () => {
     loadPushTool((urls: string[]) => urls.map(get));
   const pushed = () => {
     const moa = moaFromTaiwan(plausibleRows());
-    const { payload, summary } = pushCrawl(tool(moa.get));
-    return { payload, summary, asked: moa.asked() };
+    const { payload, unanswered } = pushCrawl(tool(moa.get));
+    return { payload, unanswered, asked: moa.asked() };
   };
   const post = (back: ReturnType<typeof loadBackend>, body: string, token = TOKEN) =>
     JSON.parse(back.api.doPost({ parameter: { action: 'push', token }, postData: { contents: body } }).body);
 
   it('crawls with the backend\'s own code, there, and the backend stores the board from it', () => {
-    const { payload, summary, asked } = pushed();
+    const { payload, unanswered, asked } = pushed();
     expect(asked).toBeGreaterThan(0);
-    expect(summary.unanswered).toEqual({ latest: [], prev: [] });
+    expect(unanswered).toEqual({ latest: [], prev: [] });
     const back = loadBackend({}); // MOA unreachable from here: it must not be asked
     back.props.set('ADMIN_TOKEN', TOKEN);
     const out = post(back, JSON.stringify(payload));
@@ -1575,6 +1575,8 @@ describe('a crawl pushed from Taiwan (#103)', () => {
       [JSON.stringify({ ...payload, dates: { latest: '114.13.40', prev: null } }), /ROC/],
       [JSON.stringify({ ...payload, dates: { latest: payload.dates.latest, prev: '114.02.30' } }), /earlier/],
       [JSON.stringify({ ...payload, today: [] }), /today/],
+      [JSON.stringify({ ...payload, today: {} }), /no rows/],
+      [JSON.stringify({ ...payload, today: { 不是看板的作物: [{ Avg_Price: 1 }] } }), /no rows/],
     ];
     for (const [body, why] of bad) {
       const out = post(back, body);
@@ -1582,6 +1584,23 @@ describe('a crawl pushed from Taiwan (#103)', () => {
       expect(out.message).toMatch(why);
     }
     expect(back.props.has('veggie_last_refresh_ok')).toBe(false);
+    expect(back.props.has('veggie_last_validation')).toBe(false); // refused, not a failed refresh
+  });
+
+  it('refuses a second push while the first is being stored, and takes one after', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    let during: unknown;
+    const set = back.props.set.bind(back.props);
+    back.props.set = (k: string, v: string) => {
+      // The operator re-runs the tool while the first push's refresh stores.
+      if (k === 'veggie_last_validation' && during === undefined) during = post(back, JSON.stringify(payload));
+      return set(k, v);
+    };
+    expect(post(back, JSON.stringify(payload))).toMatchObject({ stored: true });
+    expect(during).toMatchObject({ stored: false, busy: true });
+    expect(post(back, JSON.stringify(payload))).toMatchObject({ stored: true });
   });
 
   it('keeps only the board\'s roots and each row\'s plain values', () => {
@@ -1658,7 +1677,7 @@ describe('a crawl pushed from Taiwan (#103)', () => {
       if (asked === root && decodeURIComponent(url).includes(payload.dates.prev)) return { status: 0, body: '' };
       return { status: 200, body: JSON.stringify({ RS: 'OK', Data: rows[asked] || [] }) };
     }));
-    expect(out.summary.unanswered).toEqual({ latest: [], prev: [root] });
+    expect(out.unanswered).toEqual({ latest: [], prev: [root] });
   });
 
   it('fails like a refresh when the rows are implausible, and stores nothing', () => {

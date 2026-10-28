@@ -15,7 +15,17 @@
 function handlePush(body) {
   var crawl = parsePushedCrawl(body);
   if (crawl.error) return { type: 'push', stored: false, message: crawl.error };
-  var refreshed = refreshBoard(crawl);
+  var cache = CacheService.getScriptCache();
+  if (cache.get(PUSH_LOCK_KEY)) {
+    return { type: 'push', stored: false, busy: true, message: 'another push is still being stored: check ?action=diag in a few minutes' };
+  }
+  cache.put(PUSH_LOCK_KEY, '1', PUSH_LOCK_TTL);
+  var refreshed;
+  try {
+    refreshed = refreshBoard(crawl);
+  } finally {
+    cache.remove(PUSH_LOCK_KEY);
+  }
   var board = refreshed.board;
   var verdict = refreshed.verdict;
   return {
@@ -60,6 +70,10 @@ function parsePushedCrawl(body) {
   for (var i = 0; i < board.length; i++) roots[board[i]] = true;
   var today = pushedRows(data.today, roots, latest);
   if (!today) return { error: 'today must map roots to rows' };
+  var any = false;
+  for (var root in today) any = any || today[root].length > 0;
+  // Nothing to build from is no crawl: refused, not counted as a failed refresh.
+  if (!any) return { error: 'today has no rows for any board root' };
   var before = prev === null ? {} : pushedRows(data.prev, roots, prev);
   if (!before) return { error: 'prev must map roots to rows' };
   return { dates: { latest: latest, prev: prev }, today: today, prev: before };

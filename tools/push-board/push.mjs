@@ -10,6 +10,8 @@
 process.env.TZ = 'Asia/Taipei'; // the trading date is Taiwan's, wherever this runs
 
 import { execFileSync } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,10 +27,41 @@ function apiBase() {
   const flag = args.find((a) => a.startsWith('--api='));
   if (flag) return flag.slice('--api='.length);
   if (process.env.API_BASE_URL) return process.env.API_BASE_URL;
+  // As `frontend/scripts/prod-probe.mjs` reads it, quotes allowed.
   const env = readFileSync(resolve(HERE, '../../frontend/.env'), 'utf8');
-  const line = env.split(/\r?\n/).find((l) => l.startsWith('VITE_API_BASE_URL='));
-  if (!line) throw new Error('no API base URL: pass --api=… or set API_BASE_URL');
-  return line.slice('VITE_API_BASE_URL='.length).trim();
+  const match = env.match(/^\s*VITE_API_BASE_URL\s*=\s*(\S+)\s*$/m);
+  if (!match) throw new Error('no VITE_API_BASE_URL in frontend/.env: pass --api=… or set API_BASE_URL');
+  return match[1].replace(/^(['"])(.*)\1$/, '$2');
+}
+
+/**
+ * POSTs `body` and answers `{status, text}`, following Apps Script's redirect
+ * to the output as a GET, as a browser does. Not `fetch`: its 300 s wait for
+ * the answer's headers is shorter than the refresh the push runs, which may
+ * take all of Apps Script's six minutes.
+ */
+function post(url, body, waitMs = 7 * 60 * 1000, hops = 5) {
+  return new Promise((done, fail) => {
+    const target = new URL(url);
+    const send = target.protocol === 'http:' ? httpRequest : httpsRequest;
+    const req = send(target, body === null ? { method: 'GET' } : {
+      method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && hops > 0) {
+          done(post(new URL(res.headers.location, target).href, null, waitMs, hops - 1));
+        } else {
+          done({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') });
+        }
+      });
+      res.on('error', fail);
+    });
+    req.setTimeout(waitMs, () => req.destroy(new Error(`no answer in ${Math.round(waitMs / 60000)} min`)));
+    req.on('error', fail);
+    req.end(body ?? undefined);
+  });
 }
 
 /** One batch of GETs, made together and waited for synchronously, as UrlFetchApp's `fetchAll` is. */
@@ -64,7 +97,7 @@ try {
 console.log('Crawling MOA…');
 const started = Date.now();
 const backend = loadBackend(fetchBatch, { sleep, log: verbose ? (m) => console.error(`  ${m}`) : () => {} });
-const { payload, error, summary } = crawl(backend);
+const { payload, error, roots, unanswered } = crawl(backend);
 const took = `${Math.round((Date.now() - started) / 1000)} s`;
 if (!payload) {
   // The backend's own words: no trading date found, or the crawl cut short.
@@ -72,39 +105,41 @@ if (!payload) {
   console.error('MOA did not answer the crawl. Is this machine in Taiwan?');
   process.exit(1);
 }
-const answered = (day) => `${summary.roots - summary.unanswered[day].length}/${summary.roots}`;
-console.log(`  trading date ${summary.latest}: ${answered('latest')} roots answered; ` +
-  `previous ${summary.prev ? `${summary.prev}: ${answered('prev')}` : 'none'}; in ${took}`);
+const { dates } = payload;
+const answered = (day) => `${roots - unanswered[day].length}/${roots}`;
+console.log(`  trading date ${dates.latest}: ${answered('latest')} roots answered; ` +
+  `previous ${dates.prev ? `${dates.prev}: ${answered('prev')}` : 'none'}; in ${took}`);
 for (const day of ['latest', 'prev']) {
   // Kept out of the board as a scheduled refresh would keep them, after its
   // retry: said here because the operator, unlike the trigger, can re-run.
-  const missed = summary.unanswered[day];
-  if (missed.length) console.log(`  unanswered on ${summary[day]}: ${missed.join('、')}`);
+  if (unanswered[day].length) console.log(`  unanswered on ${dates[day]}: ${unanswered[day].join('、')}`);
 }
 if (dryRun) process.exit(0);
 
 console.log('Pushing to the backend…');
 const url = `${api}?action=push&token=${encodeURIComponent(token)}`;
+const pushedAt = Date.now();
 let res;
-let text;
 try {
-  res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
-  text = await res.text();
+  res = await post(url, JSON.stringify(payload));
 } catch (err) {
-  // The refresh runs while the request waits, and may outlast it: what it
-  // did is in `diag`, which says whether this push's day was stored.
-  console.error(`No answer from the backend (${err.cause?.code || err.message}).`);
+  // What the refresh did is in `diag`: a board stored since this push began
+  // (`last_refresh_ok` is "<generated_at> <roc date> <count> items").
+  console.error(`No answer from the backend (${err.code || err.message}).`);
   try {
-    const diag = await (await fetch(`${api}?action=diag`)).json();
+    const diag = await (await fetch(`${api}?action=diag`, { signal: AbortSignal.timeout(30_000) })).json();
     const ok = String(diag.last_refresh_ok || '');
-    console.error(ok.includes(` ${payload.dates.latest} `)
+    const [at, day] = ok.split(' ');
+    // A minute's grace for the two clocks.
+    console.error(day === dates.latest && Date.parse(at) >= pushedAt - 60_000
       ? `It was stored all the same: diag.last_refresh_ok reads "${ok}".`
-      : `diag.last_refresh_ok reads "${ok || 'nothing'}": not stored yet. Check ?action=diag again in a few minutes before pushing again.`);
+      : `diag.last_refresh_ok reads "${ok || 'nothing'}": not stored by this push, yet. Check ?action=diag again in a few minutes before pushing again.`);
   } catch {
     console.error('Nor from ?action=diag: check it in a few minutes before pushing again.');
   }
   process.exit(1);
 }
+const text = res.text;
 let out;
 try {
   out = JSON.parse(text);
@@ -121,6 +156,10 @@ if (out.error === 'unauthorized') {
 }
 if (out.error === 'unknown action' || (out.type && out.type !== 'push')) {
   console.error('The Web App does not take a push yet: run `clasp push` and `clasp deploy -i <deployment id>`.');
+  process.exit(1);
+}
+if (out.busy) {
+  console.error('Another push is still being stored: check ?action=diag in a few minutes rather than pushing again.');
   process.exit(1);
 }
 if (!out.stored) {

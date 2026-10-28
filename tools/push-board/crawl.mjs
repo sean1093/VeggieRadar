@@ -7,24 +7,16 @@ export const CRAWL_BUDGET_MS = 10 * 60 * 1000;
  * its own (`CRAWL_BUDGET_MS`), so a crawl cut short fails here with the
  * backend's reason.
  * @param {ReturnType<import('./backend.mjs').loadBackend>} api
- * @returns {{payload: Object|null, error: string|null, summary: {latest: string|null, prev: string|null, roots: number, unanswered: {latest: string[], prev: string[]}}}}
+ * @returns {{payload: Object|null, error: string|null, roots?: number, unanswered?: {latest: string[], prev: string[]}}}
+ *   `roots` asked, and per day those MOA did not answer even on retry.
  */
 export function crawl(api) {
   const days = api.withCrawlBudget(api.crawlDays, CRAWL_BUDGET_MS);
-  const roots = api.boardRoots().length;
-  if (days.error) {
-    return { payload: null, error: days.error, summary: { latest: null, prev: null, roots, unanswered: { latest: [], prev: [] } } };
-  }
-  const latest = days.dates.latest;
-  const prev = days.dates.prev;
+  if (days.error) return { payload: null, error: days.error };
   return {
-    payload: { dates: { latest, prev }, today: days.today, prev: days.prev },
+    payload: { dates: days.dates, today: days.today, prev: days.prev },
     error: null,
-    summary: {
-      latest,
-      prev,
-      roots,
-      unanswered: days.unanswered,
-    },
+    roots: api.boardRoots().length,
+    unanswered: days.unanswered,
   };
 }
