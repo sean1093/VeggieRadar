@@ -17,7 +17,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadBackend } from './backend.mjs';
 import { crawl } from './crawl.mjs';
-import { isTransient, withRetry } from '../../frontend/scripts/gas-retry.mjs';
+import { get, isTransient, withRetry } from '../../frontend/scripts/gas-retry.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -35,7 +35,7 @@ function configuredApi() {
   const flag = args.find((a) => a.startsWith('--api='));
   if (flag) return flag.slice('--api='.length);
   if (process.env.API_BASE_URL) return process.env.API_BASE_URL;
-  // As `frontend/scripts/prod-probe.mjs` reads it, quotes allowed.
+  // The line `frontend/scripts/prod-probe.mjs` reads, and a quoted value too.
   const env = readFileSync(resolve(HERE, '../../frontend/.env'), 'utf8');
   const match = env.match(/^\s*VITE_API_BASE_URL\s*=\s*(\S+)\s*$/m);
   if (!match) throw new Error('no VITE_API_BASE_URL in frontend/.env: pass --api=… or set API_BASE_URL');
@@ -145,14 +145,7 @@ const NOT_DEPLOYED = 'The Web App does not take a push yet: run `clasp push` and
  */
 async function reportFromDiag() {
   try {
-    const got = await withRetry(async (u) => {
-      try {
-        const r = await fetch(u, { signal: AbortSignal.timeout(30_000) });
-        return { status: r.status, body: await r.text() };
-      } catch (err) {
-        return { error: err };
-      }
-    }, withParams({ action: 'diag' }));
+    const got = await withRetry((u) => get(u, { userAgent: 'VeggieRadar-push-board' }), withParams({ action: 'diag' }));
     const diag = JSON.parse(got.body);
     const ok = String(diag.last_refresh_ok || '');
     const [at, day] = ok.split(' ');
