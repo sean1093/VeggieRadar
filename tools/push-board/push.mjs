@@ -43,7 +43,7 @@ function configuredApi() {
 }
 
 /**
- * POSTs `body` and answers `{status, text}`, following Apps Script's redirect
+ * POSTs `body` and answers `{status, text, redirected}`, following Apps Script's redirect
  * to the output as a GET, as a browser does. Not `fetch`: its 300 s wait for
  * the answer's headers is shorter than the refresh the push runs, which may
  * take all of Apps Script's six minutes.
@@ -66,7 +66,7 @@ function post(url, body, deadline = Date.now() + 7 * 60 * 1000, hops = 5) {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && hops > 0) {
           post(new URL(res.headers.location, target).href, null, deadline, hops - 1).then(done, fail);
         } else {
-          done({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') });
+          done({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8'), redirected: body === null });
         }
       });
       res.on('error', fail);
@@ -145,7 +145,15 @@ const NOT_DEPLOYED = 'The Web App does not take a push yet: run `clasp push` and
  */
 async function reportFromDiag() {
   try {
-    const diag = await (await fetch(withParams({ action: 'diag' }), { signal: AbortSignal.timeout(30_000) })).json();
+    const got = await withRetry(async (u) => {
+      try {
+        const r = await fetch(u, { signal: AbortSignal.timeout(30_000) });
+        return { status: r.status, body: await r.text() };
+      } catch (err) {
+        return { error: err };
+      }
+    }, withParams({ action: 'diag' }));
+    const diag = JSON.parse(got.body);
     const ok = String(diag.last_refresh_ok || '');
     const [at, day] = ok.split(' ');
     // A minute's grace for the two clocks.
@@ -157,16 +165,17 @@ async function reportFromDiag() {
   }
 }
 
-// A 404 or 5xx is Apps Script's own page — a cold start, or Google having a
-// moment — so doPost never ran and asking again is safe (gas-retry.mjs). No
-// answer at all is not: the refresh may still be running.
+// A 404 or 5xx to the POST itself is Apps Script's own page — a cold start,
+// or Google having a moment — so doPost never ran and asking again is safe
+// (gas-retry.mjs). Not after the redirect, which comes once doPost has run,
+// nor with no answer at all: the refresh may have run, or still be running.
 const res = await withRetry(async (u) => {
   try {
     return await post(u, JSON.stringify(payload));
   } catch (err) {
     return { error: err };
   }
-}, url, { transient: (r) => !r.error && isTransient(r) });
+}, url, { transient: (r) => !r.error && !r.redirected && isTransient(r) });
 if (res.error) {
   console.error(`No answer from the backend (${res.error.code || res.error.message}).`);
   await reportFromDiag();
@@ -178,8 +187,13 @@ try {
   out = JSON.parse(text);
 } catch {
   // An older deployment has no doPost, and Apps Script says so in HTML.
-  console.error(/doPost/.test(text) ? NOT_DEPLOYED
-    : `The backend answered ${res.status}, not JSON (after ${res.attempts} attempts): ${text.slice(0, 200)}`);
+  if (/doPost/.test(text)) {
+    console.error(NOT_DEPLOYED);
+  } else {
+    console.error(`The backend answered ${res.status}, not JSON (after ${res.attempts} attempts): ${text.slice(0, 200)}`);
+    // Apps Script's own page, after doPost ran — its time limit, say.
+    if (res.redirected) await reportFromDiag();
+  }
   process.exit(1);
 }
 if (out.error === 'unauthorized') {
