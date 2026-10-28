@@ -141,8 +141,8 @@ function crawlDays() {
   }
 
   var roots = boardRoots();
-  var metaToday = { answered: {}, truncated: {}, unanswered: {} };
-  var metaPrev = { answered: {}, truncated: {}, unanswered: {} };
+  var metaToday = newFetchMeta();
+  var metaPrev = newFetchMeta();
   var today = fetchRootRows(roots, dates.latest, undefined, metaToday);
   var prev = dates.prev ? fetchRootRows(roots, dates.prev, undefined, metaPrev) : {};
   if (moaRelayFault) return { error: moaRelayFault };

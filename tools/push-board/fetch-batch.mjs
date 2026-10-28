@@ -5,9 +5,9 @@
  * A request that fails or takes over a minute (Apps Script's own limit) is
  * status 0.
  */
-let input = '';
-for await (const chunk of process.stdin) input += chunk;
-const answers = await Promise.all(JSON.parse(input).map(async (url) => {
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const answers = await Promise.all(JSON.parse(Buffer.concat(chunks).toString('utf8')).map(async (url) => {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
     return { status: res.status, body: await res.text() };

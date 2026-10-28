@@ -312,7 +312,7 @@ function backfillHistory() {
     // run of refetches could push it past the 6-minute limit and lose the
     // lot. No older window covers those days either, so dropping them would
     // leave the baseline a hole until they aged out.
-    var meta = { answered: {}, truncated: {}, unanswered: {} };
+    var meta = newFetchMeta();
     var rows = fetchRootRows(roots, dateToROC(start), dateToROC(end), meta);
     Object.keys(meta.truncated).forEach(function (root) {
       rows[root] = patchTruncated(root, dateToROC(start), rows[root]);

@@ -20,7 +20,6 @@ function handlePush(body) {
   var crawl = parsePushedCrawl(body);
   if (crawl.error) return { type: 'push', stored: false, message: crawl.error };
   pushedCrawl = crawl;
-  lastRefreshVerdict = null;
   var board;
   try {
     board = refreshBoardCache();

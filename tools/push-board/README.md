@@ -37,7 +37,9 @@ Until then the tool says "The Web App does not take a push yet".
 
 ## Each time
 
-Node 22 or later. No `npm install`: the tool has no dependencies.
+Node 22 or later. No `npm install`: the tool has no dependencies. Behind an
+HTTP proxy, set `NODE_USE_ENV_PROXY=1` as well (Node 22.21+ / 24): Node's
+`fetch` uses `HTTPS_PROXY` only then.
 
 ```bash
 cd tools/push-board
@@ -70,7 +72,7 @@ refresh in `last_refresh_ok`.
 
 | Message | |
 | --- | --- |
-| `近期查無交易資料` / `向 MOA 抓取資料逾時…` then `MOA did not answer the crawl` | This machine cannot reach MOA either: not in Taiwan, MOA is down, or (behind a proxy) Node's `fetch` ignores `HTTPS_PROXY` — on Node 24, set `NODE_USE_ENV_PROXY=1` |
+| `近期查無交易資料` / `向 MOA 抓取資料逾時…` then `MOA did not answer the crawl` | This machine cannot reach MOA either: not in Taiwan, MOA is down, or (behind a proxy) `NODE_USE_ENV_PROXY=1` is not set |
 | `unanswered on 115.10.27: …` | MOA did not answer those crops even on retry; they are left out, as a scheduled refresh would. Re-run to try again |
 | `Refused: ADMIN_TOKEN does not match` | The token is not the `ADMIN_TOKEN` script property |
 | `The Web App does not take a push yet` | The deployment predates `doPost`: see above |

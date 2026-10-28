@@ -12,6 +12,8 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { createServer } from 'node:http';
 import { resolve } from 'node:path';
 import { BOARD_MIN_ITEMS, BOARD_HEALTHY_ITEMS, BoardResponseSchema } from './src/types/board.schema';
 // @ts-expect-error — plain ES modules outside the app, with no types
@@ -1632,7 +1634,8 @@ describe('a crawl pushed from Taiwan (#103)', () => {
   it('lists, per day, the roots MOA did not answer', () => {
     const rows = plausibleRows();
     const { payload } = pushed();
-    const root = Object.keys(payload.today)[1];
+    // Not the probe's root: silencing that would move the previous trading date.
+    const root = Object.keys(payload.today).find((r) => r !== loadBackend().api.PROBE_ROOT)!;
     const out = pushCrawl(tool((url) => {
       const asked = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
       if (asked === root && decodeURIComponent(url).includes(payload.dates.prev)) return { status: 0, body: '' };
@@ -1649,6 +1652,34 @@ describe('a crawl pushed from Taiwan (#103)', () => {
     const out = post(back, JSON.stringify(thin));
     expect(out.stored).toBe(false);
     expect(out.reasons.join(' ')).toMatch(/floor|empty/);
+  });
+
+  it('fetches a batch at once, in order, any failure a status 0', async () => {
+    const server = createServer((req, res) => {
+      setTimeout(() => {
+        res.writeHead(req.url!.includes('bad') ? 500 : 200);
+        res.end(`甘藍 ${decodeURIComponent(req.url!)}`);
+      }, 300);
+    });
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const urls = [`${base}/?CropName=${encodeURIComponent('甘藍')}`, `${base}/bad`, 'http://127.0.0.1:1/', `${base}/last`];
+    const started = Date.now();
+    const out = await new Promise<string>((done, fail) => {
+      const child = execFile(process.execPath, [resolve(__dirname, '../tools/push-board/fetch-batch.mjs')],
+        { env: { ...process.env, NO_PROXY: '*' } }, (err, stdout) => (err ? fail(err) : done(stdout)));
+      // Split mid-character, as a pipe may: the batch is read as one UTF-8 text.
+      const body = Buffer.from(JSON.stringify(urls.concat(`${base}/${'菜'.repeat(3)}`)));
+      const cut = body.indexOf(Buffer.from('菜')) + 1;
+      child.stdin!.write(body.subarray(0, cut));
+      setTimeout(() => child.stdin!.end(body.subarray(cut)), 100);
+    });
+    server.close();
+    const answers = JSON.parse(out);
+    expect(answers.map((a: { status: number }) => a.status)).toEqual([200, 500, 0, 200, 200]);
+    expect(answers[0].body).toBe('甘藍 /?CropName=甘藍');
+    expect(answers[4].body).toBe('甘藍 /菜菜菜');
+    expect(Date.now() - started).toBeLessThan(100 + 4 * 300); // together, not one after another
   });
 
   it('accepts no other POST', () => {
