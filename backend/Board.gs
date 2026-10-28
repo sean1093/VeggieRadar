@@ -73,7 +73,7 @@ function boardAgeMs(board) {
  *   built from its rows, and MOA is not asked.
  */
 function buildBoard(pushed) {
-  return crawlBoard(pushed || withCrawlBudget(crawlDays));
+  return boardFromCrawl(pushed || withCrawlBudget(crawlDays));
 }
 
 /**
@@ -101,7 +101,7 @@ function failedBoard(error) {
 }
 
 /** The board from a crawl: `crawlDays`' rows, or a push's. */
-function crawlBoard(crawl) {
+function boardFromCrawl(crawl) {
   if (crawl.error) return failedBoard(crawl.error);
   var dates = crawl.dates;
 
@@ -193,7 +193,7 @@ function boardRoots() {
 function storeBoard(payload) {
   var json = JSON.stringify(payload);
   CacheService.getScriptCache().put(BOARD_CACHE_KEY, json, BOARD_CACHE_TTL);
-  writeChunkedProp(BOARD_PROP_PREFIX, BOARD_PROP_COUNT, json);
+  return writeChunkedProp(BOARD_PROP_PREFIX, BOARD_PROP_COUNT, json);
 }
 
 /** Reassembles the chunked durable board, or null when absent/incomplete. */
@@ -299,10 +299,14 @@ function refreshBoardCache() {
  * caller that has to say what came of its own refresh (`handlePush`): the
  * stored `LAST_VALIDATION_PROP` is shared with any refresh running alongside.
  * @param {Object=} pushed a crawl made in Taiwan, as `buildBoard` takes it.
- * @returns {{board: Object, verdict: {ok: boolean, reasons: string[]}}}
+ * @param {number=} startedAt when the execution began, if before this call:
+ *   the late Sheets reads are budgeted from it.
+ * @returns {{board: Object, verdict: {ok: boolean, reasons: string[]}, durable: boolean}}
+ *   `durable`: the board reached the durable store, not only the cache.
  */
-function refreshBoard(pushed) {
-  var started = Date.now();
+function refreshBoard(pushed, startedAt) {
+  var started = startedAt || Date.now();
+  var durable = false;
   var board = buildBoard(pushed);
   var props = PropertiesService.getScriptProperties();
   var verdict = board.items && board.items.length
@@ -323,7 +327,7 @@ function refreshBoard(pushed) {
     // rather than never attached, because the guard's own comparison is a
     // build-time fact: see `prev_volume` in `aggregateGroup`.
     dropTransient(board.items);
-    storeBoard(board);
+    durable = storeBoard(board);
     updateHistory(board);
     props.setProperty(LAST_OK_PROP, board.generated_at + ' ' + board.roc_date + ' ' + board.count + ' items');
     // Ask for the mirror deploy now the board exists to mirror — after the
@@ -358,7 +362,7 @@ function refreshBoard(pushed) {
     recordRefreshOutcome(false, reason);
   }
   Logger.log('Board refreshed: ' + (board.count || 0) + ' items for ' + (board.roc_date || 'n/a'));
-  return { board: board, verdict: verdict };
+  return { board: board, verdict: verdict, durable: durable };
 }
 
 /**

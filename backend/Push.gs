@@ -13,6 +13,7 @@
  *   and count.
  */
 function handlePush(body) {
+  var started = Date.now(); // the body's parse counts against the execution too
   var crawl = parsePushedCrawl(body);
   if (crawl.error) return { type: 'push', stored: false, message: crawl.error };
   var cache = CacheService.getScriptCache();
@@ -22,16 +23,20 @@ function handlePush(body) {
   cache.put(PUSH_LOCK_KEY, '1', PUSH_LOCK_TTL);
   var refreshed;
   try {
-    refreshed = refreshBoard(crawl);
+    refreshed = refreshBoard(crawl, started);
   } finally {
     cache.remove(PUSH_LOCK_KEY);
   }
   var board = refreshed.board;
   var verdict = refreshed.verdict;
+  var stored = verdict.ok && refreshed.durable;
   return {
     type: 'push',
-    stored: !!verdict.ok,
-    reasons: verdict.ok ? [] : (verdict.reasons || []),
+    stored: stored,
+    reasons: stored ? [] : verdict.ok
+      // Served from the cache for its few hours, then the board before it.
+      ? ['the board passed the guard but could not be written to the script properties']
+      : (verdict.reasons || []),
     roc_date: board.roc_date || null,
     count: board.count || 0,
     generated_at: board.generated_at || null
@@ -70,10 +75,8 @@ function parsePushedCrawl(body) {
   for (var i = 0; i < board.length; i++) roots[board[i]] = true;
   var today = pushedRows(data.today, roots, latest);
   if (!today) return { error: 'today must map roots to rows' };
-  var any = false;
-  for (var root in today) any = any || today[root].length > 0;
-  // Nothing to build from is no crawl: refused, not counted as a failed refresh.
-  if (!any) return { error: 'today has no rows for any board root' };
+  // Nothing to build a card from is no crawl: refused, not counted as a failed refresh.
+  if (!boardCards(today, {}).length) return { error: 'today has no rows the board can use' };
   var before = prev === null ? {} : pushedRows(data.prev, roots, prev);
   if (!before) return { error: 'prev must map roots to rows' };
   return { dates: { latest: latest, prev: prev }, today: today, prev: before };
@@ -86,8 +89,8 @@ function isRocDay(value) {
 
 /**
  * A root → rows map kept to the board's roots, to rows of `day` (a row naming
- * another `TransDate` is not that day's), and to each row's plain values;
- * null when not a map.
+ * another `TransDate` is not that day's) with a `CropName`, and to each row's
+ * plain values; null when not a map.
  */
 function pushedRows(byRoot, roots, day) {
   if (!byRoot || typeof byRoot !== 'object' || Array.isArray(byRoot)) return null;
@@ -95,7 +98,8 @@ function pushedRows(byRoot, roots, day) {
   for (var root in byRoot) {
     if (!Object.prototype.hasOwnProperty.call(roots, root) || !Array.isArray(byRoot[root])) continue;
     out[root] = byRoot[root].filter(function (row) {
-      return row && typeof row === 'object' && !Array.isArray(row) && (row.TransDate === undefined || row.TransDate === day);
+      return row && typeof row === 'object' && !Array.isArray(row) && typeof row.CropName === 'string' &&
+        (row.TransDate === undefined || row.TransDate === day);
     }).map(function (row) {
       var plain = {};
       for (var key in row) {

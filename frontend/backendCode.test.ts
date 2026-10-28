@@ -1577,6 +1577,9 @@ describe('a crawl pushed from Taiwan (#103)', () => {
       [JSON.stringify({ ...payload, today: [] }), /today/],
       [JSON.stringify({ ...payload, today: {} }), /no rows/],
       [JSON.stringify({ ...payload, today: { 不是看板的作物: [{ Avg_Price: 1 }] } }), /no rows/],
+      [JSON.stringify({ ...payload, today: Object.fromEntries(Object.keys(payload.today).map((r) => [r, [{ CropName: '休市' }]])) }), /no rows/],
+      [JSON.stringify({ ...payload, today: Object.fromEntries(Object.entries(payload.today).map(([r, rows]) =>
+        [r, (rows as Row[]).map((x) => ({ ...x, CropName: 123 }))])) }), /no rows/],
     ];
     for (const [body, why] of bad) {
       const out = post(back, body);
@@ -1625,6 +1628,16 @@ describe('a crawl pushed from Taiwan (#103)', () => {
     const kept = back.api.parsePushedCrawl(inherited).today;
     expect(Object.getPrototypeOf(kept)).toBe(Object.prototype);
     expect(Object.prototype.hasOwnProperty.call(kept, 'constructor')).toBe(false);
+  });
+
+  it('says it was not stored when the durable store would not take the board', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    back.breakProp('veggie_board_v2_chunks');
+    const out = post(back, JSON.stringify(payload));
+    expect(out.stored).toBe(false);
+    expect(out.reasons.join(' ')).toMatch(/could not be written/);
   });
 
   it('says what came of its own refresh, whatever another wrote alongside', () => {

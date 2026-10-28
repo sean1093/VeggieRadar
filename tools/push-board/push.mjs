@@ -23,7 +23,14 @@ const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const verbose = args.includes('--verbose');
 
+/** The Web App's `/exec` URL, checked: a bad one should fail before the crawl, not after. */
 function apiBase() {
+  const url = configuredApi().replace(/\/+$/, '');
+  if (!/^https?:\/\/[^/]/.test(url) || !URL.canParse(url)) throw new Error(`not a Web App URL: "${url}"`);
+  return url;
+}
+
+function configuredApi() {
   const flag = args.find((a) => a.startsWith('--api='));
   if (flag) return flag.slice('--api='.length);
   if (process.env.API_BASE_URL) return process.env.API_BASE_URL;
