@@ -61,6 +61,11 @@ function boardAgeMs(board) {
   return isNaN(built) ? null : Math.max(0, Date.now() - built);
 }
 
+// This execution's last `refreshBoardCache` verdict, for a caller that has to
+// say what came of it (`handlePush`): the stored `LAST_VALIDATION_PROP` is
+// shared with any refresh running alongside.
+var lastRefreshVerdict = null;
+
 /**
  * Crawls the MOA API and assembles the board. Slow (many requests) — only ever
  * called from the time-driven trigger / manual setup, never from doGet.
@@ -71,13 +76,18 @@ function boardAgeMs(board) {
  * never a board of whatever came back in time.
  */
 function buildBoard() {
+  return withCrawlBudget(crawlBoard);
+}
+
+/** Runs `crawl` as one crawl: under `CRAWL_BUDGET_MS`, with the relay's state fresh. */
+function withCrawlBudget(crawl) {
   crawlDeadline = Date.now() + CRAWL_BUDGET_MS;
   crawlCutShort = false;
   moaRelayFault = null;
   moaRelaySymptom = null;
   moaRelayAnswered = false;
   try {
-    return crawlBoard();
+    return crawl();
   } finally {
     crawlDeadline = null;
   }
@@ -89,23 +99,12 @@ function failedBoard(error) {
 }
 
 function crawlBoard() {
-  var cutShort = '向 MOA 抓取資料逾時（' + Math.round(CRAWL_BUDGET_MS / 1000) + ' 秒內未完成）：MOA 可能無法連線';
   // A crawl pushed from Taiwan (`Push.gs`) is the rows, already fetched.
-  var pushed = pushedCrawl;
-  var dates = pushed ? pushed.dates : resolveTradeDates(true);
-  if (!dates.latest) {
-    // The relay first: a probe it never answered runs out the budget too, and
-    // the budget is not what to look at then.
-    return failedBoard(relayFailure() || (crawlCutShort ? cutShort : '近期查無交易資料'));
-  }
+  var crawl = pushedCrawl || crawlDays();
+  if (crawl.error) return failedBoard(crawl.error);
+  var dates = crawl.dates;
 
-  var roots = boardRoots();
-  var today = pushed ? pushed.today : fetchRootRows(roots, dates.latest);
-  var prev = pushed ? pushed.prev : dates.prev ? fetchRootRows(roots, dates.prev) : {};
-  if (moaRelayFault) return failedBoard(moaRelayFault);
-  if (crawlCutShort) return failedBoard(cutShort);
-
-  var items = boardCards(today, prev);
+  var items = boardCards(crawl.today, crawl.prev);
   applyBaselines(items, readHistory(), dates.latest);
   // The medians kept from the last read: a Sheets read has no place before
   // the board is stored (`refreshYearAgo` runs last in the refresh).
@@ -123,6 +122,36 @@ function crawlBoard() {
     generated_at: new Date().toISOString(),
     count: items.length,
     items: items
+  };
+}
+
+/**
+ * The rows a board is built from: the trading date and the one before, and
+ * every board root's rows on each — or `{error}` saying why there are none.
+ * Run within `withCrawlBudget`; also what `tools/push-board` crawls in Taiwan.
+ * `unanswered` lists, per day, the roots MOA did not answer even on retry.
+ */
+function crawlDays() {
+  var cutShort = '向 MOA 抓取資料逾時（' + Math.round(CRAWL_BUDGET_MS / 1000) + ' 秒內未完成）：MOA 可能無法連線';
+  var dates = resolveTradeDates(true);
+  if (!dates.latest) {
+    // The relay first: a probe it never answered runs out the budget too, and
+    // the budget is not what to look at then.
+    return { error: relayFailure() || (crawlCutShort ? cutShort : '近期查無交易資料') };
+  }
+
+  var roots = boardRoots();
+  var metaToday = { answered: {}, truncated: {}, unanswered: {} };
+  var metaPrev = { answered: {}, truncated: {}, unanswered: {} };
+  var today = fetchRootRows(roots, dates.latest, undefined, metaToday);
+  var prev = dates.prev ? fetchRootRows(roots, dates.prev, undefined, metaPrev) : {};
+  if (moaRelayFault) return { error: moaRelayFault };
+  if (crawlCutShort) return { error: cutShort };
+  return {
+    dates: dates,
+    today: today,
+    prev: prev,
+    unanswered: { latest: Object.keys(metaToday.unanswered), prev: Object.keys(metaPrev.unanswered) }
   };
 }
 
@@ -266,6 +295,7 @@ function refreshBoardCache() {
   var verdict = board.items && board.items.length
     ? validateBoard(board, parseStoredBoard(readDurableBoard()))
     : { ok: false, reasons: [board.error || 'empty board'], suspects: [] };
+  lastRefreshVerdict = verdict;
   // Every refresh leaves a verdict, including an empty build: otherwise
   // `diag` would keep showing the previous run's `ok: true` under a refresh
   // that produced nothing.

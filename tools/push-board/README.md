@@ -7,9 +7,13 @@ the rows to the backend. Nothing to host and nothing to pay for: it runs when
 you run it.
 
 - **The crawl is the backend's own.** `backend.mjs` loads `backend/*.gs` with
-  the Apps Script services shimmed (requests go out through `curl`), so the
-  trading-date probe, the board's roots, the batching, retries and the crawl
-  budget are the ones a scheduled refresh uses. Nothing is re-implemented here.
+  the Apps Script services shimmed, and runs its `crawlDays` under its own
+  `withCrawlBudget`: the trading-date probe, the board's roots, the batches
+  (each one concurrent, as `UrlFetchApp.fetchAll`'s), the retry and the
+  3-minute crawl budget are the ones a scheduled refresh uses. A crawl the
+  budget cuts short fails here with the backend's own reason, and a root MOA
+  silences even on retry is left out as a refresh would leave it — and listed,
+  since you can re-run. Nothing is re-implemented here.
 - **The backend does the rest.** `POST ?action=push&token=…` (operator only)
   takes the rows instead of asking MOA and runs a normal refresh on them: the
   board is built, put through the plausibility guard, stored, written to the
@@ -33,8 +37,7 @@ Until then the tool says "The Web App does not take a push yet".
 
 ## Each time
 
-Node 22 or later, and `curl` (macOS, Linux and Windows 10+ ship it). No
-`npm install`: the tool has no dependencies.
+Node 22 or later. No `npm install`: the tool has no dependencies.
 
 ```bash
 cd tools/push-board
@@ -67,7 +70,8 @@ refresh in `last_refresh_ok`.
 
 | Message | |
 | --- | --- |
-| `No trading date found: MOA did not answer` | This machine cannot reach MOA either: not in Taiwan, or MOA is down |
+| `近期查無交易資料` / `向 MOA 抓取資料逾時…` then `MOA did not answer the crawl` | This machine cannot reach MOA either: not in Taiwan, MOA is down, or (behind a proxy) Node's `fetch` ignores `HTTPS_PROXY` — on Node 24, set `NODE_USE_ENV_PROXY=1` |
+| `unanswered on 115.10.27: …` | MOA did not answer those crops even on retry; they are left out, as a scheduled refresh would. Re-run to try again |
 | `Refused: ADMIN_TOKEN does not match` | The token is not the `ADMIN_TOKEN` script property |
 | `The Web App does not take a push yet` | The deployment predates `doPost`: see above |
 | `Not stored: …` | The plausibility guard rejected the board, with its reasons — the same verdict a scheduled refresh would get |

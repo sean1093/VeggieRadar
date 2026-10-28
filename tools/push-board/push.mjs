@@ -31,16 +31,18 @@ function apiBase() {
   return line.slice('VITE_API_BASE_URL='.length).trim();
 }
 
-/** One GET, synchronous as UrlFetchApp is: curl, which macOS, Linux and Windows 10+ ship. */
-function get(url) {
+/** One batch of GETs, made together and waited for synchronously, as UrlFetchApp's `fetchAll` is. */
+function fetchBatch(urls) {
+  let answers;
   try {
-    const out = execFileSync('curl', ['-sS', '--max-time', '60', '-w', '\n%{http_code}', url], { maxBuffer: 1 << 28 }).toString('utf8');
-    const cut = out.lastIndexOf('\n');
-    return { status: Number(out.slice(cut + 1)) || 0, body: out.slice(0, cut) };
+    const out = execFileSync(process.execPath, [resolve(HERE, 'fetch-batch.mjs')],
+      { input: JSON.stringify(urls), maxBuffer: 1 << 30, stdio: ['pipe', 'pipe', 'inherit'] });
+    answers = JSON.parse(out.toString('utf8'));
   } catch (err) {
-    if (verbose) console.error(`  ${url}: ${err.message}`);
-    return { status: 0, body: '' };
+    answers = urls.map(() => ({ status: 0, body: '', error: err.message }));
   }
+  if (verbose) answers.forEach((a, i) => a.status !== 200 && console.error(`  ${urls[i]}: ${a.error || a.status}`));
+  return answers;
 }
 
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -53,14 +55,21 @@ if (!dryRun && !token) {
 
 console.log('Crawling MOA…');
 const started = Date.now();
-const api = loadBackend(get, { sleep, log: verbose ? (m) => console.error(`  ${m}`) : () => {} });
-const { payload, summary } = crawl(api);
-console.log(`  trading date ${summary.latest ?? 'none found'}, previous ${summary.prev ?? 'none'}; ` +
-  `${summary.answered}/${summary.roots} roots answered in ${Math.round((Date.now() - started) / 1000)} s`);
-if (summary.unanswered.length) console.log(`  unanswered: ${summary.unanswered.join('、')}`);
+const api = loadBackend(fetchBatch, { sleep, log: verbose ? (m) => console.error(`  ${m}`) : () => {} });
+const { payload, error, summary } = crawl(api);
+const took = `${Math.round((Date.now() - started) / 1000)} s`;
 if (!payload) {
-  console.error('No trading date found: MOA did not answer. Is this machine in Taiwan?');
+  // The backend's own words: no trading date found, or the crawl cut short.
+  console.error(`  ${error} (${took})`);
+  console.error('MOA did not answer the crawl. Is this machine in Taiwan?');
   process.exit(1);
+}
+console.log(`  trading date ${summary.latest}, previous ${summary.prev ?? 'none'}; ${summary.roots} roots, in ${took}`);
+for (const day of ['latest', 'prev']) {
+  // Kept out of the board as a scheduled refresh would keep them, after its
+  // retry: said here because the operator, unlike the trigger, can re-run.
+  const missed = summary.unanswered[day];
+  if (missed.length) console.log(`  unanswered on ${summary[day]}: ${missed.join('、')}`);
 }
 if (dryRun) process.exit(0);
 

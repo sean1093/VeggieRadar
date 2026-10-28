@@ -1,28 +1,27 @@
 /**
  * The day's crawl as the backend would make it, as the body `?action=push`
- * takes (`backend/Push.gs`): the trading date and the one before, and every
- * board root's rows on each.
+ * takes (`backend/Push.gs`): the backend's own `crawlDays`, under its own
+ * `CRAWL_BUDGET_MS`, so a crawl the budget or the relay cut short fails here
+ * as a scheduled refresh would.
  * @param {ReturnType<import('./backend.mjs').loadBackend>} api
- * @returns {{payload: Object, summary: {latest: string|null, prev: string|null, roots: number, answered: number, unanswered: string[]}}}
+ * @returns {{payload: Object|null, error: string|null, summary: {latest: string|null, prev: string|null, roots: number, unanswered: {latest: string[], prev: string[]}}}}
  */
 export function crawl(api) {
-  const dates = api.resolveTradeDates(true);
-  if (!dates.latest) {
-    return { payload: null, summary: { latest: null, prev: null, roots: 0, answered: 0, unanswered: [] } };
+  const days = api.withCrawlBudget(api.crawlDays);
+  const roots = api.boardRoots().length;
+  if (days.error) {
+    return { payload: null, error: days.error, summary: { latest: null, prev: null, roots, unanswered: { latest: [], prev: [] } } };
   }
-  const roots = api.boardRoots();
-  const meta = { answered: {}, truncated: {}, unanswered: {} };
-  const today = api.fetchRootRows(roots, dates.latest, undefined, meta);
-  const prev = dates.prev ? api.fetchRootRows(roots, dates.prev, undefined, meta) : {};
-  const unanswered = Object.keys(meta.unanswered).sort();
+  const latest = days.dates.latest;
+  const prev = days.dates.prev || null;
   return {
-    payload: { dates: { latest: dates.latest, prev: dates.prev || null }, today, prev },
+    payload: { dates: { latest, prev }, today: days.today, prev: days.prev },
+    error: null,
     summary: {
-      latest: dates.latest,
-      prev: dates.prev || null,
-      roots: roots.length,
-      answered: roots.length - unanswered.length,
-      unanswered,
+      latest,
+      prev,
+      roots,
+      unanswered: { latest: [...days.unanswered.latest].sort(), prev: [...days.unanswered.prev].sort() },
     },
   };
 }

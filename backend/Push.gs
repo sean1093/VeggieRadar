@@ -20,13 +20,14 @@ function handlePush(body) {
   var crawl = parsePushedCrawl(body);
   if (crawl.error) return { type: 'push', stored: false, message: crawl.error };
   pushedCrawl = crawl;
+  lastRefreshVerdict = null;
   var board;
   try {
     board = refreshBoardCache();
   } finally {
     pushedCrawl = null;
   }
-  var verdict = parseJson(PropertiesService.getScriptProperties().getProperty(LAST_VALIDATION_PROP)) || {};
+  var verdict = lastRefreshVerdict || {};
   return {
     type: 'push',
     stored: !!verdict.ok,
@@ -57,9 +58,12 @@ function parsePushedCrawl(body) {
   var dates = data.dates || {};
   var latest = dates.latest;
   var prev = dates.prev === undefined ? null : dates.prev;
-  if (!ROC_DAY.test(String(latest))) return { error: 'dates.latest must be a ROC date like 115.10.27' };
-  if (prev !== null && (!ROC_DAY.test(String(prev)) || prev >= latest)) return { error: 'dates.prev must be an earlier ROC date, or null' };
-  if (latest > dateToROC(new Date(Date.now() + 86400000))) return { error: 'dates.latest is in the future' };
+  if (typeof latest !== 'string' || !ROC_DAY.test(latest)) return { error: 'dates.latest must be a ROC date like 115.10.27' };
+  if (prev !== null && (typeof prev !== 'string' || !ROC_DAY.test(prev) || prev >= latest)) {
+    return { error: 'dates.prev must be an earlier ROC date, or null' };
+  }
+  // Taiwan's today, as the tool's and the script's clocks both read it.
+  if (latest > dateToROC(new Date())) return { error: 'dates.latest is in the future' };
   var roots = {};
   var board = boardRoots();
   for (var i = 0; i < board.length; i++) roots[board[i]] = true;
@@ -75,7 +79,7 @@ function pushedRows(byRoot, roots) {
   if (!byRoot || typeof byRoot !== 'object' || Array.isArray(byRoot)) return null;
   var out = {};
   for (var root in byRoot) {
-    if (!roots[root] || !Array.isArray(byRoot[root])) continue;
+    if (!Object.prototype.hasOwnProperty.call(roots, root) || !Array.isArray(byRoot[root])) continue;
     out[root] = byRoot[root].filter(function (row) {
       return row && typeof row === 'object' && !Array.isArray(row);
     }).map(function (row) {

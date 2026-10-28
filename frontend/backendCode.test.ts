@@ -1520,9 +1520,11 @@ describe('a crawl pushed from Taiwan (#103)', () => {
     };
     return { get, asked: () => asked };
   };
+  const tool = (get: (url: string) => { status: number; body: string }) =>
+    loadPushTool((urls: string[]) => urls.map(get));
   const pushed = () => {
     const moa = moaFromTaiwan(plausibleRows());
-    const { payload, summary } = pushCrawl(loadPushTool(moa.get));
+    const { payload, summary } = pushCrawl(tool(moa.get));
     return { payload, summary, asked: moa.asked() };
   };
   const post = (back: ReturnType<typeof loadBackend>, body: string, token = TOKEN) =>
@@ -1531,7 +1533,7 @@ describe('a crawl pushed from Taiwan (#103)', () => {
   it('crawls with the backend\'s own code, there, and the backend stores the board from it', () => {
     const { payload, summary, asked } = pushed();
     expect(asked).toBeGreaterThan(0);
-    expect(summary.answered).toBe(summary.roots);
+    expect(summary.unanswered).toEqual({ latest: [], prev: [] });
     const back = loadBackend({}); // MOA unreachable from here: it must not be asked
     back.props.set('ADMIN_TOKEN', TOKEN);
     const out = post(back, JSON.stringify(payload));
@@ -1565,6 +1567,9 @@ describe('a crawl pushed from Taiwan (#103)', () => {
       [JSON.stringify({ ...payload, dates: { latest: '2026-10-27', prev: null } }), /ROC/],
       [JSON.stringify({ ...payload, dates: { latest: payload.dates.latest, prev: payload.dates.latest } }), /earlier/],
       [JSON.stringify({ ...payload, dates: { latest: '199.01.01', prev: null } }), /future/],
+      [JSON.stringify({ ...payload, dates: { latest: back.api.dateToROC(new Date(Date.now() + 86400000)), prev: null } }), /future/],
+      [JSON.stringify({ ...payload, dates: { latest: [payload.dates.latest], prev: null } }), /ROC/],
+      [JSON.stringify({ ...payload, dates: { latest: payload.dates.latest, prev: [payload.dates.prev] } }), /earlier/],
       [JSON.stringify({ ...payload, today: [] }), /today/],
     ];
     for (const [body, why] of bad) {
@@ -1585,6 +1590,55 @@ describe('a crawl pushed from Taiwan (#103)', () => {
     const crawl = back.api.parsePushedCrawl(JSON.stringify(payload));
     expect(crawl.today).not.toHaveProperty('不是看板的作物');
     expect(crawl.today[root].every((r: Record<string, unknown>) => !('nested' in r))).toBe(true);
+    // Names every object has are not board roots, nor a way to its prototype.
+    const inherited = JSON.stringify(payload).replace('"today":{', '"today":{"__proto__":[{"a":1}],"constructor":[{"a":1}],');
+    const kept = back.api.parsePushedCrawl(inherited).today;
+    expect(Object.getPrototypeOf(kept)).toBe(Object.prototype);
+    expect(Object.prototype.hasOwnProperty.call(kept, 'constructor')).toBe(false);
+  });
+
+  it('says what came of its own refresh, whatever another wrote alongside', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    // A scheduled refresh abroad fails just after this one stores its board.
+    const set = back.props.set.bind(back.props);
+    back.props.set = (k: string, v: string) => {
+      set(k, v);
+      if (k === 'veggie_last_validation') set(k, JSON.stringify({ ok: false, reasons: ['近期查無交易資料'] }));
+      return back.props;
+    };
+    expect(post(back, JSON.stringify(payload))).toMatchObject({ stored: true, reasons: [] });
+  });
+
+  it('crawls under the backend\'s budget, and fails as a refresh would when it runs out', () => {
+    const rows = plausibleRows();
+    const real = Date.now;
+    let skew = 0;
+    Date.now = () => real() + skew;
+    try {
+      const out = pushCrawl(tool((url) => {
+        skew += 40 * 1000; // a slow MOA: each request takes 40 s
+        const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+        return { status: 200, body: JSON.stringify({ RS: 'OK', Data: rows[root] || [] }) };
+      }));
+      expect(out.payload).toBeNull();
+      expect(out.error).toMatch(/逾時/);
+    } finally {
+      Date.now = real;
+    }
+  });
+
+  it('lists, per day, the roots MOA did not answer', () => {
+    const rows = plausibleRows();
+    const { payload } = pushed();
+    const root = Object.keys(payload.today)[1];
+    const out = pushCrawl(tool((url) => {
+      const asked = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+      if (asked === root && decodeURIComponent(url).includes(payload.dates.prev)) return { status: 0, body: '' };
+      return { status: 200, body: JSON.stringify({ RS: 'OK', Data: rows[asked] || [] }) };
+    }));
+    expect(out.summary.unanswered).toEqual({ latest: [], prev: [root] });
   });
 
   it('fails like a refresh when the rows are implausible, and stores nothing', () => {

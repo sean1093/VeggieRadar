@@ -1,7 +1,7 @@
 /**
  * This tool's window into the backend: every `backend/*.gs` evaluated in one
  * scope, as Apps Script merges them, so the crawl run here is the backend's
- * own — the same roots, trading-date probe, batches and retries. Only the
+ * own — the same roots, trading-date probe, batches, retries and budget. Only the
  * services differ: an in-memory store, and `fetchImpl` for UrlFetchApp.
  */
 import { readFileSync, readdirSync } from 'node:fs';
@@ -11,11 +11,12 @@ import { fileURLToPath } from 'node:url';
 export const BACKEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../backend');
 
 /**
- * @param {(url: string) => {status: number, body: string}} fetchImpl one
- *   synchronous HTTP GET, as UrlFetchApp's is.
+ * @param {(urls: string[]) => {status: number, body: string}[]} fetchBatch
+ *   HTTP GETs made together and answered in order, synchronous as
+ *   UrlFetchApp's `fetchAll` is.
  * @param {{sleep?: (ms: number) => void, log?: (msg: string) => void}} [opts]
  */
-export function loadBackend(fetchImpl, { sleep = () => {}, log = () => {} } = {}) {
+export function loadBackend(fetchBatch, { sleep = () => {}, log = () => {} } = {}) {
   const src = readdirSync(BACKEND_DIR).filter((f) => f.endsWith('.gs')).sort()
     .map((f) => readFileSync(resolve(BACKEND_DIR, f), 'utf8')).join('\n');
   const store = new Map();
@@ -36,10 +37,10 @@ export function loadBackend(fetchImpl, { sleep = () => {}, log = () => {} } = {}
     LockService: { getScriptLock: () => ({ waitLock() {}, tryLock: () => true, releaseLock() {} }) },
     Utilities: { sleep },
     UrlFetchApp: {
-      fetch: (url) => response(fetchImpl(url)),
-      fetchAll: (reqs) => reqs.map((r) => response(fetchImpl(typeof r === 'string' ? r : r.url))),
+      fetch: (url) => response(fetchBatch([url])[0]),
+      fetchAll: (reqs) => fetchBatch(reqs.map((r) => (typeof r === 'string' ? r : r.url))).map(response),
     },
   };
-  const names = ['resolveTradeDates', 'boardRoots', 'fetchRootRows', 'PROBE_ROOT'];
+  const names = ['withCrawlBudget', 'crawlDays', 'boardRoots'];
   return new Function(...Object.keys(services), `${src}\nreturn { ${names.join(', ')} };`)(...Object.values(services));
 }
