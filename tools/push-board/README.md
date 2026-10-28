@@ -20,9 +20,11 @@ you run it.
   board is built, put through the plausibility guard, stored, written to the
   history and the Sheet archive, and the mirror deploy is requested. A crawl
   the guard rejects is not stored, and the tool prints why.
-- **A malformed body changes nothing.** The backend accepts only a crawl —
-  ROC dates in order and not in the future, the board's own roots, each row's
-  plain values — and refuses anything else whole.
+- **A malformed body changes nothing.** The backend takes only a crawl: real
+  ROC dates in order and not in the future, and rows a card can be built
+  from. Anything else is refused whole; rows MOA would never have answered
+  for that crawl (another root, another day) are dropped, and the guard judges
+  the rest — an older trading date than the board on air included.
 
 ## Once: deploy the backend with `doPost`
 

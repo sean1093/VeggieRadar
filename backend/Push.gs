@@ -34,8 +34,9 @@ function handlePush(body) {
     type: 'push',
     stored: stored,
     reasons: stored ? [] : verdict.ok
-      // Served from the cache for its few hours, then the board before it.
-      ? ['the board passed the guard but could not be written to the script properties']
+      // History, archive and mirror have it; the cache serves it for a few
+      // hours, then the durable board before it. Pushing again fixes that.
+      ? ['the board passed the guard and is served from the cache, but could not be written to the script properties: push again']
       : (verdict.reasons || []),
     roc_date: board.roc_date || null,
     count: board.count || 0,
@@ -45,9 +46,12 @@ function handlePush(body) {
 
 /**
  * The pushed body, checked and cut to what a crawl is: `{dates: {latest,
- * prev}, today: {root: rows[]}, prev: {root: rows[]}}`, the dates ROC and in
- * order, the roots the board's own, each row's plain values only. Anything
- * else is refused whole, rather than half a board stored from it.
+ * prev}, today: {root: rows[]}, prev: {root: rows[]}}`. A body not of that
+ * shape — dates not real ROC days in order, `today`/`prev` not maps, nothing
+ * a card can be built from — is refused whole. Within it, what MOA would
+ * never answer for that crawl is dropped (another root, another day's row, a
+ * row without a `CropName`, any value but a string or number), and the guard
+ * then judges what is left, as it judges any crawl.
  */
 function parsePushedCrawl(body) {
   var text = String(body || '');

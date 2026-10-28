@@ -1630,6 +1630,18 @@ describe('a crawl pushed from Taiwan (#103)', () => {
     expect(Object.prototype.hasOwnProperty.call(kept, 'constructor')).toBe(false);
   });
 
+  it('does not replace the board on air with an older trading day', () => {
+    const back = loadBackend({});
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    const { payload } = pushed();
+    expect(post(back, JSON.stringify(payload))).toMatchObject({ stored: true });
+    const older = { ...payload, dates: { latest: payload.dates.prev, prev: null }, today: payload.prev, prev: {} };
+    const out = post(back, JSON.stringify(older));
+    expect(out.stored).toBe(false);
+    expect(out.reasons.join(' ')).toMatch(/older than the stored/);
+    expect(back.api.readBoard().roc_date).toBe(payload.dates.latest);
+  });
+
   it('says it was not stored when the durable store would not take the board', () => {
     const back = loadBackend({});
     back.props.set('ADMIN_TOKEN', TOKEN);

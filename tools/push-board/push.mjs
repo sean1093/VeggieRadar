@@ -47,25 +47,29 @@ function configuredApi() {
  * the answer's headers is shorter than the refresh the push runs, which may
  * take all of Apps Script's six minutes.
  */
-function post(url, body, waitMs = 7 * 60 * 1000, hops = 5) {
-  return new Promise((done, fail) => {
+function post(url, body, deadline = Date.now() + 7 * 60 * 1000, hops = 5) {
+  return new Promise((resolveIt, rejectIt) => {
+    // One deadline for the whole exchange, every hop and a trickled answer included.
+    let req;
+    const timer = setTimeout(() => req.destroy(new Error('no answer in 7 min')), Math.max(0, deadline - Date.now()));
+    const done = (v) => { clearTimeout(timer); resolveIt(v); };
+    const fail = (e) => { clearTimeout(timer); rejectIt(e); };
     const target = new URL(url);
     const send = target.protocol === 'http:' ? httpRequest : httpsRequest;
-    const req = send(target, body === null ? { method: 'GET' } : {
+    req = send(target, body === null ? { method: 'GET' } : {
       method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
     }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && hops > 0) {
-          done(post(new URL(res.headers.location, target).href, null, waitMs, hops - 1));
+          post(new URL(res.headers.location, target).href, null, deadline, hops - 1).then(done, fail);
         } else {
           done({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') });
         }
       });
       res.on('error', fail);
     });
-    req.setTimeout(waitMs, () => req.destroy(new Error(`no answer in ${Math.round(waitMs / 60000)} min`)));
     req.on('error', fail);
     req.end(body ?? undefined);
   });
@@ -124,7 +128,12 @@ for (const day of ['latest', 'prev']) {
 if (dryRun) process.exit(0);
 
 console.log('Pushing to the backend…');
-const url = `${api}?action=push&token=${encodeURIComponent(token)}`;
+const withParams = (params) => {
+  const url = new URL(api);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  return url.href;
+};
+const url = withParams({ action: 'push', token });
 const pushedAt = Date.now();
 let res;
 try {
@@ -134,7 +143,7 @@ try {
   // (`last_refresh_ok` is "<generated_at> <roc date> <count> items").
   console.error(`No answer from the backend (${err.code || err.message}).`);
   try {
-    const diag = await (await fetch(`${api}?action=diag`, { signal: AbortSignal.timeout(30_000) })).json();
+    const diag = await (await fetch(withParams({ action: 'diag' }), { signal: AbortSignal.timeout(30_000) })).json();
     const ok = String(diag.last_refresh_ok || '');
     const [at, day] = ok.split(' ');
     // A minute's grace for the two clocks.
