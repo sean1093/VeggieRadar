@@ -20,13 +20,14 @@ function handlePush(body) {
   var crawl = parsePushedCrawl(body);
   if (crawl.error) return { type: 'push', stored: false, message: crawl.error };
   pushedCrawl = crawl;
-  var board;
+  var refreshed;
   try {
-    board = refreshBoardCache();
+    refreshed = refreshBoard();
   } finally {
     pushedCrawl = null;
   }
-  var verdict = lastRefreshVerdict || {};
+  var board = refreshed.board;
+  var verdict = refreshed.verdict;
   return {
     type: 'push',
     stored: !!verdict.ok,
@@ -61,8 +62,9 @@ function parsePushedCrawl(body) {
   if (prev !== null && (typeof prev !== 'string' || !ROC_DAY.test(prev) || prev >= latest)) {
     return { error: 'dates.prev must be an earlier ROC date, or null' };
   }
-  // Taiwan's today, as the tool's and the script's clocks both read it.
-  if (latest > dateToROC(new Date())) return { error: 'dates.latest is in the future' };
+  // Taiwan's today, as the tool's and the script's clocks both read it — with
+  // a few minutes for the two clocks to disagree around midnight.
+  if (latest > dateToROC(new Date(Date.now() + PUSH_CLOCK_SKEW_MS))) return { error: 'dates.latest is in the future' };
   var roots = {};
   var board = boardRoots();
   for (var i = 0; i < board.length; i++) roots[board[i]] = true;

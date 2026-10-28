@@ -9,11 +9,12 @@ you run it.
 - **The crawl is the backend's own.** `backend.mjs` loads `backend/*.gs` with
   the Apps Script services shimmed, and runs its `crawlDays` under its own
   `withCrawlBudget`: the trading-date probe, the board's roots, the batches
-  (each one concurrent, as `UrlFetchApp.fetchAll`'s), the retry and the
-  3-minute crawl budget are the ones a scheduled refresh uses. A crawl the
-  budget cuts short fails here with the backend's own reason, and a root MOA
-  silences even on retry is left out as a refresh would leave it — and listed,
-  since you can re-run. Nothing is re-implemented here.
+  (each one concurrent, as `UrlFetchApp.fetchAll`'s) and the retry are the
+  ones a scheduled refresh uses. The budget is the tool's own, 10 minutes
+  rather than the backend's 3 — no Apps Script limit to fit in here — and a
+  crawl it cuts short fails with the backend's own reason. A root MOA silences
+  even on retry is left out as a refresh would leave it, and listed, since you
+  can re-run. Nothing is re-implemented here.
 - **The backend does the rest.** `POST ?action=push&token=…` (operator only)
   takes the rows instead of asking MOA and runs a normal refresh on them: the
   board is built, put through the plausibility guard, stored, written to the

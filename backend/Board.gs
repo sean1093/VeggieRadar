@@ -61,11 +61,6 @@ function boardAgeMs(board) {
   return isNaN(built) ? null : Math.max(0, Date.now() - built);
 }
 
-// This execution's last `refreshBoardCache` verdict, for a caller that has to
-// say what came of it (`handlePush`): the stored `LAST_VALIDATION_PROP` is
-// shared with any refresh running alongside.
-var lastRefreshVerdict = null;
-
 /**
  * Crawls the MOA API and assembles the board. Slow (many requests) — only ever
  * called from the time-driven trigger / manual setup, never from doGet.
@@ -79,15 +74,19 @@ function buildBoard() {
   return withCrawlBudget(crawlBoard);
 }
 
-/** Runs `crawl` as one crawl: under `CRAWL_BUDGET_MS`, with the relay's state fresh. */
-function withCrawlBudget(crawl) {
-  crawlDeadline = Date.now() + CRAWL_BUDGET_MS;
+/**
+ * Runs `crawl` as one crawl: under `CRAWL_BUDGET_MS` (or `budgetMs`, for a
+ * crawl Apps Script's limit does not bind: `tools/push-board`), with the
+ * relay's state fresh. `crawl` is passed the budget.
+ */
+function withCrawlBudget(crawl, budgetMs) {
+  crawlDeadline = Date.now() + (budgetMs || CRAWL_BUDGET_MS);
   crawlCutShort = false;
   moaRelayFault = null;
   moaRelaySymptom = null;
   moaRelayAnswered = false;
   try {
-    return crawl();
+    return crawl(budgetMs || CRAWL_BUDGET_MS);
   } finally {
     crawlDeadline = null;
   }
@@ -131,8 +130,8 @@ function crawlBoard() {
  * Run within `withCrawlBudget`; also what `tools/push-board` crawls in Taiwan.
  * `unanswered` lists, per day, the roots MOA did not answer even on retry.
  */
-function crawlDays() {
-  var cutShort = '向 MOA 抓取資料逾時（' + Math.round(CRAWL_BUDGET_MS / 1000) + ' 秒內未完成）：MOA 可能無法連線';
+function crawlDays(budgetMs) {
+  var cutShort = '向 MOA 抓取資料逾時（' + Math.round((budgetMs || CRAWL_BUDGET_MS) / 1000) + ' 秒內未完成）：MOA 可能無法連線';
   var dates = resolveTradeDates(true);
   if (!dates.latest) {
     // The relay first: a probe it never answered runs out the budget too, and
@@ -151,7 +150,7 @@ function crawlDays() {
     dates: dates,
     today: today,
     prev: prev,
-    unanswered: { latest: Object.keys(metaToday.unanswered), prev: Object.keys(metaPrev.unanswered) }
+    unanswered: { latest: Object.keys(metaToday.unanswered).sort(), prev: Object.keys(metaPrev.unanswered).sort() }
   };
 }
 
@@ -289,13 +288,22 @@ function chunkedFrom(all, prefix, countKey) {
  * can show that refreshes are running and what they decided.
  */
 function refreshBoardCache() {
+  return refreshBoard().board;
+}
+
+/**
+ * `refreshBoardCache`, with the guard's verdict on the board it built — for a
+ * caller that has to say what came of its own refresh (`handlePush`): the
+ * stored `LAST_VALIDATION_PROP` is shared with any refresh running alongside.
+ * @returns {{board: Object, verdict: {ok: boolean, reasons: string[]}}}
+ */
+function refreshBoard() {
   var started = Date.now();
   var board = buildBoard();
   var props = PropertiesService.getScriptProperties();
   var verdict = board.items && board.items.length
     ? validateBoard(board, parseStoredBoard(readDurableBoard()))
     : { ok: false, reasons: [board.error || 'empty board'], suspects: [] };
-  lastRefreshVerdict = verdict;
   // Every refresh leaves a verdict, including an empty build: otherwise
   // `diag` would keep showing the previous run's `ok: true` under a refresh
   // that produced nothing.
@@ -346,7 +354,7 @@ function refreshBoardCache() {
     recordRefreshOutcome(false, reason);
   }
   Logger.log('Board refreshed: ' + (board.count || 0) + ' items for ' + (board.roc_date || 'n/a'));
-  return board;
+  return { board: board, verdict: verdict };
 }
 
 /**

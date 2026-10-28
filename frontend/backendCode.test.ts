@@ -1613,22 +1613,30 @@ describe('a crawl pushed from Taiwan (#103)', () => {
     expect(post(back, JSON.stringify(payload))).toMatchObject({ stored: true, reasons: [] });
   });
 
-  it('crawls under the backend\'s budget, and fails as a refresh would when it runs out', () => {
+  it('crawls under a budget of its own: past the backend\'s, and still ending', () => {
     const rows = plausibleRows();
     const real = Date.now;
-    let skew = 0;
-    Date.now = () => real() + skew;
-    try {
-      const out = pushCrawl(tool((url) => {
-        skew += 40 * 1000; // a slow MOA: each request takes 40 s
-        const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
-        return { status: 200, body: JSON.stringify({ RS: 'OK', Data: rows[root] || [] }) };
-      }));
-      expect(out.payload).toBeNull();
-      expect(out.error).toMatch(/逾時/);
-    } finally {
-      Date.now = real;
-    }
+    const crawlTaking = (perBatchMs: number) => {
+      let skew = 0;
+      Date.now = () => real() + skew;
+      try {
+        return pushCrawl(loadPushTool((urls: string[]) => {
+          skew += perBatchMs; // a slow MOA, or a slow line
+          return urls.map((url) => {
+            const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+            return { status: 200, body: JSON.stringify({ RS: 'OK', Data: rows[root] || [] }) };
+          });
+        }));
+      } finally {
+        Date.now = real;
+      }
+    };
+    const slow = crawlTaking(15 * 1000);
+    expect(slow.error).toBeNull(); // several minutes: too long for Apps Script, not for here
+    expect(slow.payload.today).toEqual(pushed().payload.today);
+    const stalled = crawlTaking(60 * 1000);
+    expect(stalled.payload).toBeNull();
+    expect(stalled.error).toMatch(/600 秒內未完成/);
   });
 
   it('lists, per day, the roots MOA did not answer', () => {
@@ -1659,7 +1667,7 @@ describe('a crawl pushed from Taiwan (#103)', () => {
       setTimeout(() => {
         res.writeHead(req.url!.includes('bad') ? 500 : 200);
         res.end(`甘藍 ${decodeURIComponent(req.url!)}`);
-      }, 300);
+      }, 1000);
     });
     await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -1673,13 +1681,13 @@ describe('a crawl pushed from Taiwan (#103)', () => {
       const cut = body.indexOf(Buffer.from('菜')) + 1;
       child.stdin!.write(body.subarray(0, cut));
       setTimeout(() => child.stdin!.end(body.subarray(cut)), 100);
-    });
-    server.close();
+    }).finally(() => server.close());
     const answers = JSON.parse(out);
     expect(answers.map((a: { status: number }) => a.status)).toEqual([200, 500, 0, 200, 200]);
     expect(answers[0].body).toBe('甘藍 /?CropName=甘藍');
     expect(answers[4].body).toBe('甘藍 /菜菜菜');
-    expect(Date.now() - started).toBeLessThan(100 + 4 * 300); // together, not one after another
+    // Together: one after another, the four answered would take 4 s at least.
+    expect(Date.now() - started).toBeLessThan(3500);
   });
 
   it('accepts no other POST', () => {
