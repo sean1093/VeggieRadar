@@ -134,7 +134,7 @@ function boardFromCrawl(crawl) {
  * `unanswered` lists, per day, the roots MOA did not answer even on retry.
  */
 function crawlDays(budgetMs) {
-  var cutShort = '向 MOA 抓取資料逾時（' + Math.round(budgetMs / 1000) + ' 秒內未完成）：MOA 可能無法連線';
+  var cutShort = '向 MOA 抓取資料逾時（' + Math.round((budgetMs || CRAWL_BUDGET_MS) / 1000) + ' 秒內未完成）：MOA 可能無法連線';
   var dates = resolveTradeDates(true);
   if (!dates.latest) {
     // The relay first: a probe it never answered runs out the budget too, and

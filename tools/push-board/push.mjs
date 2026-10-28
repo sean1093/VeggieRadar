@@ -17,6 +17,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadBackend } from './backend.mjs';
 import { crawl } from './crawl.mjs';
+import { isTransient, withRetry } from '../../frontend/scripts/gas-retry.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -135,13 +136,14 @@ const withParams = (params) => {
 };
 const url = withParams({ action: 'push', token });
 const pushedAt = Date.now();
-let res;
-try {
-  res = await post(url, JSON.stringify(payload));
-} catch (err) {
-  // What the refresh did is in `diag`: a board stored since this push began
-  // (`last_refresh_ok` is "<generated_at> <roc date> <count> items").
-  console.error(`No answer from the backend (${err.code || err.message}).`);
+const NOT_DEPLOYED = 'The Web App does not take a push yet: run `clasp push` and `clasp deploy -i <deployment id>`.';
+
+/**
+ * Whether `diag` shows this push's day stored since it began (`last_refresh_ok`
+ * is "<generated_at> <roc date> <count> items"), for when the push itself
+ * could not say: what the refresh did is there either way.
+ */
+async function reportFromDiag() {
   try {
     const diag = await (await fetch(withParams({ action: 'diag' }), { signal: AbortSignal.timeout(30_000) })).json();
     const ok = String(diag.last_refresh_ok || '');
@@ -153,6 +155,21 @@ try {
   } catch {
     console.error('Nor from ?action=diag: check it in a few minutes before pushing again.');
   }
+}
+
+// A 404 or 5xx is Apps Script's own page — a cold start, or Google having a
+// moment — so doPost never ran and asking again is safe (gas-retry.mjs). No
+// answer at all is not: the refresh may still be running.
+const res = await withRetry(async (u) => {
+  try {
+    return await post(u, JSON.stringify(payload));
+  } catch (err) {
+    return { error: err };
+  }
+}, url, { transient: (r) => !r.error && isTransient(r) });
+if (res.error) {
+  console.error(`No answer from the backend (${res.error.code || res.error.message}).`);
+  await reportFromDiag();
   process.exit(1);
 }
 const text = res.text;
@@ -161,9 +178,8 @@ try {
   out = JSON.parse(text);
 } catch {
   // An older deployment has no doPost, and Apps Script says so in HTML.
-  console.error(/doPost/.test(text)
-    ? 'The Web App does not take a push yet: run `clasp push` and `clasp deploy -i <deployment id>`.'
-    : `The backend answered ${res.status}, not JSON: ${text.slice(0, 200)}`);
+  console.error(/doPost/.test(text) ? NOT_DEPLOYED
+    : `The backend answered ${res.status}, not JSON (after ${res.attempts} attempts): ${text.slice(0, 200)}`);
   process.exit(1);
 }
 if (out.error === 'unauthorized') {
@@ -171,7 +187,7 @@ if (out.error === 'unauthorized') {
   process.exit(1);
 }
 if (out.error === 'unknown action' || (out.type && out.type !== 'push')) {
-  console.error('The Web App does not take a push yet: run `clasp push` and `clasp deploy -i <deployment id>`.');
+  console.error(NOT_DEPLOYED);
   process.exit(1);
 }
 if (out.busy) {
@@ -180,6 +196,8 @@ if (out.busy) {
 }
 if (!out.stored) {
   console.error(`Not stored: ${out.message || (out.reasons || []).join('; ') || JSON.stringify(out)}`);
+  // A refresh that threw may have thrown after the store.
+  if (out.error) await reportFromDiag();
   process.exit(1);
 }
 console.log(`Stored: ${out.count} items for ${out.roc_date}, generated ${out.generated_at}.`);
