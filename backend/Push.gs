@@ -6,10 +6,6 @@
  * exactly as a refresh would — only the rows came from elsewhere.
  */
 
-// The rows of a pushed crawl while `handlePush` runs a refresh on them, else
-// null; `crawlBoard` takes them instead of asking MOA. Per execution.
-var pushedCrawl = null;
-
 /**
  * `POST ?action=push&token=…` with the crawl as the body. Operator only; a
  * malformed body changes nothing.
@@ -19,13 +15,7 @@ var pushedCrawl = null;
 function handlePush(body) {
   var crawl = parsePushedCrawl(body);
   if (crawl.error) return { type: 'push', stored: false, message: crawl.error };
-  pushedCrawl = crawl;
-  var refreshed;
-  try {
-    refreshed = refreshBoard();
-  } finally {
-    pushedCrawl = null;
-  }
+  var refreshed = refreshBoard(crawl);
   var board = refreshed.board;
   var verdict = refreshed.verdict;
   return {
@@ -58,8 +48,8 @@ function parsePushedCrawl(body) {
   var dates = data.dates || {};
   var latest = dates.latest;
   var prev = dates.prev === undefined ? null : dates.prev;
-  if (typeof latest !== 'string' || !ROC_DAY.test(latest)) return { error: 'dates.latest must be a ROC date like 115.10.27' };
-  if (prev !== null && (typeof prev !== 'string' || !ROC_DAY.test(prev) || prev >= latest)) {
+  if (!isRocDay(latest)) return { error: 'dates.latest must be a ROC date like 115.10.27' };
+  if (prev !== null && (!isRocDay(prev) || prev >= latest)) {
     return { error: 'dates.prev must be an earlier ROC date, or null' };
   }
   // Taiwan's today, as the tool's and the script's clocks both read it — with
@@ -68,21 +58,30 @@ function parsePushedCrawl(body) {
   var roots = {};
   var board = boardRoots();
   for (var i = 0; i < board.length; i++) roots[board[i]] = true;
-  var today = pushedRows(data.today, roots);
+  var today = pushedRows(data.today, roots, latest);
   if (!today) return { error: 'today must map roots to rows' };
-  var before = prev === null ? {} : pushedRows(data.prev, roots);
+  var before = prev === null ? {} : pushedRows(data.prev, roots, prev);
   if (!before) return { error: 'prev must map roots to rows' };
   return { dates: { latest: latest, prev: prev }, today: today, prev: before };
 }
 
-/** A root → rows map kept to the board's roots and each row's plain values; null when not a map. */
-function pushedRows(byRoot, roots) {
+/** A real calendar day written as MOA writes it: `115.10.27`, never `115.13.40`. */
+function isRocDay(value) {
+  return typeof value === 'string' && ROC_DAY.test(value) && dateToROC(rocToDate(value)) === value;
+}
+
+/**
+ * A root → rows map kept to the board's roots, to rows of `day` (a row naming
+ * another `TransDate` is not that day's), and to each row's plain values;
+ * null when not a map.
+ */
+function pushedRows(byRoot, roots, day) {
   if (!byRoot || typeof byRoot !== 'object' || Array.isArray(byRoot)) return null;
   var out = {};
   for (var root in byRoot) {
     if (!Object.prototype.hasOwnProperty.call(roots, root) || !Array.isArray(byRoot[root])) continue;
     out[root] = byRoot[root].filter(function (row) {
-      return row && typeof row === 'object' && !Array.isArray(row);
+      return row && typeof row === 'object' && !Array.isArray(row) && (row.TransDate === undefined || row.TransDate === day);
     }).map(function (row) {
       var plain = {};
       for (var key in row) {

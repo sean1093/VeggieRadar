@@ -69,9 +69,13 @@ function boardAgeMs(board) {
  * the execution into Apps Script's limit, which ends it with nothing
  * recorded. A crawl the budget cut short is a failed build with that reason,
  * never a board of whatever came back in time.
+ * @param {Object=} pushed a crawl made in Taiwan (`Push.gs`): the board is
+ *   built from its rows, and MOA is not asked.
  */
-function buildBoard() {
-  return withCrawlBudget(crawlBoard);
+function buildBoard(pushed) {
+  return withCrawlBudget(function (budgetMs) {
+    return crawlBoard(budgetMs, pushed);
+  });
 }
 
 /**
@@ -97,9 +101,8 @@ function failedBoard(error) {
   return { type: 'board', error: error, generated_at: new Date().toISOString(), count: 0, items: [] };
 }
 
-function crawlBoard() {
-  // A crawl pushed from Taiwan (`Push.gs`) is the rows, already fetched.
-  var crawl = pushedCrawl || crawlDays();
+function crawlBoard(budgetMs, pushed) {
+  var crawl = pushed || crawlDays(budgetMs);
   if (crawl.error) return failedBoard(crawl.error);
   var dates = crawl.dates;
 
@@ -288,18 +291,19 @@ function chunkedFrom(all, prefix, countKey) {
  * can show that refreshes are running and what they decided.
  */
 function refreshBoardCache() {
-  return refreshBoard().board;
+  return refreshBoard().board; // never the trigger's event object as a crawl
 }
 
 /**
  * `refreshBoardCache`, with the guard's verdict on the board it built — for a
  * caller that has to say what came of its own refresh (`handlePush`): the
  * stored `LAST_VALIDATION_PROP` is shared with any refresh running alongside.
+ * @param {Object=} pushed a crawl made in Taiwan, as `buildBoard` takes it.
  * @returns {{board: Object, verdict: {ok: boolean, reasons: string[]}}}
  */
-function refreshBoard() {
+function refreshBoard(pushed) {
   var started = Date.now();
-  var board = buildBoard();
+  var board = buildBoard(pushed);
   var props = PropertiesService.getScriptProperties();
   var verdict = board.items && board.items.length
     ? validateBoard(board, parseStoredBoard(readDurableBoard()))

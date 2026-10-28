@@ -44,7 +44,7 @@ HTTP proxy, set `NODE_USE_ENV_PROXY=1` as well (Node 22.21+ / 24): Node's
 
 ```bash
 cd tools/push-board
-node push.mjs --dry-run      # crawl only: the trading date and how many roots answered
+node push.mjs --dry-run      # crawl only: the trading dates and how many roots answered on each
 ```
 
 Then push, with the `ADMIN_TOKEN` script property as the token:
@@ -77,6 +77,7 @@ refresh in `last_refresh_ok`.
 | `unanswered on 115.10.27: …` | MOA did not answer those crops even on retry; they are left out, as a scheduled refresh would. Re-run to try again |
 | `Refused: ADMIN_TOKEN does not match` | The token is not the `ADMIN_TOKEN` script property |
 | `The Web App does not take a push yet` | The deployment predates `doPost`: see above |
+| `No answer from the backend` | The request gave up before the refresh did; the tool then reads `?action=diag` and says whether the day was stored. Check it before pushing again |
 | `Not stored: …` | The plausibility guard rejected the board, with its reasons — the same verdict a scheduled refresh would get |
 
 ## The static mirror

@@ -1572,6 +1572,8 @@ describe('a crawl pushed from Taiwan (#103)', () => {
       [JSON.stringify({ ...payload, dates: { latest: back.api.dateToROC(new Date(Date.now() + 86400000)), prev: null } }), /future/],
       [JSON.stringify({ ...payload, dates: { latest: [payload.dates.latest], prev: null } }), /ROC/],
       [JSON.stringify({ ...payload, dates: { latest: payload.dates.latest, prev: [payload.dates.prev] } }), /earlier/],
+      [JSON.stringify({ ...payload, dates: { latest: '114.13.40', prev: null } }), /ROC/],
+      [JSON.stringify({ ...payload, dates: { latest: payload.dates.latest, prev: '114.02.30' } }), /earlier/],
       [JSON.stringify({ ...payload, today: [] }), /today/],
     ];
     for (const [body, why] of bad) {
@@ -1592,6 +1594,13 @@ describe('a crawl pushed from Taiwan (#103)', () => {
     const crawl = back.api.parsePushedCrawl(JSON.stringify(payload));
     expect(crawl.today).not.toHaveProperty('不是看板的作物');
     expect(crawl.today[root].every((r: Record<string, unknown>) => !('nested' in r))).toBe(true);
+    // A row of another day is not this day's.
+    const dated = JSON.parse(JSON.stringify(payload));
+    dated.today[root] = [
+      { ...dated.today[root][0], TransDate: payload.dates.latest, Avg_Price: 1 },
+      { ...dated.today[root][0], TransDate: payload.dates.prev, Avg_Price: 2 },
+    ];
+    expect(back.api.parsePushedCrawl(JSON.stringify(dated)).today[root].map((r: Row) => r.Avg_Price)).toEqual([1]);
     // Names every object has are not board roots, nor a way to its prototype.
     const inherited = JSON.stringify(payload).replace('"today":{', '"today":{"__proto__":[{"a":1}],"constructor":[{"a":1}],');
     const kept = back.api.parsePushedCrawl(inherited).today;
