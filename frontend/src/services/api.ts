@@ -140,6 +140,10 @@ export function writeCachedBoard(board: BoardResponse): void {
  */
 export function isFreshEnough(board: BoardResponse, now: number = Date.now()): boolean {
   const age = boardAgeMs(board.generated_at, now);
+  // Not the board's own `max_age_ms`, even in push mode (36 h): that says how
+  // long the prices may be shown as current, not how long GAS may go unasked.
+  // A push lands in GAS at once and in the mirror only at the next deploy, so
+  // trusting a day-old mirror would hide each push for hours.
   return age !== null && age <= BOARD_MAX_AGE_MS;
 }
 

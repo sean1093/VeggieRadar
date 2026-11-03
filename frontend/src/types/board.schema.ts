@@ -115,6 +115,9 @@ export const BoardResponseSchema = z.object({
   // 但 generated_at 停住代表更新流程壞了 —— 兩者必須分開呈現。
   generated_at: z.optional(z.string()),
   age_ms: z.optional(z.nullable(z.number())),
+  // The backend's freshness limit for this board: 6 h crawling on schedule,
+  // 36 h when the board comes only from pushes (MOA_SOURCE=push, #103).
+  max_age_ms: z.optional(z.nullable(z.number())),
   stale: z.optional(z.boolean()),
   warming: z.optional(z.boolean()),
 });

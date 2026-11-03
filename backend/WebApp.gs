@@ -153,6 +153,7 @@ function withoutForce(params) {
 
 /** `?action=warm` — queues a rebuild and answers immediately. `force=1` jumps the lock. */
 function handleWarm(params) {
+  if (pushMode()) return { type: 'warm', queued: false, message: PUSH_SKIP_REASON, board: boardSummary() };
   if (params && params.force) CacheService.getScriptCache().remove(REFRESH_LOCK_KEY);
   var queued = scheduleRefresh();
   return {
@@ -178,7 +179,7 @@ function publicMoaRelay(props) {
 function handleDiag(full, props) {
   props = props || PropertiesService.getScriptProperties().getProperties();
   var handlers = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
-  var board = boardSummary();
+  var board = boardSummary(props);
   return {
     type: 'diag',
     now: new Date().toISOString(),
@@ -217,6 +218,9 @@ function handleDiag(full, props) {
     // URL or key: `diag` is public. A URL without a key, or not https, is not
     // used, and says so rather than read as either.
     moa_relay: publicMoaRelay(props),
+    // Where the board comes from: `moa`, crawled on schedule, or `push`, only
+    // from tools/push-board (`MOA_SOURCE`).
+    moa_source: pushMode(props) ? 'push' : 'moa',
     // Alert state, so a silent mailbox can be told apart from a silent
     // pipeline. The recipient address is deliberately not exposed — diag is a
     // public endpoint.
@@ -293,17 +297,19 @@ function parseValidation(json) {
 }
 
 /** Freshness header of the stored board — no items, so it stays cheap to serve. */
-function boardSummary() {
+function boardSummary(props) {
   var json = CacheService.getScriptCache().get(BOARD_CACHE_KEY) || readDurableBoard();
   if (!json) return null;
   var board = JSON.parse(json);
   var age = boardAgeMs(board);
+  var maxAge = boardMaxAgeMs(pushMode(props));
   return {
     date: board.date || null,
     roc_date: board.roc_date || null,
     generated_at: board.generated_at || null,
     age_ms: age,
-    stale: age === null || age > BOARD_MAX_AGE_MS,
+    max_age_ms: maxAge,
+    stale: age === null || age > maxAge,
     count: board.count || 0
   };
 }

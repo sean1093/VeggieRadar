@@ -24,6 +24,8 @@ export interface BoardFreshness {
    * It can only *add* staleness — never vouch for freshness. See below.
    */
   stale?: boolean;
+  /** The backend's limit for this board (`max_age_ms`); see `boardMaxAge`. */
+  maxAgeMs?: number | null;
 }
 
 export interface FreshnessNotice {
@@ -42,6 +44,36 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  * reports itself stale in the minutes before a scheduled run.
  */
 export const BOARD_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * The longest a board may say it stays current: `PUSH_MODE_MAX_AGE_MS` in
+ * `backend/Config.gs`, where the board comes only from pushes made by hand
+ * (`MOA_SOURCE=push`, #103) and a day and a half between them is routine.
+ */
+export const BOARD_MAX_AGE_CEILING_MS = 36 * 60 * 60 * 1000;
+
+/**
+ * How old this board may be and still be current: the backend's own limit,
+ * which it publishes as `max_age_ms` with the board (6 h when it crawls on
+ * schedule, 36 h in push mode), else `BOARD_MAX_AGE_MS`. A value that is not
+ * a positive number is ignored, and none vouches past the ceiling: a mirror
+ * file outlives the backend that wrote it, and a limit is the one thing in it
+ * that must not be able to keep an old board current for good.
+ */
+export function boardMaxAge(maxAgeMs: unknown): number {
+  if (typeof maxAgeMs !== 'number' || !Number.isFinite(maxAgeMs) || maxAgeMs <= 0) return BOARD_MAX_AGE_MS;
+  return Math.min(maxAgeMs, BOARD_MAX_AGE_CEILING_MS);
+}
+
+/**
+ * The age past which a board is a pipeline that stopped, for the mirror's
+ * deploy (`validate-board.mjs`) and the probe: its limit plus one missed
+ * refresh's slack — 8 h crawled on schedule, 38 h in push mode.
+ */
+export const BOARD_AGE_SLACK_MS = 2 * 60 * 60 * 1000;
+export function boardAgeLimit(board: { max_age_ms?: unknown } | null | undefined): number {
+  return boardMaxAge(board?.max_age_ms) + BOARD_AGE_SLACK_MS;
+}
 
 /** Milliseconds since the backend crawled the board, or null when unknowable. */
 export function boardAgeMs(generatedAt: string | undefined, now: number = Date.now()): number | null {
@@ -71,7 +103,7 @@ export function describeFreshness(board: BoardFreshness, now: Date = new Date())
   // rebuild, and an unparsable timestamp leaves nothing to compute — but it can
   // only add staleness, never vouch for it.
   const age = boardAgeMs(board.generatedAt, now.getTime());
-  if (board.stale || (age !== null && age > BOARD_MAX_AGE_MS)) {
+  if (board.stale || (age !== null && age > boardMaxAge(board.maxAgeMs))) {
     return { note: '資料更新中，稍後重新整理可看到最新行情', checkedAt };
   }
   if (!board.date) return { note: null, checkedAt };

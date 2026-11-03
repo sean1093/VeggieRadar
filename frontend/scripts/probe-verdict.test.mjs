@@ -272,12 +272,34 @@ describe('reachabilityCategory — what "no usable answer" was', () => {
   });
 });
 
+describe('applyVerdict — a mirror in push mode carries its own limit (#103)', () => {
+  const PUSH_MAX_AGE_MS = 36 * HOUR;
+  const pushed = (ageMs, status = 'ok') => ({
+    ...check('mirror', status, status === 'failed' ? 'mirror_stale' : undefined),
+    serving: { ageMs, count: 93, maxAgeMs: PUSH_MAX_AGE_MS },
+  });
+
+  it('carries visitors through a backend outage only as long as the app skips GAS', () => {
+    // Past the app's bar every visit asks GAS, so a current push-mode board in
+    // the mirror does not spare them the outage.
+    expect(pages(verdict([check('pages', 'ok'), pushed(INSIDE_BAR_MS), gasDown]))).toBe(false);
+    expect(pages(verdict([check('pages', 'ok'), pushed(20 * HOUR), gasDown]))).toBe(true);
+  });
+
+  it('is late, not stopped, by as much longer as its limit is', () => {
+    const late = PUSH_MAX_AGE_MS - BOARD_MAX_AGE_MS;
+    expect(pages(verdict([check('pages', 'ok'), pushed(PAST_BACKSTOP_MS, 'failed'), boardOk]))).toBe(false);
+    expect(pages(verdict([check('pages', 'ok'), pushed(PAST_BACKSTOP_MS + late, 'failed'), boardOk]))).toBe(true);
+  });
+});
+
 describe('servingFor — which mirrors may be softened at all', () => {
   const SKEW = 5 * 60 * 1000;
   const measure = (over) => servingFor({ ageMs: HOUR, count: 93, problemKind: null, maxSkewMs: SKEW, ...over });
 
   it('measures a clean board, whatever its age', () => {
     expect(measure()).toEqual({ ageMs: HOUR, count: 93 });
+    expect(measure({ maxAgeMs: 36 * HOUR })).toEqual({ ageMs: HOUR, count: 93, maxAgeMs: 36 * HOUR });
     expect(measure({ ageMs: 9 * HOUR, problemKind: 'stale' })).toEqual({ ageMs: 9 * HOUR, count: 93 });
   });
 

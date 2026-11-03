@@ -38,6 +38,13 @@ clasp deploy -i <deploymentId>   # the ID in VITE_API_BASE_URL, frontend/.env
 
 Until then the tool says "The Web App does not take a push yet".
 
+Then set the `MOA_SOURCE` script property to `push`. Without it the scheduled
+refresh keeps trying MOA, fails, and after three failures opens an incident
+and mails you, every day. With it, the schedule asks MOA nothing, a pushed
+board counts as current for 36 h, and you are mailed only if 36 h pass
+without a push. Delete it once Apps Script can reach MOA again (a relay, or
+MOA lifting the block).
+
 ## Each time
 
 Node 22 or later. No `npm install`: the tool has no dependencies. Behind an

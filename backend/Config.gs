@@ -118,6 +118,18 @@ var PROP_CHUNK_SIZE = 8000; // UTF-8 bytes, under a property's 9 KB
 // only has to be tight enough to self-heal within one visit.
 var REFRESH_INTERVAL_HOURS = 4;                  // time-driven trigger cadence
 var BOARD_MAX_AGE_MS = 6 * 60 * 60 * 1000;       // > cadence + crawl; rebuild on demand past this
+
+// The `MOA_SOURCE` script property set to `push` (#103): MOA refuses Apps
+// Script's servers, so the board comes only from `tools/push-board`, run by
+// hand in Taiwan. The scheduled refresh then asks nothing and fails nothing —
+// no streak, no incident, no mail — and a board is current for a day and a
+// half rather than 6 h: a push a day, a late one included. Past that, the same
+// silence alert as ever says nobody pushed. Unset, the backend crawls MOA.
+var MOA_SOURCE_PROP = 'MOA_SOURCE';
+var MOA_SOURCE_CACHE_KEY = 'veggie_moa_source';
+var MOA_SOURCE_TTL = 5 * 60; // seconds
+var PUSH_MODE_MAX_AGE_MS = 36 * 60 * 60 * 1000;
+var PUSH_SKIP_REASON = 'MOA_SOURCE=push：看板只由 tools/push-board 更新';
 var REFRESH_LOCK_KEY = 'veggie_refresh_queued';
 
 var REFRESH_LOCK_TTL = 15 * 60;            // seconds; one queued rebuild per window

@@ -742,6 +742,18 @@ Taiwan: `tools/push-board` runs the backend's own crawl there and POSTs the
 rows to `?action=push`, where a normal refresh — guard, store, archive,
 mirror — runs on them. Nothing to host; see `tools/push-board/README.md`.
 
+While that is the only way in, set the `MOA_SOURCE` script property to `push`.
+The scheduled refresh then asks MOA nothing — it would only time out three
+times a day, open an incident and mail about it — and a board is current for
+36 h (`PUSH_MODE_MAX_AGE_MS`) rather than 6 h, a push a day with room for a
+late one. The board carries its limit as `max_age_ms`, which the app's
+「資料更新中」 notice, the mirror's deploy (`validate-board.mjs`) and the probe
+all judge it by, so none of them calls a morning's push stale by the evening.
+Which board the app reads is unchanged: a mirror past 6 h still sends it to
+GAS, which has a push the moment it lands. The mode is cached for 5 minutes. Past 36 h the silence
+alert mails that nobody pushed. `diag.moa_source` says which mode is on;
+delete the property to crawl on schedule again.
+
 A refresh Apps Script kills at its six-minute limit is neither: it records
 nothing at all, so there is no failure to count. That is what an MOA that
 does not answer used to cause — each request waits about a minute before it
@@ -1381,6 +1393,8 @@ Code lives in `backend/*.gs`, deployed with `clasp` (`.clasp.json` sets
      backend skips the POST and `deploy-pages.yml`'s 2-hourly schedule is the
      fallback (§2). Rotating it is one property: a stale token logs
      `requestMirrorDeploy: GitHub answered 401` and costs nothing else.
+   - `MOA_SOURCE` — optional: `push` while MOA refuses Apps Script and the
+     board comes only from `tools/push-board` (§2). Unset, the backend crawls.
    - `HISTORY_SHEET_ID` — optional: the id of a Google Sheet you own, and the
      whole of the long-term archive's configuration (§2). Unset, nothing is
      written and nothing is opened. **The `spreadsheets` scope is declared
