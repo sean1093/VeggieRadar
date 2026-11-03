@@ -139,8 +139,9 @@ function mirrorCarriesVisitors(checks, { maxAgeMs, healthyItems }) {
   // `skipped` means no mirror is published at all — then GAS is the only path
   // a visitor has, and its silence is an outage, not a degradation.
   if (!mirror || mirror.status !== 'ok' || !mirror.serving) return false;
-  // The mirror's own limit when it carries one (push mode, #103).
-  return mirror.serving.ageMs < (mirror.serving.maxAgeMs ?? maxAgeMs) && mirror.serving.count >= healthyItems;
+  // `maxAgeMs` is `isFreshEnough`'s, never the board's own longer limit (push
+  // mode, #103): past it every visit asks GAS, whatever the board says.
+  return mirror.serving.ageMs < maxAgeMs && mirror.serving.count >= healthyItems;
 }
 
 /**

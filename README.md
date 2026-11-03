@@ -746,9 +746,11 @@ While that is the only way in, set the `MOA_SOURCE` script property to `push`.
 The scheduled refresh then asks MOA nothing — it would only time out three
 times a day, open an incident and mail about it — and a board is current for
 36 h (`PUSH_MODE_MAX_AGE_MS`) rather than 6 h, a push a day with room for a
-late one. The board carries its limit as `max_age_ms`, which the app, the
-mirror's deploy (`validate-board.mjs`) and the probe all judge it by, so none
-of them calls a morning's push stale by the evening. Past 36 h the silence
+late one. The board carries its limit as `max_age_ms`, which the app's
+「資料更新中」 notice, the mirror's deploy (`validate-board.mjs`) and the probe
+all judge it by, so none of them calls a morning's push stale by the evening.
+Which board the app reads is unchanged: a mirror past 6 h still sends it to
+GAS, which has a push the moment it lands. The mode is cached for 5 minutes. Past 36 h the silence
 alert mails that nobody pushed. `diag.moa_source` says which mode is on;
 delete the property to crawl on schedule again.
 

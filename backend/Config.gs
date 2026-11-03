@@ -126,6 +126,8 @@ var BOARD_MAX_AGE_MS = 6 * 60 * 60 * 1000;       // > cadence + crawl; rebuild o
 // half rather than 6 h: a push a day, a late one included. Past that, the same
 // silence alert as ever says nobody pushed. Unset, the backend crawls MOA.
 var MOA_SOURCE_PROP = 'MOA_SOURCE';
+var MOA_SOURCE_CACHE_KEY = 'veggie_moa_source';
+var MOA_SOURCE_TTL = 5 * 60; // seconds
 var PUSH_MODE_MAX_AGE_MS = 36 * 60 * 60 * 1000;
 var PUSH_SKIP_REASON = 'MOA_SOURCE=push：看板只由 tools/push-board 更新';
 var REFRESH_LOCK_KEY = 'veggie_refresh_queued';

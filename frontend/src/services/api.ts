@@ -29,7 +29,7 @@
 
 import { isApiError, type ApiResponse, type BoardResponse, type SearchResponse } from '../types/produce';
 import { boardMismatch } from '../types/board.schema';
-import { boardAgeMs, boardMaxAge } from '../lib/utils/freshness';
+import { boardAgeMs, BOARD_MAX_AGE_MS } from '../lib/utils/freshness';
 import { MOCK_BOARD } from './mockBoard';
 import { track } from '../lib/analytics';
 
@@ -130,7 +130,7 @@ export function writeCachedBoard(board: BoardResponse): void {
 
 /**
  * Whether a board is current enough to serve without asking GAS at all
- * (`boardMaxAge`: the backend's own threshold, which the board carries). Pure, and exported
+ * (`BOARD_MAX_AGE_MS`, the backend's own threshold). Pure, and exported
  * because the read order in `useBoard` turns on it.
  *
  * An unusable `generated_at` counts as not fresh — deliberately the opposite
@@ -140,7 +140,11 @@ export function writeCachedBoard(board: BoardResponse): void {
  */
 export function isFreshEnough(board: BoardResponse, now: number = Date.now()): boolean {
   const age = boardAgeMs(board.generated_at, now);
-  return age !== null && age <= boardMaxAge(board.max_age_ms);
+  // Not the board's own `max_age_ms`, even in push mode (36 h): that says how
+  // long the prices may be shown as current, not how long GAS may go unasked.
+  // A push lands in GAS at once and in the mirror only at the next deploy, so
+  // trusting a day-old mirror would hide each push for hours.
+  return age !== null && age <= BOARD_MAX_AGE_MS;
 }
 
 /**

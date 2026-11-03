@@ -16,6 +16,7 @@ import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { resolve } from 'node:path';
 import { BOARD_MIN_ITEMS, BOARD_HEALTHY_ITEMS, BoardResponseSchema } from './src/types/board.schema';
+import { BOARD_MAX_AGE_CEILING_MS, BOARD_MAX_AGE_MS as APP_BOARD_MAX_AGE_MS } from './src/lib/utils/freshness';
 // @ts-expect-error — plain ES modules outside the app, with no types
 import { loadBackend as loadPushTool } from '../tools/push-board/backend.mjs';
 // @ts-expect-error — the same
@@ -1823,6 +1824,27 @@ describe('push mode: the board only from tools/push-board (#103)', () => {
     boardBuiltAgo(back, 40 * HOUR);
     expect(back.api.handleWarm({ force: '1' })).toMatchObject({ type: 'warm', queued: false, message: expect.stringMatching(/MOA_SOURCE=push/) });
     expect(back.triggers).toEqual([]);
+  });
+
+  it('publishes only limits the app honours whole', () => {
+    // The app caps a board's limit at its ceiling: a backend limit above it
+    // would call a board current that the app, the deploy and the probe do not.
+    const { api } = loadBackend();
+    expect(api.PUSH_MODE_MAX_AGE_MS).toBe(BOARD_MAX_AGE_CEILING_MS);
+    expect(api.BOARD_MAX_AGE_MS).toBe(APP_BOARD_MAX_AGE_MS);
+  });
+
+  it('caches the mode for a few minutes rather than reading the store on every visit', () => {
+    const back = inPushMode();
+    boardBuiltAgo(back, HOUR);
+    back.api.readBoard();
+    back.props.set('MOA_SOURCE', '');
+    expect(back.api.readBoard().max_age_ms).toBe(36 * HOUR); // cached
+    back.cache.delete('veggie_moa_source'); // the TTL ran out
+    expect(back.api.readBoard().max_age_ms).toBe(back.api.BOARD_MAX_AGE_MS);
+    // diag reads the store it already holds, never the cache.
+    back.props.set('MOA_SOURCE', 'push');
+    expect(back.api.handleDiag()).toMatchObject({ moa_source: 'push', board: { max_age_ms: 36 * HOUR } });
   });
 
   it('keeps the 6-hour limit, and says so, when it crawls', () => {

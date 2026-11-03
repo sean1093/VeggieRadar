@@ -25,7 +25,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { BOARD_HEALTHY_ITEMS, boardMismatch } from '../src/types/board.schema.ts';
-import { boardMaxAge } from '../src/lib/utils/freshness.ts';
+import { boardAgeLimit } from '../src/lib/utils/freshness.ts';
 
 // Two 4-hourly refresh cycles plus the crawl, the same bound `prod-probe.mjs`
 // alerts on. This one is about what gets *written*, not what gets alerted on:
@@ -34,9 +34,9 @@ import { boardMaxAge } from '../src/lib/utils/freshness.ts';
 // is one the backend never rebuilt, and freezing it into a file would hide a
 // broken pipeline behind a plausible-looking board. Rejecting it costs
 // nothing — the step falls back to the mirror already published.
-// The bound is the board's own limit (`boardMaxAge`: 6 h, or 36 h in push
-// mode) plus this, so 8 h for a board crawled on schedule.
-const AGE_SLACK_MS = 2 * 60 * 60 * 1000;
+// The bound is `boardAgeLimit`: 8 h for a board crawled on schedule, 38 h in
+// push mode — the same one `prod-probe.mjs` alerts on.
+
 // A `generated_at` ahead of this clock is corrupt, not fresh; the allowance
 // covers ordinary clock skew between the runner and Google.
 const MAX_SKEW_MS = 5 * 60 * 1000;
@@ -64,7 +64,7 @@ function boardProblem(board) {
   if (Number.isNaN(built)) return 'generated_at missing or unparsable';
   const age = Date.now() - built;
   if (age < -MAX_SKEW_MS) return `generated_at is ${hours(-age)} h in the future — clock or payload corrupt`;
-  const maxAge = boardMaxAge(board.max_age_ms) + AGE_SLACK_MS;
+  const maxAge = boardAgeLimit(board);
   if (age > maxAge) return `crawled ${hours(age)} h ago, limit ${hours(maxAge)} h`;
 
   // What the schema types but cannot judge: a price has to be positive and a

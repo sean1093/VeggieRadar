@@ -40,7 +40,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BOARD_HEALTHY_ITEMS, boardMismatch } from '../src/types/board.schema.ts';
-import { BOARD_MAX_AGE_MS, boardMaxAge } from '../src/lib/utils/freshness.ts';
+import { BOARD_MAX_AGE_MS, boardAgeLimit, boardMaxAge } from '../src/lib/utils/freshness.ts';
 import { attemptSuffix, get as request, isTransientStatic, outcome, withRetry } from './gas-retry.mjs';
 import {
   applyVerdict, DEGRADED, dispatchState, GAS_UNREACHABLE, MIRROR_BACKSTOP_MS, reachabilityCategory, servingFor,
@@ -71,9 +71,9 @@ const TIMEOUT_MS = 30_000;
 const GAS_ATTEMPTS = 4;
 const GAS_BACKOFF_MS = 5_000;
 // Two 4-hourly refresh cycles plus the crawl: one missed run is routine and
-// self-heals, two in a row is a pipeline that stopped. The bound is the
-// board's own limit (`boardMaxAge`: 6 h, or 36 h in push mode) plus this.
-const AGE_SLACK_MS = 2 * 60 * 60 * 1000;
+// self-heals, two in a row is a pipeline that stopped: `boardAgeLimit`, 8 h,
+// or 38 h for a board current for 36 h (push mode).
+
 // A `generated_at` ahead of this clock is corrupt, not fresh; the allowance
 // covers ordinary clock skew between the runner and Google.
 const MAX_SKEW_MS = 5 * 60 * 1000;
@@ -185,7 +185,7 @@ function boardProblem(board) {
   if (age < -MAX_SKEW_MS) {
     return { kind: 'stale', detail: `generated_at is ${hours(-age)} h in the future — clock or payload corrupt` };
   }
-  const maxAge = boardMaxAge(board.max_age_ms) + AGE_SLACK_MS;
+  const maxAge = boardAgeLimit(board);
   if (age > maxAge) {
     return { kind: 'stale', detail: `crawled ${hours(age)} h ago, limit ${hours(maxAge)} h` };
   }

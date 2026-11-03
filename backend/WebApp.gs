@@ -179,7 +179,7 @@ function publicMoaRelay(props) {
 function handleDiag(full, props) {
   props = props || PropertiesService.getScriptProperties().getProperties();
   var handlers = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
-  var board = boardSummary();
+  var board = boardSummary(props);
   return {
     type: 'diag',
     now: new Date().toISOString(),
@@ -297,12 +297,12 @@ function parseValidation(json) {
 }
 
 /** Freshness header of the stored board — no items, so it stays cheap to serve. */
-function boardSummary() {
+function boardSummary(props) {
   var json = CacheService.getScriptCache().get(BOARD_CACHE_KEY) || readDurableBoard();
   if (!json) return null;
   var board = JSON.parse(json);
   var age = boardAgeMs(board);
-  var maxAge = boardMaxAgeMs(pushMode());
+  var maxAge = boardMaxAgeMs(pushMode(props));
   return {
     date: board.date || null,
     roc_date: board.roc_date || null,

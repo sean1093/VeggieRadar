@@ -9,14 +9,26 @@
 /**
  * Whether the board comes only from pushes (`MOA_SOURCE=push`). A store that
  * cannot be read is the default: the backend crawls MOA, as it always did.
+ * `readBoard` asks on every visit GAS serves, so the answer is cached for
+ * `MOA_SOURCE_TTL` — a changed property takes that long to apply — unless the
+ * caller holds the properties already (`diag`).
  */
 function pushMode(props) {
   try {
-    var source = props ? props[MOA_SOURCE_PROP] : PropertiesService.getScriptProperties().getProperty(MOA_SOURCE_PROP);
-    return String(source || '').trim().toLowerCase() === 'push';
+    if (props) return isPushSource(props[MOA_SOURCE_PROP]);
+    var cache = CacheService.getScriptCache();
+    var kept = cache.get(MOA_SOURCE_CACHE_KEY);
+    if (kept) return kept === 'push';
+    var push = isPushSource(PropertiesService.getScriptProperties().getProperty(MOA_SOURCE_PROP));
+    cache.put(MOA_SOURCE_CACHE_KEY, push ? 'push' : 'moa', MOA_SOURCE_TTL);
+    return push;
   } catch (err) {
     return false;
   }
+}
+
+function isPushSource(value) {
+  return String(value || '').trim().toLowerCase() === 'push';
 }
 
 /** How old a board may be and still be current: `PUSH_MODE_MAX_AGE_MS` in push mode, else `BOARD_MAX_AGE_MS`. */

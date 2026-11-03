@@ -65,6 +65,16 @@ export function boardMaxAge(maxAgeMs: unknown): number {
   return Math.min(maxAgeMs, BOARD_MAX_AGE_CEILING_MS);
 }
 
+/**
+ * The age past which a board is a pipeline that stopped, for the mirror's
+ * deploy (`validate-board.mjs`) and the probe: its limit plus one missed
+ * refresh's slack — 8 h crawled on schedule, 38 h in push mode.
+ */
+export const BOARD_AGE_SLACK_MS = 2 * 60 * 60 * 1000;
+export function boardAgeLimit(board: { max_age_ms?: unknown } | null | undefined): number {
+  return boardMaxAge(board?.max_age_ms) + BOARD_AGE_SLACK_MS;
+}
+
 /** Milliseconds since the backend crawled the board, or null when unknowable. */
 export function boardAgeMs(generatedAt: string | undefined, now: number = Date.now()): number | null {
   const built = Date.parse(generatedAt || '');

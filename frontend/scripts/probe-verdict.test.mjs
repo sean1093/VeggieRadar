@@ -279,9 +279,11 @@ describe('applyVerdict — a mirror in push mode carries its own limit (#103)', 
     serving: { ageMs, count: 93, maxAgeMs: PUSH_MAX_AGE_MS },
   });
 
-  it('carries visitors through a backend outage for as long as the board says it is current', () => {
-    expect(pages(verdict([check('pages', 'ok'), pushed(20 * HOUR), gasDown]))).toBe(false);
-    expect(pages(verdict([check('pages', 'ok'), pushed(PUSH_MAX_AGE_MS + HOUR), gasDown]))).toBe(true);
+  it('carries visitors through a backend outage only as long as the app skips GAS', () => {
+    // Past the app's bar every visit asks GAS, so a current push-mode board in
+    // the mirror does not spare them the outage.
+    expect(pages(verdict([check('pages', 'ok'), pushed(INSIDE_BAR_MS), gasDown]))).toBe(false);
+    expect(pages(verdict([check('pages', 'ok'), pushed(20 * HOUR), gasDown]))).toBe(true);
   });
 
   it('is late, not stopped, by as much longer as its limit is', () => {
