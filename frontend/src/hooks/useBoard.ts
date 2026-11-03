@@ -222,8 +222,8 @@ export function useBoard(): Board {
 
   const freshness = useMemo<FreshnessNotice>(() => {
     if (status.kind !== 'ready' && status.kind !== 'degraded') return NO_NOTICE;
-    const { date, generated_at: generatedAt, stale } = status.board;
-    return describeFreshness({ date, generatedAt, stale });
+    const { date, generated_at: generatedAt, stale, max_age_ms: maxAgeMs } = status.board;
+    return describeFreshness({ date, generatedAt, stale, maxAgeMs });
   }, [status]);
 
   return { status, freshness, reload, settled };

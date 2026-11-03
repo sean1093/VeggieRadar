@@ -7,6 +7,24 @@
  */
 
 /**
+ * Whether the board comes only from pushes (`MOA_SOURCE=push`). A store that
+ * cannot be read is the default: the backend crawls MOA, as it always did.
+ */
+function pushMode(props) {
+  try {
+    var source = props ? props[MOA_SOURCE_PROP] : PropertiesService.getScriptProperties().getProperty(MOA_SOURCE_PROP);
+    return String(source || '').trim().toLowerCase() === 'push';
+  } catch (err) {
+    return false;
+  }
+}
+
+/** How old a board may be and still be current: `PUSH_MODE_MAX_AGE_MS` in push mode, else `BOARD_MAX_AGE_MS`. */
+function boardMaxAgeMs(push) {
+  return push ? PUSH_MODE_MAX_AGE_MS : BOARD_MAX_AGE_MS;
+}
+
+/**
  * `POST ?action=push&token=…` with the crawl as the body. Operator only; a
  * malformed body changes nothing.
  * @returns {Object} what came of it: `stored` and why not, the board's date

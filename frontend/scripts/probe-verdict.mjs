@@ -139,7 +139,8 @@ function mirrorCarriesVisitors(checks, { maxAgeMs, healthyItems }) {
   // `skipped` means no mirror is published at all — then GAS is the only path
   // a visitor has, and its silence is an outage, not a degradation.
   if (!mirror || mirror.status !== 'ok' || !mirror.serving) return false;
-  return mirror.serving.ageMs < maxAgeMs && mirror.serving.count >= healthyItems;
+  // The mirror's own limit when it carries one (push mode, #103).
+  return mirror.serving.ageMs < (mirror.serving.maxAgeMs ?? maxAgeMs) && mirror.serving.count >= healthyItems;
 }
 
 /**
@@ -161,11 +162,13 @@ function mirrorCarriesVisitors(checks, { maxAgeMs, healthyItems }) {
  * (`checkMirror`), so it is never softened either — those are corrupt, not
  * late.
  */
-function mirrorMerelyLate(checks, { staleBackstopMs }) {
+function mirrorMerelyLate(checks, { staleBackstopMs, maxAgeMs }) {
   const mirror = checks.find((check) => check.name === 'mirror');
   if (!mirror || mirror.status !== 'failed' || mirror.category !== 'mirror_stale') return false;
   if (!mirror.serving) return false;
-  return mirror.serving.ageMs < staleBackstopMs;
+  // A board current for longer (push mode) is late by as much later.
+  const longer = Math.max(0, (mirror.serving.maxAgeMs ?? maxAgeMs) - maxAgeMs);
+  return mirror.serving.ageMs < staleBackstopMs + longer;
 }
 
 /**
@@ -184,10 +187,10 @@ function mirrorMerelyLate(checks, { staleBackstopMs }) {
  * check itself applies, so a board it calls fresh is never left unmeasurable
  * and a concurrent backend outage still softens.
  */
-export function servingFor({ ageMs, count, problemKind, maxSkewMs }) {
+export function servingFor({ ageMs, count, problemKind, maxSkewMs, maxAgeMs }) {
   if (ageMs === null || ageMs < -maxSkewMs) return null;
   if (problemKind && problemKind !== 'stale') return null;
-  return { ageMs, count };
+  return maxAgeMs === undefined ? { ageMs, count } : { ageMs, count, maxAgeMs };
 }
 
 /**

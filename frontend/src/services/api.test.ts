@@ -285,6 +285,13 @@ describe('isFreshEnough', () => {
     expect(api.isFreshEnough(at(20))).toBe(false);
   });
 
+  it('trusts a board for as long as the limit it carries (push mode, #103)', async () => {
+    const api = await loadApi();
+    const push = (hoursAgo: number) => ({ ...at(hoursAgo), max_age_ms: 36 * 3_600_000 });
+    expect(api.isFreshEnough(push(20))).toBe(true);
+    expect(api.isFreshEnough(push(37))).toBe(false);
+  });
+
   it('refuses to vouch for a board it cannot date', async () => {
     const api = await loadApi();
     // Opposite of describeFreshness, which stays quiet: not knowing the age is

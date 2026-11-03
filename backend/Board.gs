@@ -14,6 +14,9 @@
  *
  * Anything past `BOARD_MAX_AGE_MS` is served as-is but queues a background
  * rebuild, so the app recovers on its own if the refresh trigger stops firing.
+ * In push mode a board is current for `PUSH_MODE_MAX_AGE_MS`, and nothing is
+ * queued: only a push can rebuild it. `max_age_ms` says which limit applies,
+ * so the app, the mirror's deploy and the probe judge the board by it.
  */
 function readBoard() {
   var cache = CacheService.getScriptCache();
@@ -30,22 +33,29 @@ function readBoard() {
 
   var board = JSON.parse(json);
   board.cached = true;
+  var push = pushMode();
   board.age_ms = boardAgeMs(board);
-  board.stale = board.age_ms === null || board.age_ms > BOARD_MAX_AGE_MS;
-  if (board.stale) board.refresh_queued = scheduleRefresh();
+  board.max_age_ms = boardMaxAgeMs(push);
+  board.stale = board.age_ms === null || board.age_ms > board.max_age_ms;
+  if (board.stale) board.refresh_queued = scheduleRefresh(); // never in push mode: see there
   // A dead trigger produces no failed refreshes to count — only a board that
   // quietly keeps ageing. The serving path is the only thing still executing,
   // so it is what raises that alarm. Cooldown-guarded inside `sendAlert`, and
   // `sendAlert` never throws, so this cannot affect the response.
-  if (board.age_ms === null || board.age_ms > ALERT_SILENCE_MS) {
+  // In push mode the silence is nobody having pushed.
+  if (board.age_ms === null || board.age_ms > (push ? PUSH_MODE_MAX_AGE_MS : ALERT_SILENCE_MS)) {
     sendAlert(
       '[VeggieRadar] 看板已停止更新',
-      '看板持續變舊，但沒有任何更新失敗記錄 —— 這是排程觸發器消失或壞掉的樣子。\n\n' +
+      (push
+        ? '看板由手動推送更新（MOA_SOURCE=push），已超過 ' + Math.round(PUSH_MODE_MAX_AGE_MS / 3600000) + ' 小時沒有推送。\n\n'
+        : '看板持續變舊，但沒有任何更新失敗記錄 —— 這是排程觸發器消失或壞掉的樣子。\n\n') +
       '交易日：' + (board.roc_date || '（未知）') + '\n' +
       '最後爬取：' + (board.generated_at || '（未知）') + '\n' +
       '已過時間：' + (board.age_ms === null ? '未知' : Math.round(board.age_ms / 3600000) + ' 小時') + '\n\n' +
       '診斷：' + diagUrl() + '\n' +
-      '修復：於 Apps Script 專案執行 installDailyTrigger()，並確認 diag 的 triggers 含 refreshBoardCache。\n',
+      (push
+        ? '修復：在台灣的電腦上執行 tools/push-board（ADMIN_TOKEN=… node push.mjs）。\n'
+        : '修復：於 Apps Script 專案執行 installDailyTrigger()，並確認 diag 的 triggers 含 refreshBoardCache。\n'),
     );
   }
   return board;
@@ -305,6 +315,12 @@ function refreshBoardCache() {
  *   `durable`: the board reached the durable store, not only the cache.
  */
 function refreshBoard(pushed, startedAt) {
+  // Push mode: only a push builds the board. The schedule asks MOA nothing,
+  // which would refuse it, and so records no failure to alert on.
+  if (!pushed && pushMode()) {
+    Logger.log('Board refresh skipped: MOA_SOURCE=push, the board comes from tools/push-board');
+    return { board: { type: 'board', skipped: PUSH_SKIP_REASON, count: 0, items: [] }, verdict: null, durable: false };
+  }
   var started = startedAt || Date.now();
   var durable = false;
   var board = buildBoard(pushed);
@@ -534,6 +550,7 @@ function refreshBoardCacheOnce(e) {
  * @returns {boolean} true when this call queued the rebuild.
  */
 function scheduleRefresh() {
+  if (pushMode()) return false; // nothing a rebuild could fetch
   var cache = CacheService.getScriptCache();
   if (cache.get(REFRESH_LOCK_KEY)) return false; // rebuild already pending
   cache.put(REFRESH_LOCK_KEY, '1', REFRESH_LOCK_TTL);

@@ -308,7 +308,7 @@ function loadBackend(responses: Record<string, Row[]> = {}, overrides: Record<st
     'retailBand', 'aggregateGroup', 'boardRoots', 'BOARD_ITEMS',
     'RETAIL_MARKUP_ROOT', 'RETAIL_MARKUP_CATEGORY', 'storeBoard', 'readDurableBoard',
     'readBoard', 'boardAgeMs', 'scheduleRefresh', 'refreshBoardCacheOnce', 'dropTriggers', 'handleWarm',
-    'handleDiag', 'BOARD_MAX_AGE_MS', 'REFRESH_ONCE_FN',
+    'handleDiag', 'BOARD_MAX_AGE_MS', 'PUSH_MODE_MAX_AGE_MS', 'REFRESH_ONCE_FN',
     'handleTrend', 'resolveTradeDates', 'MAX_LOOKBACK_DAYS', 'CRAWL_BUDGET_MS', 'PROBE_ROOT',
     'AGRICULTURE_API_URL', 'cropUrl', 'dateToROC',
     'median', 'appendObservation', 'updateHistory', 'readHistory', 'writeHistory',
@@ -1746,6 +1746,89 @@ describe('a crawl pushed from Taiwan (#103)', () => {
   it('accepts no other POST', () => {
     const back = loadBackend({});
     expect(JSON.parse(back.api.doPost({ parameter: { action: 'warm' } }).body)).toMatchObject({ error: 'unknown action' });
+  });
+});
+
+describe('push mode: the board only from tools/push-board (#103)', () => {
+  const TOKEN = 't'.repeat(64);
+  const HOUR = 60 * 60 * 1000;
+  const moaAsked = (back: ReturnType<typeof loadBackend>) => back.fetches.filter((u) => u.includes('CropName='));
+  const inPushMode = (rows: Record<string, Row[]> = {}) => {
+    const back = loadBackend(rows);
+    back.props.set('MOA_SOURCE', 'push');
+    back.props.set('ADMIN_TOKEN', TOKEN);
+    return back;
+  };
+  const boardBuiltAgo = (back: ReturnType<typeof loadBackend>, ms: number) => back.api.storeBoard({
+    type: 'board', date: '2026-11-03', roc_date: '115.11.03', count: 1, items: [{ code: 'C1', name: '高麗菜' }],
+    generated_at: new Date(Date.now() - ms).toISOString(),
+  });
+
+  it('asks MOA nothing on schedule, and so counts no failure, opens no incident, sends no mail', () => {
+    const back = inPushMode(plausibleRows());
+    for (let i = 0; i < 5; i++) back.api.refreshBoardCache();
+    expect(moaAsked(back)).toEqual([]);
+    expect(back.props.has('veggie_last_refresh_fail')).toBe(false);
+    expect(back.props.has('veggie_last_validation')).toBe(false);
+    expect(back.props.get('veggie_alert_streak') ?? '0').toBe('0');
+    expect(back.props.has('veggie_alert_active')).toBe(false);
+    expect(back.mails).toEqual([]);
+  });
+
+  it('still crawls on schedule without it, whatever case or space the value has', () => {
+    for (const [value, crawls] of [['', true], ['moa', true], [' Push\n', false]] as const) {
+      const back = loadBackend(plausibleRows());
+      back.props.set('MOA_SOURCE', value);
+      back.api.refreshBoardCache();
+      expect(moaAsked(back).length > 0).toBe(crawls);
+      expect(back.api.handleDiag().moa_source).toBe(crawls ? 'moa' : 'push');
+    }
+  });
+
+  it('stores a push as before', () => {
+    const back = inPushMode();
+    const { payload } = pushCrawl(loadPushTool((urls: string[]) => urls.map((url) => {
+      const root = decodeURIComponent((url.match(/CropName=([^&]*)/) || [])[1] || '');
+      return { status: 200, body: JSON.stringify({ RS: 'OK', Data: plausibleRows()[root] || [] }) };
+    })));
+    const out = JSON.parse(back.api.doPost({ parameter: { action: 'push', token: TOKEN }, postData: { contents: JSON.stringify(payload) } }).body);
+    expect(out).toMatchObject({ stored: true });
+    expect(back.api.readBoard()).toMatchObject({ roc_date: payload.dates.latest, stale: false, max_age_ms: back.api.PUSH_MODE_MAX_AGE_MS });
+  });
+
+  it('serves a day-old board as current, queues nothing, and says nothing', () => {
+    const back = inPushMode();
+    boardBuiltAgo(back, 30 * HOUR);
+    const board = back.api.readBoard();
+    expect(board).toMatchObject({ stale: false, max_age_ms: 36 * HOUR });
+    expect(board.refresh_queued).toBeUndefined();
+    expect(back.triggers).toEqual([]);
+    expect(back.mails).toEqual([]);
+    expect(back.api.handleDiag().board).toMatchObject({ stale: false, max_age_ms: 36 * HOUR });
+  });
+
+  it('past a day and a half, calls it stale and mails that nobody pushed — but queues no rebuild', () => {
+    const back = inPushMode();
+    boardBuiltAgo(back, 37 * HOUR);
+    const board = back.api.readBoard();
+    expect(board.stale).toBe(true);
+    expect(back.triggers).toEqual([]);
+    expect(back.mails).toHaveLength(1);
+    expect(back.mails[0].body).toMatch(/沒有推送/);
+    expect(back.mails[0].body).toMatch(/push-board/);
+  });
+
+  it('answers ?action=warm without queueing a rebuild that could fetch nothing', () => {
+    const back = inPushMode();
+    boardBuiltAgo(back, 40 * HOUR);
+    expect(back.api.handleWarm({ force: '1' })).toMatchObject({ type: 'warm', queued: false, message: expect.stringMatching(/MOA_SOURCE=push/) });
+    expect(back.triggers).toEqual([]);
+  });
+
+  it('keeps the 6-hour limit, and says so, when it crawls', () => {
+    const back = loadBackend();
+    boardBuiltAgo(back, 7 * HOUR);
+    expect(back.api.readBoard()).toMatchObject({ stale: true, max_age_ms: back.api.BOARD_MAX_AGE_MS });
   });
 });
 
