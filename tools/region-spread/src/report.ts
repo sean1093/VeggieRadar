@@ -7,7 +7,10 @@
  * detail. Nothing here draws the conclusion — the report states what was
  * measured and how much of the board it covers, and a human decides.
  */
-import { VIABLE_COVERAGE, VIABLE_MIN_DAYS, UNNAMED_MARKET, quantile } from './measure.ts';
+import {
+  VIABLE_COVERAGE, VIABLE_WHOLE_WINDOW, VIABLE_MIN_DAYS, UNNAMED_MARKET, quantile,
+  shortlist, SHORTLIST_TOP_VOLUME, SHORTLIST_MIN_SPREAD, SHORTLIST_MIN_VIABLE_REGIONS,
+} from './measure.ts';
 import type { CropStats, MarketSighting, RegionStats } from './measure.ts';
 import { REGIONS } from './regions.ts';
 import type { Region } from './regions.ts';
@@ -38,6 +41,7 @@ export function renderReport(meta: RunMeta, markets: MarketSighting[], crops: Cr
     spreadSection(byVolume),
     coverageSection(measured),
     changeSection(measured),
+    shortlistSection(measured),
     detailSection(byVolume),
   ].join('\n\n');
 }
@@ -67,7 +71,7 @@ function heading(meta: RunMeta, measured: CropStats[], markets: MarketSighting[]
     // more than one board item (花椰菜 → 白花椰菜 and 青花菜), so the label says
     // root rather than 品項 and the sentence says who it reaches.
     meta.truncated.length
-      ? `| ⚠️ 被截斷的 root×日 | ${meta.truncated.length}：${truncatedList(meta.truncated)} —— 只拿到部分市場，已從第 2–5 節剔除（用到該 root 的每個品項，交易日與覆蓋率分母都相應減少） |`
+      ? `| ⚠️ 被截斷的 root×日 | ${meta.truncated.length}：${truncatedList(meta.truncated)} —— 只拿到部分市場，已從第 2–6 節剔除（用到該 root 的每個品項，交易日與覆蓋率分母都相應減少） |`
       : `| 被截斷的 root×日 | 0 |`,
     '',
     '所有價格為 `元/台斤`，與看板顯示的單位一致；成交量為公斤。',
@@ -84,7 +88,7 @@ function heading(meta: RunMeta, measured: CropStats[], markets: MarketSighting[]
  */
 function marketSection(markets: MarketSighting[], partial: boolean): string {
   // The denominator is the measured population — the rows the board's own
-  // items accept — so this share is a share of what sections 2–5 are built on.
+  // items accept — so this share is a share of what sections 2–6 are built on.
   const total = markets.reduce((sum, m) => sum + m.volume, 0) || 1;
   const unmapped = markets.filter((m) => m.region === '其他');
   const unmappedShare = (unmapped.reduce((sum, m) => sum + m.volume, 0) / total) * 100;
@@ -123,8 +127,8 @@ function marketSection(markets: MarketSighting[], partial: boolean): string {
         : `> ✅ 所有市場都有對應區域。`,
     '',
     '',
-    '成交量只計入看板品項自己的交易（與第 2–5 節同一份資料），不是 MOA 當日全部的量。',
-    '同一筆成交只算一次；第 2–5 節是逐品項統計，兩個品項共用的一筆會各自計入。',
+    '成交量只計入看板品項自己的交易（與第 2–6 節同一份資料），不是 MOA 當日全部的量。',
+    '同一筆成交只算一次；第 2–6 節是逐品項統計，兩個品項共用的一筆會各自計入。',
     '',
     `| 市場 | MarketCode | 區域 | 交易日 | 成交量（噸） | 占全國 |`,
     `| --- | --- | --- | --- | --- | --- |`,
@@ -187,14 +191,32 @@ function coverageSection(measured: CropStats[]): string {
   return [
     `## 3. 每一區的樣本量夠不夠`,
     '',
-    `「可行」= 該區在 ≥ ${pct(VIABLE_COVERAGE * 100)} 的交易日達到 \`MIN_TRADE_VOLUME\`，而且至少有 ${VIABLE_MIN_DAYS} 個這樣的交易日。`,
-    `比例本身不是證據：2 天中的 2 天也是 100%。期間太短的執行會全部顯示不可行，那是誠實的答案。`,
+    `兩個覆蓋率，分母不同，問的是不同的問題：`,
     '',
-    `| 區域 | 可行品項 | 完全沒資格的品項 | 可行率 |`,
-    `| --- | --- | --- | --- |`,
-    ...perRegion.map(
-      (r) => `| ${r.region} | ${r.viable} / ${r.total} | ${r.never} | ${pct(r.total ? (r.viable / r.total) * 100 : 0)} |`,
-    ),
+    `- **開市覆蓋**＝該區「有開市的日子」裡達到 \`MIN_TRADE_VOLUME\` 的比例。供給面：這一區的量夠不夠。`,
+    `- **全期覆蓋**＝該區達標的日子占「該品項全台有交易的日子」的比例。產品面：\`1 −\` 它就是使用者切過去看到全台回退的頻率。`,
+    '',
+    `「可行」要同時滿足三件事：**開市覆蓋** ≥ ${pct(VIABLE_COVERAGE * 100)}、**全期覆蓋** ≥ ${pct(VIABLE_WHOLE_WINDOW * 100)}、以及至少 ${VIABLE_MIN_DAYS} 個達標日。`,
+    `只看開市覆蓋會過度修正：某區只在 12/30 天供應該品項、而那 12 天都達標，開市覆蓋是 100%，`,
+    `但使用者有 18 天看到全台回退 —— 那不是一個值得存在的頁籤。全期覆蓋的門檻是產品判斷（不是量測），`,
+    `刻意訂在北部 76.7% 的結構上限之下：上限是休市日曆的事實，不該是取消一個區域的理由。`,
+    `理由：北部五個批發市場固定同一天休市，全期覆蓋因此結構性地卡在 76.7%，`,
+    `用全期覆蓋當門檻會讓占全島成交量近半的北部顯示成最不可行的一區 —— 那量到的是休市日曆，不是交易量。`,
+    `比例本身也不是證據：2 天中的 2 天也是 100%，所以才有達標日下限。`,
+    '',
+    `| 區域 | 可行品項 | 完全沒資格的品項 | 可行率 | 開市覆蓋中位數 | 全期覆蓋中位數 |`,
+    `| --- | --- | --- | --- | --- | --- |`,
+    ...perRegion.map((r) => {
+      // 開市覆蓋 is undefined where the region never traded the item, so those
+      // items are left out of ITS median — and a dash, never 0.0%, when none
+      // is left. 全期覆蓋 keeps them at a true 0: the user really does fall
+      // back on every one of those days, which is the whole point of that
+      // column, and dropping them would report a tab as fuller than it is.
+      const opened = r.stats.filter((s) => s.openDays > 0);
+      const open = opened.length ? pct(quantile(opened.map((s) => s.coverageWhenOpen * 100), 0.5)) : '—';
+      const whole = r.total ? pct(quantile(r.stats.map((s) => s.coverage * 100), 0.5)) : '—';
+      return `| ${r.region} | ${r.viable} / ${r.total} | ${r.never} | ${pct(r.total ? (r.viable / r.total) * 100 : 0)} | ${open} | ${whole} |`;
+    }),
     '',
     `每個品項撐得起幾個區域：`,
     '',
@@ -238,18 +260,55 @@ function changeSection(measured: CropStats[]): string {
   ].join('\n');
 }
 
+/**
+ * The decision this report exists to inform, applied: which items a 「各區批發價」
+ * row would actually be worth showing for. The rule lives in `measure.ts` so
+ * it can be tested; this only prints what it selected, and the count, because
+ * "how many items" is the number that decides whether the row is worth
+ * building at all.
+ */
+function shortlistSection(measured: CropStats[]): string {
+  const picked = shortlist(measured);
+  const ranked = [...measured].sort((a, b) => b.volume - a.volume).slice(0, SHORTLIST_TOP_VOLUME);
+  return [
+    `## 5. 「各區批發價」入選名單`,
+    '',
+    `規則：成交量前 ${SHORTLIST_TOP_VOLUME} 名 **且** 價差中位數 ≥ ${SHORTLIST_MIN_SPREAD}% **且** 可行區域 ≥ ${SHORTLIST_MIN_VIABLE_REGIONS}。`,
+    `三個條件各擋掉一種誤導：排名擋掉尾巴品項（某區塌成單一小市場，價差其實是等級差異），`,
+    `價差門檻擋掉「換句話說重講一次全台價」，區域數擋掉「只有一區無從比較」。`,
+    '',
+    picked.length
+      ? `**${picked.length} / ${ranked.length} 個高量品項入選。**`
+      : `**沒有品項入選**（前 ${ranked.length} 名裡沒有同時滿足三個條件的）—— 這一行不值得做。`,
+    '',
+    ...(picked.length
+      ? [
+          `| 品項 | 量排名 | 成交量（噸） | 價差中位數 | 價差 p90 | 可行區域 |`,
+          `| --- | --- | --- | --- | --- | --- |`,
+          ...picked.map((p) => {
+            const rank = ranked.findIndex((c) => c === p.crop) + 1;
+            return `| ${p.crop.name} | ${rank} | ${tonnes(p.crop.volume)} | ${pct(p.crop.medianSpreadPct)} | ${pct(p.crop.p90SpreadPct)} | ${p.regions.join('、') || '—'} |`;
+          }),
+        ]
+      : []),
+  ].join('\n');
+}
+
 function detailSection(byVolume: CropStats[]): string {
   return [
-    `## 5. 每個品項`,
+    `## 6. 每個品項`,
     '',
-    `覆蓋率 = 該區達到 \`MIN_TRADE_VOLUME\` 的交易日比例。偏離 = 該區價格相對全台的中位數（帶正負號）。`,
+    `每格是「開市覆蓋 / 全期覆蓋 / 偏離」。偏離 = 該區價格相對全台的中位數（帶正負號）。`,
+    `兩個覆蓋率不同就代表該區有休市日：差距越大，使用者看到全台回退的次數越多，但那不是資料不足。`,
     '',
-    `| 品項 | 類別 | 交易日 | 成交量（噸） | 價差中位數 | 可行區域 | ${REGIONS.map((r) => `${r} 覆蓋/偏離`).join(' | ')} |`,
+    `| 品項 | 類別 | 交易日 | 成交量（噸） | 價差中位數 | 可行區域 | ${REGIONS.map((r) => `${r} 開市/全期/偏離`).join(' | ')} |`,
     `| --- | --- | --- | --- | --- | --- | ${REGIONS.map(() => '---').join(' | ')} |`,
     ...byVolume.map((c) => {
       const cells = REGIONS.map((region) => {
         const s = statsFor(c, region);
-        return s.qualifiedDays ? `${pct(s.coverage * 100)} / ${s.medianDeviationPct >= 0 ? '+' : ''}${pct(s.medianDeviationPct)}` : '—';
+        if (!s.qualifiedDays) return '—';
+        const sign = s.medianDeviationPct >= 0 ? '+' : '';
+        return `${pct(s.coverageWhenOpen * 100)} / ${pct(s.coverage * 100)} / ${sign}${pct(s.medianDeviationPct)}`;
       });
       return `| ${c.name} | ${c.category} | ${c.days} | ${tonnes(c.volume)} | ${c.spreadDays ? pct(c.medianSpreadPct) : '—'} | ${c.viableRegions} | ${cells.join(' | ')} |`;
     }),

@@ -5,7 +5,11 @@
 import { describe, it, expect } from 'vitest';
 import { loadBackend } from '../src/backend.ts';
 import type { CropDef, MoaRow } from '../src/backend.ts';
-import { dailySplit, cropStats, marketSightings, quantile, VIABLE_MIN_DAYS } from '../src/measure.ts';
+import {
+  dailySplit, cropStats, marketSightings, quantile, VIABLE_MIN_DAYS,
+  shortlist, SHORTLIST_TOP_VOLUME, SHORTLIST_MIN_SPREAD,
+} from '../src/measure.ts';
+import { REGIONS } from '../src/regions.ts';
 
 const CABBAGE: CropDef = { name: '高麗菜', official: '甘藍', category: '葉菜類' };
 
@@ -129,6 +133,60 @@ describe('cropStats', () => {
     expect(north.coverage).toBe(1);
     expect(north.viable).toBe(false);
     expect(stats.viableRegions).toBe(0);
+  });
+
+  it('does not punish a region for resting, which is what the first real run hit', () => {
+    // The live finding: all five northern markets trade 23 of 30 days, resting
+    // on the same weekday, so 北's whole-window coverage is capped at 76.7%.
+    // Judged on that, the region holding 49.6% of the island's volume read as
+    // the least viable of four — a measurement of the market calendar, not of
+    // whether the trade is there.
+    const rows = [];
+    for (let day = 1; day <= 30; day += 1) {
+      const date = `115.09.${`${day}`.padStart(2, '0')}`;
+      rows.push(row(date, '台中市', 30, 1000)); // open every day
+      if (day % 10 !== 0) rows.push(row(date, '台北一', 20, 1000)); // shut 3 of 30
+    }
+    const north = cropStats(CABBAGE, dailySplit(rows, CABBAGE)).regions.find((r) => r.region === '北')!;
+    expect(north.openDays).toBe(27);
+    expect(north.qualifiedDays).toBe(27);
+    // Open every day it could be, so the supply side is perfect…
+    expect(north.coverageWhenOpen).toBe(1);
+    // …while the user still sees a fallback on the days the market is shut.
+    expect(north.coverage).toBeCloseTo(27 / 30, 6);
+    expect(north.viable).toBe(true);
+  });
+
+  it('will not call a tab viable when it is empty most of the window', () => {
+    // The over-correction the first version of this fix had: 北 supplies the
+    // crop on 12 of 30 days and clears the gate on all 12, so the supply-side
+    // figure is a perfect 100% — while a user switching to it falls back to
+    // the nationwide price on the other 18 days.
+    const rows = [];
+    for (let day = 1; day <= 30; day += 1) {
+      const date = `115.09.${`${day}`.padStart(2, '0')}`;
+      rows.push(row(date, '台中市', 30, 1000));
+      if (day <= 12) rows.push(row(date, '台北一', 20, 1000));
+    }
+    const north = cropStats(CABBAGE, dailySplit(rows, CABBAGE)).regions.find((r) => r.region === '北')!;
+    expect(north.coverageWhenOpen).toBe(1);
+    expect(north.coverage).toBeCloseTo(0.4, 6);
+    expect(north.viable).toBe(false);
+  });
+
+  it('still calls a region unviable when it is open and short of the gate', () => {
+    // The other half: open every day, but the trade is genuinely thin. That is
+    // a data problem, and the distinction is the whole point of the split.
+    const rows = [];
+    for (let day = 1; day <= 30; day += 1) {
+      const date = `115.09.${`${day}`.padStart(2, '0')}`;
+      rows.push(row(date, '台中市', 30, 1000));
+      rows.push(row(date, '台北一', 20, day % 2 ? 100 : 1000)); // half the days below 200 kg
+    }
+    const north = cropStats(CABBAGE, dailySplit(rows, CABBAGE)).regions.find((r) => r.region === '北')!;
+    expect(north.openDays).toBe(30);
+    expect(north.coverageWhenOpen).toBeLessThan(0.8);
+    expect(north.viable).toBe(false);
   });
 
   it('calls it viable once there are enough qualifying days behind the ratio', () => {
@@ -320,5 +378,65 @@ describe('quantile', () => {
   it('returns 0 for an empty sample instead of NaN', () => {
     expect(quantile([], 0.5)).toBe(0);
     expect(quantile([], 0.9)).toBe(0);
+  });
+});
+
+/**
+ * The rule that decides which items get a 「各區批發價」 row. Each threshold is
+ * here because it excludes a different way that row would mislead, so each is
+ * tested on its own.
+ */
+describe('shortlist', () => {
+  /** A CropStats with just the fields the rule reads. */
+  function crop(name: string, volume: number, spread: number, viableRegions: number) {
+    return {
+      name, official: name, category: '葉菜類', days: 30, volume,
+      spreadDays: spread > 0 ? 30 : 0, medianSpreadPct: spread, p90SpreadPct: spread * 1.5,
+      viableRegions,
+      regions: REGIONS.map((region, i) => ({
+        region, qualifiedDays: 30, openDays: 30, coverage: 1, coverageWhenOpen: 1,
+        medianMarkets: 2, medianVolume: 1000, medianDeviationPct: 0, p90AbsDeviationPct: 0,
+        changePairs: 29, medianGapDays: 1, medianChangeGapPct: 0, p90ChangeGapPct: 0,
+        mixChurn: 0, viable: i < viableRegions,
+      })),
+    };
+  }
+
+  it('takes a high-volume item whose regions really differ', () => {
+    const picked = shortlist([crop('柿子', 2906, 48.7, 2)]);
+    expect(picked.map((p) => p.crop.name)).toEqual(['柿子']);
+    expect(picked[0].regions).toEqual(['北', '中']);
+  });
+
+  it('drops an item whose spread only restates the nationwide price', () => {
+    // 紅蘿蔔 at 12.5% was the run's clearest case: real, and not worth a row.
+    expect(shortlist([crop('紅蘿蔔', 2655, 12.5, 2)])).toEqual([]);
+    expect(shortlist([crop('邊界', 2655, SHORTLIST_MIN_SPREAD, 2)])).toHaveLength(1);
+  });
+
+  it('drops an item with only one viable region, which is not a comparison', () => {
+    expect(shortlist([crop('葡萄', 1554, 38.5, 1)])).toEqual([]);
+  });
+
+  it('drops the tail, where a spread is a grade difference rather than a region', () => {
+    // 玉米筍 reported a 113.9% median on under 500 tonnes. Ranking by VOLUME is
+    // what keeps it out — ranking by spread would select it first.
+    const board = [
+      ...Array.from({ length: SHORTLIST_TOP_VOLUME }, (_, i) => crop(`大量${i}`, 10000 - i, 35, 2)),
+      crop('玉米筍', 473, 113.9, 2),
+    ];
+    const names = shortlist(board).map((p) => p.crop.name);
+    expect(names).toHaveLength(SHORTLIST_TOP_VOLUME);
+    expect(names).not.toContain('玉米筍');
+  });
+
+  it('returns them in volume order, not spread order', () => {
+    const picked = shortlist([crop('小量', 100, 90, 2), crop('大量', 9000, 31, 2)]);
+    expect(picked.map((p) => p.crop.name)).toEqual(['大量', '小量']);
+  });
+
+  it('says nothing is worth a row when nothing qualifies', () => {
+    expect(shortlist([crop('紅蘿蔔', 2655, 12.5, 2)])).toEqual([]);
+    expect(shortlist([])).toEqual([]);
   });
 });

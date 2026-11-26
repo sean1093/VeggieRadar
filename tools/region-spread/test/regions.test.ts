@@ -8,6 +8,14 @@ import { describe, it, expect } from 'vitest';
 import { regionOf, normalizeMarket, REGION_BY_MARKET, REGIONS } from '../src/regions.ts';
 
 describe('regionOf', () => {
+  it('resolves the two names a real run reported as unmapped', () => {
+    // The first live run (2026-09-27 → 10-26) surfaced exactly these: the table
+    // had `三重`/`三重市` but the feed says `三重區`, and `桃農` — MOA's short
+    // name for the 桃園 market — was not in it at all.
+    expect(regionOf('三重區')).toBe('北');
+    expect(regionOf('桃農')).toBe('北');
+  });
+
   it('resolves the market names the committed MOA fixture proves', () => {
     // tools/calibrate/fixtures/moa-sample.json contains exactly these three.
     expect(regionOf('台北一')).toBe('北');

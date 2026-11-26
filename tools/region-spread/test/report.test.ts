@@ -104,6 +104,14 @@ describe('renderReport', () => {
     expect(md).toContain('| 高麗菜 | 2 | 0 | — | — |');
   });
 
+  it('prints a dash, not 0%, for the coverage of a region that never traded', () => {
+    // `quantile([], 0.5)` is 0, so an unfiltered median would print 0.0% for a
+    // region with no days at all — the same misreading the change-gap row was
+    // fixed for. 全期覆蓋 keeps its true zeros, because the user does fall back.
+    const md = render(NORTH_AND_CENTRAL);
+    expect(md).toContain('| 東 | 0 / 1 | 1 | 0.0% | — | 0.0% |');
+  });
+
   it('prints a dash, not 0%, for a region nothing qualified in', () => {
     const md = render(NORTH_AND_CENTRAL);
     // 東 has no trade at all: a 0.0% change gap would read as "tracks the
